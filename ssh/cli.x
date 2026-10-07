@@ -17,6 +17,7 @@
 (module ssh/cli)
 
 (import x/sys/opts Opts)
+(import x/sys/file File)
 
 (def %byte-len (prim-ref (lit str) (lit byte-len)))
 

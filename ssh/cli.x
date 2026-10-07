@@ -42,14 +42,16 @@
 
 (def %ssh-multi
   (fn (_)
-    (Str8 append "x-ssh multi-purpose v"
-      (Str8 append ssh-version
-        (Str8 append "\nRun 'x -l ssh -- <command>' with one of the following commands.\n"
-          (Str8 append "'dropbear' - the server\n"
-            (Str8 append "'dbclient' or 'ssh' - the client\n"
-              (Str8 append "'dropbearkey' or 'ssh-keygen' - the key generator\n"
-                (Str8 append "'dropbearconvert' - the key converter\n"
-                  "'scp' - secure copy\n")))))))))
+    (Str8 join "\n"
+      (list
+        (Str8 append "x-ssh multi-purpose v" ssh-version)
+        "Run 'x -l ssh -- <command>' with one of the following commands."
+        "'dropbear' - the server"
+        "'dbclient' or 'ssh' - the client"
+        "'dropbearkey' or 'ssh-keygen' - the key generator"
+        "'dropbearconvert' - the key converter"
+        "'scp' - secure copy"
+        ""))))
 
 ; A line to (PROGRAM TEXT STATUS): the program it names (() for none), what
 ; to print on standard error, and the exit status.  Dropbear prints its
@@ -60,7 +62,7 @@
     (match
       ((null? prog) (list () (%ssh-multi) 1))
       ((if (pair? (rest ops)) (str=? (first (rest ops)) "-V") #f)
-        (list prog (Str8 append "x-ssh v" (Str8 append ssh-version "\n")) 0))
+        (list prog (Str8 append "x-ssh v" ssh-version "\n") 0))
       (#t
         (list prog (Str8 append (first ops) ": not served yet\n") 1)))))
 

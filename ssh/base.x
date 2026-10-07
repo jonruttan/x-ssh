@@ -11,7 +11,7 @@
 ; through those names at run time, so the order below is only the order of
 ; loading.
 
-(provide ssh/base ssh-version ssh-main ssh-argv ssh-plan ssh-program)
+(provide ssh/base ssh-version ssh-main ssh-argv ssh-programs ssh-program ssh-plan)
 
 (def ssh-version "0.1.0")
 

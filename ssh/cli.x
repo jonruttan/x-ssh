@@ -8,10 +8,15 @@
 ;
 ; x -l ssh -- PROGRAM [ARGS] runs PROGRAM, as `dropbearmulti PROGRAM ARGS`
 ; does: the server, the client, the key generator, the key converter or
-; scp, each by Dropbear's names.  ssh-plan turns a line into what to do,
-; with no side effects; ssh-main does it.
+; scp, each by Dropbear's names.  Each program's options are declared once,
+; in ssh-programs: the declaration is what --help prints and what its line
+; is parsed against.  ssh-plan turns a line into what to do, with no side
+; effects; ssh-main does it.  Like Dropbear, everything goes to standard
+; error.
 
-(provide ssh/cli ssh-argv ssh-plan ssh-program ssh-main)
+(import x/sys/opts)
+
+(provide ssh/cli ssh-argv ssh-programs ssh-program ssh-plan ssh-main)
 
 (def %ssh-byte-len (prim-ref (lit str) (lit byte-len)))
 
@@ -29,42 +34,60 @@
         (if (pair? raw) (rest raw) ())))
     (if (if (pair? ops) (str=? (first ops) "--") #f) (rest ops) ops)))
 
-; Dropbear's program names, each to the program it runs; () for any other.
+(def %ssh-version-row (Opts flag "-V" "Print the version"))
+
+; One row a program: (LABEL NAMES WHAT DECLARATION) -- the names Dropbear
+; answers to, the first the one it lists, and what the program is.
+(def %ssh-row
+  (fn (_ label names what synopsis rows)
+    (list label names what (Opts declare (first names) synopsis () rows))))
+
+(def ssh-programs
+  (list
+    (%ssh-row (lit server) (list "dropbear") "the server" "[options]"
+      (list %ssh-version-row))
+    (%ssh-row (lit client) (list "dbclient" "ssh") "the client"
+      "[options] [user@]host[/port] [command]" (list %ssh-version-row))
+    (%ssh-row (lit keygen) (list "dropbearkey" "ssh-keygen") "the key generator"
+      "-t type -f filename [-s bits]" ())
+    (%ssh-row (lit convert) (list "dropbearconvert") "the key converter"
+      "<inputtype> <outputtype> <inputfile> <outputfile>" ())
+    (%ssh-row (lit scp) (list "scp") "secure copy" "[options] source ... target" ())))
+
+; The program row a name answers to, or ().
 (def ssh-program
   (fn (_ name)
-    (match
-      ((str=? name "dropbear") (lit server))
-      ((if (str=? name "dbclient") #t (str=? name "ssh")) (lit client))
-      ((if (str=? name "dropbearkey") #t (str=? name "ssh-keygen")) (lit keygen))
-      ((str=? name "dropbearconvert") (lit convert))
-      ((str=? name "scp") (lit scp))
-      (#t ()))))
+    (List find (fn (_ p) (List any? (fn (_ n) (str=? n name)) (first (rest p))))
+      ssh-programs)))
 
 (def %ssh-multi
   (fn (_)
     (Str8 join "\n"
-      (list
-        (Str8 append "x-ssh multi-purpose v" ssh-version)
-        "Run 'x -l ssh -- <command>' with one of the following commands."
-        "'dropbear' - the server"
-        "'dbclient' or 'ssh' - the client"
-        "'dropbearkey' or 'ssh-keygen' - the key generator"
-        "'dropbearconvert' - the key converter"
-        "'scp' - secure copy"
-        ""))))
+      (List append
+        (list (Str8 append "x-ssh multi-purpose v" ssh-version)
+              "Run 'x -l ssh -- <command>' with one of the following commands.")
+        (List map
+          (fn (_ p)
+            (Str8 append
+              (Str8 join " or " (List map (fn (_ n) (Str8 append "'" n "'")) (first (rest p))))
+              " - " (first (rest (rest p)))))
+          ssh-programs)
+        (list "")))))
 
-; A line to (PROGRAM TEXT STATUS): the program it names (() for none), what
-; to print on standard error, and the exit status.  Dropbear prints its
-; version and the multi-purpose list on standard error too.
+; A line to (PROGRAM TEXT STATUS): the program's label (() for none), what
+; to print, and the exit status.
 (def ssh-plan
   (fn (_ ops)
-    (def prog (if (null? ops) () (ssh-program (first ops))))
+    (def p (if (null? ops) () (ssh-program (first ops))))
+    (def decl (if (null? p) () (first (rest (rest (rest p))))))
+    (def o (if (null? p) () (Opts parse decl (rest ops))))
     (match
-      ((null? prog) (list () (%ssh-multi) 1))
-      ((if (pair? (rest ops)) (str=? (first (rest ops)) "-V") #f)
-        (list prog (Str8 append "x-ssh v" ssh-version "\n") 0))
-      (#t
-        (list prog (Str8 append (first ops) ": not served yet\n") 1)))))
+      ((null? p) (list () (%ssh-multi) 1))
+      ((Opts help? decl (rest ops)) (list (first p) (Opts usage decl) 0))
+      ((not (null? (Opts unknown o)))
+        (list (first p) (Str8 append "Invalid option " (Opts unknown o) "\n" (Opts usage decl)) 1))
+      ((Opts on? o "-V") (list (first p) (Str8 append "x-ssh v" ssh-version "\n") 0))
+      (#t (list (first p) (Str8 append (first ops) ": not served yet\n") 1)))))
 
 (def ssh-main
   (fn (_ raw)

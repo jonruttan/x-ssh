@@ -14,13 +14,13 @@
 ; effects; ssh-main does it.  Like Dropbear, everything goes to standard
 ; error.
 
-(import x/sys/opts)
+(module ssh/cli)
 
-(provide ssh/cli ssh-argv ssh-programs ssh-program ssh-plan ssh-main)
+(import x/sys/opts Opts)
 
-(def %ssh-byte-len (prim-ref (lit str) (lit byte-len)))
+(def %byte-len (prim-ref (lit str) (lit byte-len)))
 
-(def %ssh-engine-flag?
+(def %engine-flag?
   (fn (_ s)
     (if (str=? s "--batch") #t
       (if (str=? s "--no-color") #t (str=? s "--verbose")))))
@@ -30,29 +30,29 @@
 (def ssh-argv
   (fn (_ raw)
     (def ops
-      (List filter (fn (_ a) (not (%ssh-engine-flag? a)))
+      (List filter (fn (_ a) (not (%engine-flag? a)))
         (if (pair? raw) (rest raw) ())))
     (if (if (pair? ops) (str=? (first ops) "--") #f) (rest ops) ops)))
 
-(def %ssh-version-row (Opts flag "-V" "Print the version"))
+(def %version-row (Opts flag "-V" "Print the version"))
 
 ; One row a program: (LABEL NAMES WHAT DECLARATION) -- the names Dropbear
 ; answers to, the first the one it lists, and what the program is.
-(def %ssh-row
+(def %row
   (fn (_ label names what synopsis rows)
     (list label names what (Opts declare (first names) synopsis () rows))))
 
 (def ssh-programs
   (list
-    (%ssh-row (lit server) (list "dropbear") "the server" "[options]"
-      (list %ssh-version-row))
-    (%ssh-row (lit client) (list "dbclient" "ssh") "the client"
-      "[options] [user@]host[/port] [command]" (list %ssh-version-row))
-    (%ssh-row (lit keygen) (list "dropbearkey" "ssh-keygen") "the key generator"
+    (%row (lit server) (list "dropbear") "the server" "[options]"
+      (list %version-row))
+    (%row (lit client) (list "dbclient" "ssh") "the client"
+      "[options] [user@]host[/port] [command]" (list %version-row))
+    (%row (lit keygen) (list "dropbearkey" "ssh-keygen") "the key generator"
       "-t type -f filename [-s bits]" ())
-    (%ssh-row (lit convert) (list "dropbearconvert") "the key converter"
+    (%row (lit convert) (list "dropbearconvert") "the key converter"
       "<inputtype> <outputtype> <inputfile> <outputfile>" ())
-    (%ssh-row (lit scp) (list "scp") "secure copy" "[options] source ... target" ())))
+    (%row (lit scp) (list "scp") "secure copy" "[options] source ... target" ())))
 
 ; The program row a name answers to, or ().
 (def ssh-program
@@ -60,7 +60,7 @@
     (List find (fn (_ p) (List any? (fn (_ n) (str=? n name)) (first (rest p))))
       ssh-programs)))
 
-(def %ssh-multi
+(def %multi
   (fn (_)
     (Str8 join "\n"
       (List append
@@ -82,7 +82,7 @@
     (def decl (if (null? p) () (first (rest (rest (rest p))))))
     (def o (if (null? p) () (Opts parse decl (rest ops))))
     (match
-      ((null? p) (list () (%ssh-multi) 1))
+      ((null? p) (list () (%multi) 1))
       ((Opts help? decl (rest ops)) (list (first p) (Opts usage decl) 0))
       ((not (null? (Opts unknown o)))
         (list (first p) (Str8 append "Invalid option " (Opts unknown o) "\n" (Opts usage decl)) 1))
@@ -93,5 +93,7 @@
   (fn (_ raw)
     (def plan (ssh-plan (ssh-argv raw)))
     (def text (first (rest plan)))
-    (File write 2 text (%ssh-byte-len text))
+    (File write 2 text (%byte-len text))
     (Sys exit (first (rest (rest plan))))))
+
+(provide ssh/cli ssh-argv ssh-programs ssh-program ssh-plan ssh-main)

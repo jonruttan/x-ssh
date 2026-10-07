@@ -1,0 +1,13 @@
+; lang.xon -- what this bundle is.
+
+(lang "ssh")
+
+; Self-contained: this bundle depends on nothing but the platform.
+;
+; Helium, plus exactly the libraries this bundle imports and nothing
+; ambient: a connection is bytes, digests and keys, none of the tower.
+(dialect he)
+
+(requires-release "v0.26.0")
+
+(entry "run.x")

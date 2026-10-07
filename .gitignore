@@ -1,0 +1,5 @@
+tests/lib/
+
+# The suite's harness image (tests/lib/.images) and, where the install
+# writes one, the bundle's own boot image.  Both are facts of a machine.
+.images/

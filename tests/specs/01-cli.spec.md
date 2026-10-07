@@ -88,3 +88,16 @@ Usage: dbclient [options] [user@]host[/port] [command]
 ```
 ---
     ("dbclient" "-V")
+
+## main
+
+### what main writes and exits through is bound in its module
+
+main exits the process, so a spec cannot call it; this holds the names it
+reaches for, from inside the module, as main sees them.
+
+```ssh
+(write (List map (fn (_ s) (not (null? (eval s (module ssh/cli))))) (list (lit File) (lit Sys))))
+```
+---
+    (#t #t)

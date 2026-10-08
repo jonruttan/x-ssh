@@ -22,20 +22,6 @@
 
 (def %byte-len (prim-ref (lit str) (lit byte-len)))
 
-(def %engine-flag?
-  (fn (_ s)
-    (if (str=? s "--batch") #t
-      (if (str=? s "--no-color") #t (str=? s "--verbose")))))
-
-; The operands the launcher hands the entry: its own flags dropped, and the
-; "--" that ends x's options.
-(def ssh-argv
-  (fn (_ raw)
-    (def ops
-      (List filter (fn (_ a) (not (%engine-flag? a)))
-        (if (pair? raw) (rest raw) ())))
-    (if (if (pair? ops) (str=? (first ops) "--") #f) (rest ops) ops)))
-
 (def %version-row (Opts flag "-V" "Print the version"))
 
 ; One row a program: (LABEL NAMES WHAT DECLARATION) -- the names Dropbear
@@ -127,8 +113,8 @@
 
 ; A plan done: text to standard error and the status, or the client run.
 (def ssh-main
-  (fn (_ raw)
-    (def plan (ssh-plan (ssh-argv raw)))
+  (fn (_ ops)
+    (def plan (ssh-plan ops))
     (def what (first (rest plan)))
     (if (pair? what)
       (Sys exit (ssh-client-run (List ref 1 what) (List ref 2 what) (List ref 3 what)
@@ -136,4 +122,4 @@
       (do (File write 2 what (%byte-len what))
           (Sys exit (first (rest (rest plan))))))))
 
-(provide ssh/cli ssh-argv ssh-programs ssh-program ssh-plan ssh-main)
+(provide ssh/cli ssh-programs ssh-program ssh-plan ssh-main)

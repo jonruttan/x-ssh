@@ -84,16 +84,6 @@ Usage: dbclient [options] [user@]host[/port] [command]
 ---
     ('scp "scp: not served yet\n" 1)
 
-## argv
-
-### the launcher's flags and the -- are dropped
-
-```ssh
-(write (ssh-argv (list "run.x" "--batch" "--" "dbclient" "-V")))
-```
----
-    ("dbclient" "-V")
-
 ## main
 
 ### what main writes and exits through is bound in its module

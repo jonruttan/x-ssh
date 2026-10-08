@@ -8,6 +8,6 @@
 ; ambient: a connection is bytes, digests and keys, none of the tower.
 (dialect he)
 
-(requires-release "v0.26.0")
+(requires-release "v0.27.0")
 
 (entry "run.x")

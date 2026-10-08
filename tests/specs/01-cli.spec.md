@@ -51,7 +51,12 @@ Run 'x -l ssh -- <command>' with one of the following commands.
 ```output
 Usage: dbclient [options] [user@]host[/port] [command]
 
-	-V	Print the version
+	-p port		Remote port
+	-i keyfile	The ssh-ed25519 key to authenticate with (OpenSSH format)
+	-l user		The user to log in as
+	-y		Accept the host key without asking
+	-v		Trace the connection on standard error
+	-V		Print the version
 ```
 
 ### -V names the version, status 0
@@ -78,16 +83,6 @@ Usage: dbclient [options] [user@]host[/port] [command]
 ```
 ---
     ('scp "scp: not served yet\n" 1)
-
-## argv
-
-### the launcher's flags and the -- are dropped
-
-```ssh
-(write (ssh-argv (list "run.x" "--batch" "--" "dbclient" "-V")))
-```
----
-    ("dbclient" "-V")
 
 ## main
 

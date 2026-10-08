@@ -13,5 +13,6 @@
 (set! %lang-version ssh-version)
 (set! %repl-prompt "ssh> ")
 
-(unless (null? (ssh-argv args))
-  (ssh-main args))
+; The operands: what follows the "--" after the launcher's own options.
+(let ((ops (rest (Sys args (lit program)))))
+  (unless (null? ops) (ssh-main ops)))

@@ -11,8 +11,8 @@
 ; file stays unscoped, so those imports bind in the root, where run.x and
 ; the spec harness reach them; the exports carry the ssh- prefix for that.
 
-(provide ssh/base ssh-version ssh-main ssh-argv ssh-programs ssh-program ssh-plan)
+(provide ssh/base ssh-version ssh-main ssh-programs ssh-program ssh-plan)
 
 (def ssh-version "0.1.0")
 
-(import ssh/cli ssh-argv ssh-programs ssh-program ssh-plan ssh-main)
+(import ssh/cli ssh-programs ssh-program ssh-plan ssh-main)

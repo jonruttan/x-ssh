@@ -16,14 +16,21 @@
 
 (import x/sys/socket)
 (import x/sys/file)
+(import x/sys/posix)
 (import ssh/bytes ssh-copy)
-(import ssh/transport ssh-open ssh-exchange-versions! ssh-kex! ssh-auth-publickey!)
+(import ssh/transport ssh-open ssh-engines! ssh-exchange-versions! ssh-kex! ssh-auth-publickey!)
 (import ssh/session ssh-exec! ssh-disconnect!)
 (import ssh/keys ssh-seed-of-key-file)
 
 (def %byte-len (prim-ref (lit str) (lit byte-len)))
 
 (def %say (fn (_ fd text) (File write fd text (%byte-len text))))
+
+; The process's CPU time in milliseconds, as text: what -v stamps each
+; trace line with.
+(def %ms
+  (fn (_)
+    ((prim-ref (lit convert) (lit to)) (/ (Sys clock) 1000) (Type named STRING) 10)))
 
 ; A dotted address for a name: what the resolver says, or the name when
 ; it already is one.
@@ -35,9 +42,11 @@
 ; The command run; its exit status, or 255 when the connection failed.
 (def ssh-client-run
   (fn (_ host port user keyfile command trace)
+    (def tr (if trace (fn (_ t) (%say 2 (Str8 append "x-ssh: " (%ms) " ms " t "\n"))) ()))
     (def seed (ssh-seed-of-key-file keyfile))
     (def fd (Socket tcp-connect (%address host) port))
-    (def c (ssh-open fd (if trace (fn (_ t) (%say 2 (Str8 append "x-ssh: " t "\n"))) ())))
+    (def c (ssh-open fd tr))
+    (ssh-engines! c)
     (ssh-exchange-versions! c)
     (ssh-kex! c)
     (def ok (ssh-auth-publickey! c user seed))
@@ -45,12 +54,16 @@
       (do (%say 2 (Str8 append "x-ssh: authentication failed; the server offers " (Str8 join "," ok) "\n"))
           (Socket close fd)
           255)
-      (do (def status
+      (do (unless (null? tr) (tr (Str8 append "authenticated as " user)))
+          (def status
             (ssh-exec! c command
               (fn (_ buf start len) (File write 1 (ssh-copy buf start len) len))
               (fn (_ buf start len) (File write 2 (ssh-copy buf start len) len))))
           (ssh-disconnect! c)
           (Socket close fd)
-          (if (null? status) 0 status)))))
+          (def code (if (null? status) 0 status))
+          (unless (null? tr)
+            (tr (Str8 append "exit status " ((prim-ref (lit convert) (lit to)) code (Type named STRING) 10))))
+          code))))
 
 (provide ssh/client ssh-client-run)

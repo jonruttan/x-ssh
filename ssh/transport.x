@@ -86,6 +86,17 @@
 (def %trace
   (fn (_ c text) (unless (null? (%slot c 10)) ((%slot c 10) text))))
 
+; The compiled engines of the exchange's curves, asked for once a
+; process: the key exchange's X25519 and the signatures' Ed25519.  A
+; build costs less than one pure-x exchange or signature, and a host
+; without the JIT answers #f and carries on pure-x, identically.
+(def ssh-engines!
+  (fn (_ c)
+    (def x (X25519 jit!))
+    (def e (Ed25519 jit!))
+    (%trace c (Str8 append "engines x25519 " (if x "compiled" "pure-x") " ed25519 " (if e "compiled" "pure-x")))
+    (and x e)))
+
 ; n random bytes, from the system's source.
 (def ssh-random
   (fn (_ n)
@@ -459,6 +470,6 @@
                (ssh-get-names in)))
          (#t (Err raise 'value "ssh: an unexpected answer to authentication" ())))))))
 
-(provide ssh/transport ssh-version-string ssh-open ssh-fd ssh-session-id ssh-host-key ssh-random
+(provide ssh/transport ssh-version-string ssh-open ssh-fd ssh-session-id ssh-host-key ssh-random ssh-engines!
   ssh-exchange-versions! ssh-send-packet! ssh-recv-packet! ssh-next-packet! ssh-expect! ssh-kex! ssh-auth-publickey!
   ssh-msg-disconnect ssh-msg-global-request ssh-msg-request-failure)

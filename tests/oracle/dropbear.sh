@@ -8,7 +8,8 @@
 # ssh-ed25519 user key (ssh-keygen), its public half as authorized_keys.
 # A non-root Dropbear is started on 127.0.0.1:PORT for the run, x-ssh runs
 # `echo hi from x-ssh; exit 3` through it, and the output and the status
-# are checked.  Dropbear is the oracle; this is the live test the specs
+# are checked, the client's -v trace printed after: CPU milliseconds at
+# each step.  Dropbear is the oracle; this is the live test the specs
 # cannot replay, since every exchange has fresh ephemeral keys.
 set -u
 db=${1:?a built Dropbear directory}
@@ -23,10 +24,11 @@ cp "$fx/userkey.pub" "$fx/authorized_keys"
 "$db/dropbear" -D "$fx" -p "127.0.0.1:$port" -r "$fx/hostkey" -F -s > "$fx/dropbear.log" 2>&1 &
 dbpid=$!
 sleep 1
-out=$("$X" -l ssh -- dbclient -p "$port" -i "$fx/userkey" -l "$(id -un)" 127.0.0.1 'echo hi from x-ssh; exit 3' 2> "$fx/client.err")
+out=$("$X" -l ssh -- dbclient -v -p "$port" -i "$fx/userkey" -l "$(id -un)" 127.0.0.1 'echo hi from x-ssh; exit 3' 2> "$fx/client.err")
 status=$?
 if [ "$out" = "hi from x-ssh" ] && [ "$status" = 3 ]; then
   echo "ok: output and exit status through Dropbear"
+  cat "$fx/client.err"
   exit 0
 fi
 echo "FAIL: output '$out' status $status" >&2

@@ -19,6 +19,7 @@
 
 (import x/sys/file)
 (import x/codec/base64)
+(import x/codec/ed25519)
 (import ssh/bytes ssh-in ssh-get-uint32 ssh-get-string ssh-get-bytes ssh-get-text ssh-copy)
 
 (def %oref (prim-ref (lit obj) (lit ref)))
@@ -96,4 +97,14 @@
       (ssh-seed-of-key-text (ssh-copy (first r) 0 (rest r)))
       (first (ssh-key-of-dropbear-bytes (first r) (rest r))))))
 
-(provide ssh/keys ssh-seed-of-key-text ssh-seed-of-key-file ssh-key-of-dropbear-bytes)
+; A key file's two halves, (SEED . PUB), in either format: Dropbear's
+; holds both, OpenSSH's seed makes its public half.
+(def ssh-key-of-file
+  (fn (_ path)
+    (def r (%file-bytes path))
+    (if (if (>= (rest r) 5) (str=? (Str8 sub 0 5 (first r)) "-----") #f)
+      (do (def seed (ssh-seed-of-key-text (ssh-copy (first r) 0 (rest r))))
+          (pair seed (Ed25519 public seed)))
+      (ssh-key-of-dropbear-bytes (first r) (rest r)))))
+
+(provide ssh/keys ssh-seed-of-key-text ssh-seed-of-key-file ssh-key-of-dropbear-bytes ssh-key-of-file)

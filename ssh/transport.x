@@ -1,6 +1,6 @@
 ; # x-ssh -- SSH on x-lang, after Dropbear
 ;
-; ## ssh/transport.x -- the transport layer, as the client sees it
+; ## ssh/transport.x -- the transport layer, from either end
 ;
 ; @author [Jon Ruttan](jonruttan@gmail.com)
 ; @copyright 2026 Jon Ruttan
@@ -15,9 +15,12 @@
 ; under the second, the payload under the first from block one, the
 ; Poly1305 key from block zero, the packet's sequence number the nonce.
 ;
+; Both ends are here: the client's key exchange and authentication, and
+; the server's key exchange, the rest of the server being ssh/server.x.
 ; A connection is a vector: the socket, the bytes received and not yet
-; read, the two sequence numbers, the two keys once there are any, the
-; session id, and the server's version string and host key.
+; read, the two sequence numbers, the key we send under and the key we
+; receive under once there are any, the session id, and the peer's
+; version string and host key.
 
 (module ssh/transport)
 
@@ -63,8 +66,8 @@
 ; --- the connection record ------------------------------------------------
 ;
 ; slots: 1 fd | 2 pending bytes (BUF . LEN) | 3 send seq | 4 recv seq
-;        5 c2s key (64 bytes) or () | 6 s2c key or () | 7 session id
-;        8 server version | 9 host key bytes (32) | 10 the trace fn or ()
+;        5 send key (64 bytes) or () | 6 receive key or () | 7 session id
+;        8 peer's version | 9 server's host key (32) | 10 the trace fn or ()
 
 (def %slot (fn (_ c i) (%oref c i)))
 (def %slot! (fn (_ c i v) (%oset! c i v)))
@@ -88,7 +91,7 @@
 (def ssh-pending?
   (fn (_ c) (> (rest (%slot c 2)) 0)))
 
-(def %trace
+(def ssh-trace
   (fn (_ c text) (unless (null? (%slot c 10)) ((%slot c 10) text))))
 
 ; The compiled engines of the exchange's curves, asked for once a
@@ -99,7 +102,7 @@
   (fn (_ c)
     (def x (X25519 jit!))
     (def e (Ed25519 jit!))
-    (%trace c (Str8 append "engines x25519 " (if x "compiled" "pure-x") " ed25519 " (if e "compiled" "pure-x")))
+    (ssh-trace c (Str8 append "engines x25519 " (if x "compiled" "pure-x") " ed25519 " (if e "compiled" "pure-x")))
     (and x e)))
 
 ; n random bytes, from the system's source.
@@ -149,7 +152,7 @@
          (def l (%line! c))
          (if (%prefix? "SSH-" l) l (self)))))
     (%slot! c 8 line)
-    (%trace c (Str8 append "server version " line))
+    (ssh-trace c (Str8 append "server version " line))
     (unless (%prefix? "SSH-2.0-" line)
       (Err raise 'value (Str8 append "ssh: not an SSH 2.0 server: " line) ()))
     line))
@@ -260,7 +263,7 @@
         (do (def in (ssh-in (first p) 1 (- (rest p) 1)))
             (def name (ssh-get-text in))
             (def want-reply (ssh-get-bool in))
-            (%trace c (Str8 append "global request " name))
+            (ssh-trace c (Str8 append "global request " name))
             (when want-reply
               (do (def out (ssh-out))
                   (ssh-put-byte out ssh-msg-request-failure)
@@ -306,27 +309,41 @@
     (ssh-put-uint32 out 0)
     (ssh-out-run out)))
 
-; The first of ours the server lists too, or ().
+; The algorithm agreed (7.1): the first of the client's list that the
+; server lists too, or ().
 (def %agree
-  (fn (_ ours theirs)
-    (List find (fn (_ n) (List any? (fn (_ m) (str=? m n)) theirs)) ours)))
+  (fn (_ client server)
+    (List find (fn (_ n) (List any? (fn (_ m) (str=? m n)) server)) client)))
 
-; The server's KEXINIT read: each list must share a name with ours.
+; The peer's KEXINIT read: each list must share a name with ours.  The
+; client's list leads, whichever side reads it.  Answers (WRONG-GUESS .
+; CHOSEN): whether a guessed packet that must be discarded follows, and
+; the kex, host key and two cipher names agreed.
 (def %read-kexinit
-  (fn (_ c p)
+  (fn (_ c p server?)
     (def in (ssh-in (first p) 17 (- (rest p) 17)))
     (def kex (ssh-get-names in))
     (def hk (ssh-get-names in))
     (def c2s (ssh-get-names in)) (def s2c (ssh-get-names in))
     (def m1 (ssh-get-names in)) (def m2 (ssh-get-names in))
     (def z1 (ssh-get-names in)) (def z2 (ssh-get-names in))
-    (def chosen (list (%agree %kex-names kex) (%agree %hostkey-names hk)
-                      (%agree %cipher-names c2s) (%agree %cipher-names s2c)))
+    (def pick (fn (_ ours theirs) (if server? (%agree theirs ours) (%agree ours theirs))))
+    (def chosen (list (pick %kex-names kex) (pick %hostkey-names hk)
+                      (pick %cipher-names c2s) (pick %cipher-names s2c)))
     (when (List any? null? chosen)
-      (Err raise 'value "ssh: the server offers none of this client's algorithms" ()))
-    (%trace c (Str8 append "kex " (first chosen) " hostkey " (first (rest chosen))
+      (Err raise 'value "ssh: the peer offers none of our algorithms" ()))
+    (ssh-trace c (Str8 append "kex " (first chosen) " hostkey " (first (rest chosen))
                           " cipher " (first (rest (rest chosen)))))
-    chosen))
+    ; the languages, then whether a guessed key exchange packet follows
+    ; (7.1): a guess is wrong when the client's first kex or host key
+    ; algorithm is not the one agreed, and then the packet is discarded
+    (ssh-get-names in) (ssh-get-names in)
+    (def follows (ssh-get-bool in))
+    (def wrong-guess
+      (if follows
+        (if (str=? (first kex) (first chosen)) (not (str=? (first hk) (first (rest chosen)))) #t)
+        #f))
+    (pair wrong-guess chosen)))
 
 ; SHA-256 of what an OUT holds, as 32 bytes.
 (def %sha256-out
@@ -359,7 +376,7 @@
     (def ic (%kexinit))
     (ssh-send-packet! c (first ic) (rest ic))
     (def is (ssh-expect! c ssh-msg-kexinit "KEXINIT"))
-    (%read-kexinit c is)
+    (%read-kexinit c is #f)
     (def k (ssh-random 32))
     (def qc (X25519 base k))
     (def init (ssh-out))
@@ -398,7 +415,7 @@
     (def sig64 (ssh-get-bytes sin))
     (unless (if (str=? stype "ssh-ed25519") (Ed25519 verify hostkey sig64 h 0 32) #f)
       (Err raise 'value "ssh: the host key's signature does not check" ()))
-    (%trace c (Str8 append "host key ssh-ed25519 " (Hex encode hostkey)))
+    (ssh-trace c (Str8 append "host key ssh-ed25519 " (Hex encode hostkey)))
     (%slot! c 9 hostkey)
     (when (null? (%slot c 7)) (%slot! c 7 h))
     (def nk (ssh-out))
@@ -412,7 +429,67 @@
     (def kmp (ssh-out-run kout))
     (%slot! c 5 (%derive kmp h 67 (%slot c 7)))
     (%slot! c 6 (%derive kmp h 68 (%slot c 7)))
-    (%trace c "keys in place")
+    (ssh-trace c "keys in place")
+    c))
+
+; The exchange as the server runs it: KEXINIT both ways, the client's
+; ephemeral key in, ours out with our host key and our signature of the
+; exchange hash, NEWKEYS both ways, and the keys in place -- ours to send
+; the server-to-client key, as the client's is the other.  seed and pub
+; are the host key's halves.
+(def ssh-kex-server!
+  (fn (_ c seed pub)
+    (def is (%kexinit))
+    (ssh-send-packet! c (first is) (rest is))
+    (def ic (ssh-expect! c ssh-msg-kexinit "KEXINIT"))
+    (def agreed (%read-kexinit c ic #t))
+    ; a client that guessed another exchange sent its packet already
+    (when (first agreed) (ssh-next-packet! c))
+    (def init (ssh-expect! c ssh-msg-kex-ecdh-init "KEX_ECDH_INIT"))
+    (def qc (ssh-get-bytes (ssh-in (first init) 1 (- (rest init) 1))))
+    (def k (ssh-random 32))
+    (def qs (X25519 base k))
+    (def shared (X25519 scalarmult k qc))
+    (when (not (List any? (fn (_ i) (not (= (%byte shared i) 0))) (list 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31)))
+      (Err raise 'value "ssh: the shared secret is zero" ()))
+    (def ks (ssh-out))
+    (ssh-put-text ks "ssh-ed25519")
+    (ssh-put-string ks pub 0 32)
+    (def ksr (ssh-out-run ks))
+    ; the exchange hash: the client's version and KEXINIT first
+    (def hin (ssh-out))
+    (ssh-put-text hin (%slot c 8))
+    (ssh-put-text hin ssh-version-string)
+    (ssh-put-string hin (first ic) 0 (rest ic))
+    (ssh-put-string hin (first is) 0 (rest is))
+    (ssh-put-string hin (first ksr) 0 (rest ksr))
+    (ssh-put-string hin qc 0 32)
+    (ssh-put-string hin qs 0 32)
+    (ssh-put-mpint hin shared 0 32)
+    (def h (%sha256-out hin))
+    (def sigb (ssh-out))
+    (ssh-put-text sigb "ssh-ed25519")
+    (ssh-put-string sigb (Ed25519 sign seed h 0 32) 0 64)
+    (def sigr (ssh-out-run sigb))
+    (def reply (ssh-out))
+    (ssh-put-byte reply ssh-msg-kex-ecdh-reply)
+    (ssh-put-string reply (first ksr) 0 (rest ksr))
+    (ssh-put-string reply qs 0 32)
+    (ssh-put-string reply (first sigr) 0 (rest sigr))
+    (def rr (ssh-out-run reply))
+    (ssh-send-packet! c (first rr) (rest rr))
+    (when (null? (%slot c 7)) (%slot! c 7 h))
+    (def nk (ssh-out))
+    (ssh-put-byte nk ssh-msg-newkeys)
+    (def nr (ssh-out-run nk))
+    (ssh-send-packet! c (first nr) (rest nr))
+    (ssh-expect! c ssh-msg-newkeys "NEWKEYS")
+    (def kout (ssh-out))
+    (ssh-put-mpint kout shared 0 32)
+    (def kmp (ssh-out-run kout))
+    (%slot! c 5 (%derive kmp h 68 (%slot c 7)))
+    (%slot! c 6 (%derive kmp h 67 (%slot c 7)))
+    (ssh-trace c "keys in place")
     c))
 
 ; --- authentication (RFC 4252), publickey with ssh-ed25519 ---------------
@@ -468,7 +545,7 @@
          ((= t ssh-msg-userauth-success) #t)
          ((= t ssh-msg-userauth-banner)
            (do (def in (ssh-in (first p) 1 (- (rest p) 1)))
-               (%trace c (Str8 append "banner: " (ssh-get-text in)))
+               (ssh-trace c (Str8 append "banner: " (ssh-get-text in)))
                (self)))
          ((= t ssh-msg-userauth-failure)
            (do (def in (ssh-in (first p) 1 (- (rest p) 1)))
@@ -476,5 +553,6 @@
          (#t (Err raise 'value "ssh: an unexpected answer to authentication" ())))))))
 
 (provide ssh/transport ssh-version-string ssh-open ssh-fd ssh-session-id ssh-host-key ssh-pending? ssh-random ssh-engines!
-  ssh-exchange-versions! ssh-send-packet! ssh-recv-packet! ssh-next-packet! ssh-expect! ssh-kex! ssh-auth-publickey!
-  ssh-msg-disconnect ssh-msg-global-request ssh-msg-request-failure)
+  ssh-exchange-versions! ssh-send-packet! ssh-recv-packet! ssh-next-packet! ssh-expect! ssh-kex! ssh-kex-server! ssh-auth-publickey!
+  ssh-msg-disconnect ssh-msg-global-request ssh-msg-request-failure ssh-msg-service-request ssh-msg-service-accept
+  ssh-msg-userauth-request ssh-msg-userauth-failure ssh-msg-userauth-success ssh-trace)

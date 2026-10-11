@@ -16,6 +16,9 @@
 #           Dropbear's 24 KB window, through `cksum` on the far side
 #   hosts   without -y, a host not in known_hosts and a host whose key
 #           has changed are refused, status 255, before authentication
+#   keys    a key x-ssh's dropbearkey makes is read by Dropbear's with
+#           the same fingerprint, x-ssh shows Dropbear's key as it does,
+#           and the made key, in Dropbear's format, authenticates the client
 #   git     `git clone` of a repository behind the Dropbear, with x-ssh
 #           as git's ssh: the clone's HEAD and its fsck
 #
@@ -86,6 +89,35 @@ if [ "$got" = "$want" ]; then
 	echo "ok: input -- 200000 bytes of standard input arrive whole ($want)"
 else
 	fail "input: the far side's cksum '$got', the near side's '$want'"
+fi
+
+# keys: a key x-ssh makes is one Dropbear reads, with the fingerprint
+# x-ssh printed; x-ssh shows Dropbear's own key as dropbearkey -y does;
+# and the key it made authenticates its client, read in Dropbear's format
+"$X" -l ssh -- dropbearkey -t ed25519 -f "$fx/xkey" > "$fx/xkey.out" 2> "$fx/client.err"
+status=$?
+ours=$(tail -1 "$fx/xkey.out")
+theirs=$("$db/dropbearkey" -y -f "$fx/xkey" 2>> "$fx/client.err" | tail -1)
+publine=$(cut -d' ' -f1-2 "$fx/xkey.pub" 2>/dev/null)
+theirline=$("$db/dropbearkey" -y -f "$fx/xkey" 2>/dev/null | sed -n 2p | cut -d' ' -f1-2)
+if [ "$status" = 0 ] && [ -n "$ours" ] && [ "$ours" = "$theirs" ] && [ "$publine" = "$theirline" ]; then
+	echo "ok: keys -- dropbearkey reads the key x-ssh made: $theirs"
+else
+	fail "keys: status $status, x-ssh '$ours', dropbearkey '$theirs', .pub '$publine'"
+fi
+ours=$("$X" -l ssh -- dropbearkey -y -f "$fx/hostkey" 2> "$fx/client.err" | sed -n '2p;3p' | cut -d' ' -f1-2)
+theirs=$("$db/dropbearkey" -y -f "$fx/hostkey" 2>/dev/null | sed -n '2p;3p' | cut -d' ' -f1-2)
+if [ -n "$ours" ] && [ "$ours" = "$theirs" ]; then
+	echo "ok: keys -- x-ssh shows Dropbear's key as dropbearkey -y does"
+else
+	fail "keys: x-ssh shows '$ours', dropbearkey '$theirs'"
+fi
+cat "$fx/xkey.pub" >> "$fx/authorized_keys"
+out=$(HOME="$home" "$X" -l ssh -- dbclient -p "$port" -i "$fx/xkey" -l "$user" 127.0.0.1 'echo made here' < /dev/null 2> "$fx/client.err")
+if [ "$out" = "made here" ]; then
+	echo "ok: keys -- the key x-ssh made authenticates it"
+else
+	fail "keys: a client with the key x-ssh made said '$out'"
 fi
 
 # git

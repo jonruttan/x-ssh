@@ -83,6 +83,11 @@
 (def ssh-session-id (fn (_ c) (%slot c 7)))
 (def ssh-host-key (fn (_ c) (%slot c 9)))
 
+; Whether received bytes are waiting to be read as a packet: a caller
+; that waits on the socket must not, while they are.
+(def ssh-pending?
+  (fn (_ c) (> (rest (%slot c 2)) 0)))
+
 (def %trace
   (fn (_ c text) (unless (null? (%slot c 10)) ((%slot c 10) text))))
 
@@ -470,6 +475,6 @@
                (ssh-get-names in)))
          (#t (Err raise 'value "ssh: an unexpected answer to authentication" ())))))))
 
-(provide ssh/transport ssh-version-string ssh-open ssh-fd ssh-session-id ssh-host-key ssh-random ssh-engines!
+(provide ssh/transport ssh-version-string ssh-open ssh-fd ssh-session-id ssh-host-key ssh-pending? ssh-random ssh-engines!
   ssh-exchange-versions! ssh-send-packet! ssh-recv-packet! ssh-next-packet! ssh-expect! ssh-kex! ssh-auth-publickey!
   ssh-msg-disconnect ssh-msg-global-request ssh-msg-request-failure)

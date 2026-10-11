@@ -8,7 +8,8 @@
 ;
 ; What dbclient does for `dbclient -i key user@host command`: connect,
 ; exchange versions and keys, authenticate with the key, run the
-; command, pass its output through, and leave with its status.  The host
+; command with this process's standard input as its own, pass its output
+; through, and leave with its status.  The host
 ; key is taken as presented and shown: a known_hosts comes later, and
 ; -y says so as dbclient's does.
 
@@ -25,6 +26,11 @@
 (def %byte-len (prim-ref (lit str) (lit byte-len)))
 
 (def %say (fn (_ fd text) (File write fd text (%byte-len text))))
+
+; The caller's standard input.  The platform keeps it on fd 3, fd 0
+; carrying x's own program text; with none, fd 3 is not open, a read of
+; it fails, and the command's input ends at once.
+(def %stdin 3)
 
 ; The process's CPU time in milliseconds, as text: what -v stamps each
 ; trace line with.
@@ -56,7 +62,7 @@
           255)
       (do (unless (null? tr) (tr (Str8 append "authenticated as " user)))
           (def status
-            (ssh-exec! c command
+            (ssh-exec! c command %stdin
               (fn (_ buf start len) (File write 1 (ssh-copy buf start len) len))
               (fn (_ buf start len) (File write 2 (ssh-copy buf start len) len))))
           (ssh-disconnect! c)

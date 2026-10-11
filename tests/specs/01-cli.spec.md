@@ -54,7 +54,7 @@ Usage: dbclient [options] [user@]host[/port] [command]
 	-p port		Remote port
 	-i keyfile	The ssh-ed25519 key to authenticate with (OpenSSH format)
 	-l user		The user to log in as
-	-y		Accept the host key without asking
+	-y		Accept and record the key of a host not in known_hosts
 	-v		Trace the connection on standard error
 	-V		Print the version
 ```

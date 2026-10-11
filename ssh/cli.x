@@ -39,7 +39,7 @@
       (list (Opts arg "-p" "port" "Remote port")
             (Opts arg "-i" "keyfile" "The ssh-ed25519 key to authenticate with (OpenSSH format)")
             (Opts arg "-l" "user" "The user to log in as")
-            (Opts flag "-y" "Accept the host key without asking")
+            (Opts flag "-y" "Accept and record the key of a host not in known_hosts")
             (Opts flag "-v" "Trace the connection on standard error")
             %version-row))
     (%row (lit keygen) (list "dropbearkey" "ssh-keygen") "the key generator"
@@ -86,7 +86,7 @@
       (#t (list (first p) (Str8 append (first ops) ": not served yet\n") 1)))))
 
 ; The client's line as what to do: (client (exec HOST PORT USER KEY COMMAND
-; TRACE) 0), the host operand's [user@]host[/port] split, -l and -p
+; TRACE ACCEPT) 0), the host operand's [user@]host[/port] split, -l and -p
 ; winning over it, the command the operands after it joined by spaces.
 (def %client-plan
   (fn (_ o)
@@ -107,7 +107,7 @@
     (match
       ((null? key) (list (lit client) "x-ssh: -i keyfile is required; no agent or password yet\n" 1))
       ((= (Str8 length command) 0) (list (lit client) "x-ssh: a command is required; no shell yet\n" 1))
-      (#t (list (lit client) (list (lit exec) host port user key command (Opts on? o "-v")) 0)))))
+      (#t (list (lit client) (list (lit exec) host port user key command (Opts on? o "-v") (Opts on? o "-y")) 0)))))
 
 (def %int (fn (_ t) ((prim-ref (lit convert) (lit to)) t (Type named INTEGER) 10)))
 
@@ -118,7 +118,7 @@
     (def what (first (rest plan)))
     (if (pair? what)
       (Sys exit (ssh-client-run (List ref 1 what) (List ref 2 what) (List ref 3 what)
-                                (List ref 4 what) (List ref 5 what) (List ref 6 what)))
+                                (List ref 4 what) (List ref 5 what) (List ref 6 what) (List ref 7 what)))
       (do (File write 2 what (%byte-len what))
           (Sys exit (first (rest (rest plan))))))))
 

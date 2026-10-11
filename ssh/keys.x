@@ -11,7 +11,8 @@
 ; options, uint32 how many keys, string the public blob, string the
 ; private section -- two check ints, string type, string public, string
 ; private (the seed then the public again), string comment, padding.
-; Only an unencrypted ssh-ed25519 key is read: the one ssh-keygen -t
+; And Dropbear's own binary file, below.  Only an unencrypted
+; ssh-ed25519 key is read: the one ssh-keygen -t
 ; ed25519 -N '' writes, and the one a user key for this client is.
 
 (module ssh/keys)
@@ -62,7 +63,37 @@
     (def sk (ssh-get-string pin))
     (ssh-copy (first raw) (first sk) 32)))
 
-(def ssh-seed-of-key-file
-  (fn (_ path) (ssh-seed-of-key-text (File read-all path))))
+; A key file's bytes, NULs and all: (BUF . LEN).  A key file is small;
+; one read of a buffer past any key's size takes it whole.
+(def %file-bytes
+  (fn (_ path)
+    (def fd (File open path (lit rdonly)))
+    (when (< fd 0) (Err raise 'io (Str8 append "ssh: cannot read " path) ()))
+    (def buf (%make-str 16384))
+    (def n (File read fd buf 16384))
+    (File close fd)
+    (when (< n 0) (Err raise 'io (Str8 append "ssh: cannot read " path) ()))
+    (pair buf n)))
 
-(provide ssh/keys ssh-seed-of-key-text ssh-seed-of-key-file)
+; Dropbear's own key file: string "ssh-ed25519", then a string of 64
+; bytes, the 32-byte secret then the 32-byte public key.  Answers
+; (SEED . PUB).
+(def ssh-key-of-dropbear-bytes
+  (fn (_ buf n)
+    (def in (ssh-in buf 0 n))
+    (def ktype (ssh-get-text in))
+    (unless (str=? ktype "ssh-ed25519") (Err raise 'value (Str8 append "ssh: a key of a type not served: " ktype) ()))
+    (def k (ssh-get-string in))
+    (unless (= (rest k) 64) (Err raise 'value "ssh: an ssh-ed25519 key that is not 64 bytes" ()))
+    (pair (ssh-copy buf (first k) 32) (ssh-copy buf (+ (first k) 32) 32))))
+
+; The 32-byte seed of a key file in either format: OpenSSH's is text that
+; begins with its BEGIN line, Dropbear's is binary.
+(def ssh-seed-of-key-file
+  (fn (_ path)
+    (def r (%file-bytes path))
+    (if (if (>= (rest r) 5) (str=? (Str8 sub 0 5 (first r)) "-----") #f)
+      (ssh-seed-of-key-text (ssh-copy (first r) 0 (rest r)))
+      (first (ssh-key-of-dropbear-bytes (first r) (rest r))))))
+
+(provide ssh/keys ssh-seed-of-key-text ssh-seed-of-key-file ssh-key-of-dropbear-bytes)

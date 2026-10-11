@@ -19,6 +19,7 @@
 (import x/sys/opts Opts)
 (import x/sys/file File)
 (import ssh/client ssh-client-run)
+(import ssh/keygen ssh-keygen-generate ssh-keygen-print)
 
 (def %byte-len (prim-ref (lit str) (lit byte-len)))
 
@@ -43,7 +44,12 @@
             (Opts flag "-v" "Trace the connection on standard error")
             %version-row))
     (%row (lit keygen) (list "dropbearkey" "ssh-keygen") "the key generator"
-      "-t type -f filename [-s bits]" ())
+      "-t type -f filename [-s bits]"
+      (list (Opts arg "-t" "type" "Type of key to generate: ed25519")
+            (Opts arg "-f" "filename" "Use filename for the secret key")
+            (Opts arg "-s" "bits" "Key size in bits; ed25519 has a fixed size of 256 bits")
+            (Opts flag "-y" "Just print the public key and fingerprint for the private key in filename")
+            (Opts arg "-C" "comment" "Specify the key comment")))
     (%row (lit convert) (list "dropbearconvert") "the key converter"
       "<inputtype> <outputtype> <inputfile> <outputfile>" ())
     (%row (lit scp) (list "scp") "secure copy" "[options] source ... target" ())))
@@ -83,7 +89,41 @@
       ((Opts on? o "-V") (list (first p) (Str8 append "x-ssh v" ssh-version "\n") 0))
       ((if (eq? (first p) (lit client)) (not (null? (Opts operands o))) #f)
         (%client-plan o))
+      ((eq? (first p) (lit keygen)) (%keygen-plan o decl))
       (#t (list (first p) (Str8 append (first ops) ": not served yet\n") 1)))))
+
+; The key generator's line as what to do, in dropbearkey's order of
+; checks: (keygen (generate FILE COMMENT) 0) or (keygen (print FILE
+; COMMENT) 0), or what it says and its status.  The type defaults to
+; ed25519, as Dropbear's does.
+(def %keygen-plan
+  (fn (_ o decl)
+    (def file (if (Opts on? o "-f") (Opts value o "-f") ()))
+    (def type (if (Opts on? o "-t") (Opts value o "-t") "ed25519"))
+    (def comment (if (Opts on? o "-C") (Opts value o "-C") ()))
+    (def bits (if (Opts on? o "-s") (%int-or-nil (Opts value o "-s")) 256))
+    (match
+      ((null? file) (list (lit keygen) (Str8 append "Must specify a key filename\n" (Opts usage decl)) 1))
+      ((Opts on? o "-y") (list (lit keygen) (list (lit print) file comment) 0))
+      ((List any? (fn (_ t) (str=? t type)) (list "rsa" "dss" "ecdsa"))
+        (list (lit keygen) (Str8 append "x-ssh: key type '" type "' is not served yet\n") 1))
+      ((not (str=? type "ed25519"))
+        (list (lit keygen) (Str8 append "Unknown key type '" type "'\n" (Opts usage decl)) 1))
+      ((null? bits) (list (lit keygen) "Bits must be an integer\n" 1))
+      ((not (= bits 256)) (list (lit keygen) "Ed25519 keys have a fixed size of 256 bits\n" 1))
+      (#t (list (lit keygen) (list (lit generate) file comment) 0)))))
+
+; A decimal's value, or () when the text is not all digits.
+(def %int-or-nil
+  (fn (_ t)
+    (def n (Str8 length t))
+    (def digit?
+      (fn (_ i)
+        (def c ((prim-ref (lit str) (lit byte-ref)) t i))
+        (if (>= c #\0) (<= c #\9) #f)))
+    (if (if (> n 0) ((fn (self i) (if (= i n) #t (if (digit? i) (self (+ i 1)) #f))) 0) #f)
+      (%int t)
+      ())))
 
 ; The client's line as what to do: (client (exec HOST PORT USER KEY COMMAND
 ; TRACE ACCEPT) 0), the host operand's [user@]host[/port] split, -l and -p
@@ -111,14 +151,20 @@
 
 (def %int (fn (_ t) ((prim-ref (lit convert) (lit to)) t (Type named INTEGER) 10)))
 
-; A plan done: text to standard error and the status, or the client run.
+; A plan done: text to standard error and the status, or what it names
+; run -- the client's exec, or the key generator's generate or print.
 (def ssh-main
   (fn (_ ops)
     (def plan (ssh-plan ops))
     (def what (first (rest plan)))
     (if (pair? what)
-      (Sys exit (ssh-client-run (List ref 1 what) (List ref 2 what) (List ref 3 what)
-                                (List ref 4 what) (List ref 5 what) (List ref 6 what) (List ref 7 what)))
+      (Sys exit
+        (match
+          ((eq? (first what) (lit exec))
+            (ssh-client-run (List ref 1 what) (List ref 2 what) (List ref 3 what)
+                            (List ref 4 what) (List ref 5 what) (List ref 6 what) (List ref 7 what)))
+          ((eq? (first what) (lit generate)) (ssh-keygen-generate (List ref 1 what) (List ref 2 what)))
+          (#t (ssh-keygen-print (List ref 1 what) (List ref 2 what)))))
       (do (File write 2 what (%byte-len what))
           (Sys exit (first (rest (rest plan))))))))
 

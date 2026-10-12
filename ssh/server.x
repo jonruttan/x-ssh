@@ -358,7 +358,11 @@
     (X25519 jit!)
     (Ed25519 jit!)
     (def chld (%signal-number "CHLD"))
-    (def lfd (if (null? addr) (Socket tcp-listen port) (Socket tcp-listen-on addr port)))
+    (def lfd
+      (guard (e (do (%log (Str8 append "Failed listening on '" (if (null? addr) "" addr) ":" (%num port)
+                                       "': the address could not be bound"))
+                    (Sys exit 1)))
+        (if (null? addr) (Socket tcp-listen port) (Socket tcp-listen-on addr port))))
     (%log "Not backgrounding")
     (unless (null? chld) (Sys signal chld (Sys sig-ign)))
     ((fn (self)

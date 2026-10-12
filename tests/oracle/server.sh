@@ -26,8 +26,14 @@ db=${1:?a built Dropbear directory}
 port=${2:-22322}
 X=${X:-x}
 fx=$(mktemp -d "${TMPDIR:-/tmp}/x-ssh-server.XXXXXX")
+# The launcher pipes the program into the engine, a child of its own,
+# so the server's pid is a shell's: the whole tree under it goes.
+kill_tree() {
+	for c in $(ps -axo pid,ppid | awk -v p="$1" '$2 == p { print $1 }'); do kill_tree "$c"; done
+	kill "$1" 2>/dev/null
+}
 srvpid=
-trap 'kill $srvpid 2>/dev/null; rm -rf "$fx"' EXIT
+trap 'kill_tree $srvpid; rm -rf "$fx"' EXIT
 "$db/dropbearkey" -t ed25519 -f "$fx/hostkey" > /dev/null 2>&1
 "$db/dropbearkey" -t ed25519 -f "$fx/dbkey" > /dev/null 2>&1
 ssh-keygen -q -t ed25519 -N '' -C x-ssh-server -f "$fx/osshkey"
@@ -45,7 +51,6 @@ while ! grep -q 'Not backgrounding' "$fx/server.log" 2>/dev/null; do
 done
 user=$(id -un)
 # x-ssh's client's home, for its known_hosts
-mkdir -p "$fx/home"
 mkdir -p "$fx/home"
 ossh="ssh -q -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p $port"
 failed=0

@@ -94,16 +94,25 @@
 (def ssh-trace
   (fn (_ c text) (unless (null? (%slot c 10)) ((%slot c 10) text))))
 
-; The compiled engines of the exchange's curves, asked for once a
-; process: the key exchange's X25519 and the signatures' Ed25519.  A
-; build costs less than one pure-x exchange or signature, and a host
-; without the JIT answers #f and carries on pure-x, identically.
+; The compiled engines, asked for once a process: the key exchange's
+; X25519, the signatures' Ed25519, and the packet cipher's ChaCha20 and
+; Poly1305.  The curves' builds cost less than one pure-x exchange or
+; signature.  The cipher builds its own engine at the first region of 8 KB,
+; but Poly1305 only at 48 KB, above any packet: left to itself every
+; packet's tag is pure-x, 6.5M objects and 670 ms a 32 KB packet against
+; 2 ms compiled.  A host without the JIT answers #f and carries on pure-x,
+; identically.  With no connection to trace on, c is ().
 (def ssh-engines!
   (fn (_ c)
     (def x (X25519 jit!))
     (def e (Ed25519 jit!))
-    (ssh-trace c (Str8 append "engines x25519 " (if x "compiled" "pure-x") " ed25519 " (if e "compiled" "pure-x")))
-    (and x e)))
+    (def ch (ChaCha20 jit!))
+    (def p (Poly1305 jit!))
+    (def %state (fn (_ b) (if b "compiled" "pure-x")))
+    (unless (null? c)
+      (ssh-trace c (Str8 append "engines x25519 " (%state x) " ed25519 " (%state e)
+                              " chacha20 " (%state ch) " poly1305 " (%state p))))
+    (and x e ch p)))
 
 ; n random bytes, from the system's source.
 (def ssh-random

@@ -26,13 +26,12 @@
 (import x/codec/base64)
 (import ssh/bytes ssh-out ssh-put-byte ssh-put-bool ssh-put-uint32 ssh-put-text ssh-put-string ssh-put-bytes ssh-put-names ssh-out-run
   ssh-in ssh-in-buf ssh-get-byte ssh-get-bool ssh-get-uint32 ssh-get-string ssh-get-bytes ssh-get-text ssh-copy)
-(import ssh/transport ssh-open ssh-fd ssh-session-id ssh-pending? ssh-exchange-versions! ssh-kex-server!
+(import ssh/transport ssh-open ssh-fd ssh-session-id ssh-pending? ssh-engines! ssh-exchange-versions! ssh-kex-server!
   ssh-send-packet! ssh-next-packet! ssh-expect! ssh-msg-service-request ssh-msg-service-accept
   ssh-msg-userauth-request ssh-msg-userauth-failure ssh-msg-userauth-success)
 (import ssh/keys ssh-key-of-file)
 (import ssh/keygen ssh-key-fingerprint)
 (import x/codec/ed25519)
-(import x/codec/x25519)
 
 (def %oref (prim-ref (lit obj) (lit ref)))
 (def %oset! (prim-ref (lit obj) (lit set!)))
@@ -354,9 +353,8 @@
 (def ssh-serve
   (fn (_ keyfile addr port dir)
     (def key (ssh-key-of-file keyfile))
-    ; the curves' engines, built once: each connection's process inherits them
-    (X25519 jit!)
-    (Ed25519 jit!)
+    ; the engines, built once: each connection's process inherits them
+    (ssh-engines! ())
     (def chld (%signal-number "CHLD"))
     (def lfd
       (guard (e (do (%log (Str8 append "Failed listening on '" (if (null? addr) "" addr) ":" (%num port)

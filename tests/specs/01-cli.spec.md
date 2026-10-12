@@ -76,13 +76,30 @@ Usage: dbclient [options] [user@]host[/port] [command]
 ---
     ('server "Invalid option -Q" 1)
 
+### scp's line plans a copy: the operands, the ssh program, its port and key
+
+```ssh
+(write (ssh-plan (list "scp" "-p" "-P" "2222" "-i" "k" "a" "b" "h:dir")))
+```
+---
+    ('scp ('copy ("a" "b" "h:dir") "ssh" "2222" "k" #t) 0)
+
+### -t and -f are the remote ends; -r is refused, status 1
+
+```ssh
+(write (List map (fn (_ l) (first (rest (ssh-plan l))))
+  (list (list "scp" "-t" "dir") (list "scp" "-f" "a" "b") (list "scp" "-r" "d" "h:e"))))
+```
+---
+    (('to ("dir") #f) ('from ("a" "b") #f) "scp: directories are not served yet\n")
+
 ### a program not written yet says so, status 1
 
 ```ssh
-(write (ssh-plan (list "scp" "a" "b")))
+(write (ssh-plan (list "dropbearconvert" "openssh" "dropbear" "a" "b")))
 ```
 ---
-    ('scp "scp: not served yet\n" 1)
+    ('convert "dropbearconvert: not served yet\n" 1)
 
 ## main
 

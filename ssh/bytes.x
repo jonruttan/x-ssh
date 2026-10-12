@@ -29,6 +29,15 @@
 (def %make-str (prim-ref (lit str) (lit make)))
 (def %str->ptr (prim-ref (lit str) (lit ->ptr)))
 (def %pset1 (prim-ref (lit ptr) (lit set!)))
+(def %ptr->int (prim-ref (lit ptr) (lit ->int)))
+(def %int->ptr (prim-ref (lit int) (lit ->ptr)))
+(def %mem-copy (prim-ref (lit mem) (lit copy)))
+
+; A region's bytes moved by one copy: p's bytes at off, n of them.
+(def %at (fn (_ p off) (%int->ptr (+ (%ptr->int p) off))))
+(def %move
+  (fn (_ to to-off from from-off n)
+    (when (> n 0) (%mem-copy (%at (%str->ptr to) to-off) (%at (%str->ptr from) from-off) n))))
 
 (def %byte (fn (_ s i) (%char->int (%byte-ref s i))))
 
@@ -48,9 +57,8 @@
     (when (> (+ (%oref out 2) n) (%oref out 3))
       (do (def cap (* (%oref out 3) 2))
           (def buf (%make-str cap))
-          (def p (%str->ptr buf))
           (def old (%oref out 1))
-          ((fn (self i) (unless (= i (%oref out 2)) (do (%pset1 p i (%byte old i) 1) (self (+ i 1))))) 0)
+          (%move buf 0 old 0 (%oref out 2))
           (%oset! out 1 buf)
           (%oset! out 3 cap)
           (self out n)))))
@@ -72,9 +80,8 @@
 (def ssh-put-bytes
   (fn (_ out s start len)
     (%room! out len)
-    (def p (%str->ptr (%oref out 1)))
     (def at (%oref out 2))
-    ((fn (self i) (unless (= i len) (do (%pset1 p (+ at i) (%byte s (+ start i)) 1) (self (+ i 1))))) 0)
+    (%move (%oref out 1) at s start len)
     (%oset! out 2 (+ at len))))
 
 ; A string: its count, then its bytes.
@@ -173,8 +180,7 @@
 (def ssh-copy
   (fn (_ s start len)
     (def out (%make-str len))
-    (def p (%str->ptr out))
-    ((fn (self i) (unless (= i len) (do (%pset1 p i (%byte s (+ start i)) 1) (self (+ i 1))))) 0)
+    (%move out 0 s start len)
     out))
 
 ; The bytes of several (S START LEN) regions, joined.

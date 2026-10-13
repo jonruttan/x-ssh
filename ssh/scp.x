@@ -15,8 +15,11 @@
 ; the bytes and a zero, the sink answers zero.  A one byte and a line is
 ; an error the other end carries on after, a two byte and a line one it
 ; stops at.  `T<mtime> 0 <atime> 0\n` before a file carries its times
-; under -p, and is acknowledged.  Files only, so far: a directory is
-; refused, -r included.
+; under -p, and is acknowledged.  Under -r a directory is `D<mode> 0
+; <name>\n`, its entries, then `E\n`, each acknowledged; without -r a
+; directory is refused at either end, as Dropbear refuses it.  This sink
+; acknowledges T and leaves a file's times as written: the platform's
+; File has no door that sets a given time yet.
 ;
 ; As the remote end (-t, -f) the protocol is on this process's standard
 ; input, which the platform keeps on fd 3, and its standard output.
@@ -109,6 +112,14 @@
     (%send-text out (Str8 append "scp: " text "\n"))
     (%say (Str8 append "scp: " text "\n"))))
 
+; A two byte and a message to the far end, which stops; so does this end.
+(def %fatal-to
+  (fn (_ out text)
+    (%send-byte out 2)
+    (%send-text out (Str8 append "scp: " text "\n"))
+    (%say (Str8 append "scp: " text "\n"))
+    (Err raise 'value (Str8 append "scp: " text) ())))
+
 ; n bytes copied from one descriptor to another; answers whether all came.
 ; Each chunk's buffer is garbage once written, so a collect follows it, as
 ; the session loop collects every chunk it moves.
@@ -132,15 +143,18 @@
 
 (def %stat-get (fn (_ st k) (rest (List find (fn (_ p) (eq? (first p) k)) st))))
 
-; Each file sent, as the protocol has it; answers how many failed.
+; Each file sent, as the protocol has it, a directory walked under -r;
+; answers how many failed.
 (def %source
-  (fn (_ in out files preserve)
+  (fn (_ in out files preserve recursive)
     ((fn (self fs errs)
        (if (null? fs) errs
          (do (def path (first fs))
              (def st (guard (e ()) (File stat path)))
              (match
                ((null? st) (do (%error-to out (Str8 append path ": No such file or directory")) (self (rest fs) (+ errs 1))))
+               ((if recursive (eq? (%stat-get st (lit file-type)) (lit dir)) #f)
+                 (self (rest fs) (+ errs (%rsource in out path st preserve))))
                ((not (eq? (%stat-get st (lit file-type)) (lit file)))
                  (do (%error-to out (Str8 append path ": not a regular file")) (self (rest fs) (+ errs 1))))
                (#t
@@ -159,15 +173,38 @@
                            (self (rest fs) (if (if ok (%response in) #f) errs (+ errs 1)))))))))))
      files 0)))
 
+; A directory sent: its time under -p, D, each entry as a file or a
+; directory, then E; answers how many failed.
+(def %rsource
+  (fn (_ in out path st preserve)
+    (def listed (guard (e (lit unreadable)) (File list-dir path)))
+    (if (eq? listed (lit unreadable))
+      (do (%error-to out (Str8 append path ": cannot read directory")) 1)
+      (do (when preserve
+            (do (def t (%num (%stat-get st (lit mtime)) 10))
+                (%send-text out (Str8 append "T" t " 0 " t " 0\n"))
+                (%response in)))
+          (def mode (& (%stat-get st (lit mode)) 4095))
+          (%send-text out (Str8 append "D" (Str pad-left 4 #\0 (%num mode 8)) " 0 " (%basename path) "\n"))
+          (if (not (%response in)) 1
+            (do (def errs (%source in out (List map (fn (_ n) (Str8 append path "/" n)) listed) preserve #t))
+                (%send-text out "E\n")
+                (if (%response in) errs (+ errs 1))))))))
+
 ; --- the sink: files received -------------------------------------------------
 
 (def %dir? (fn (_ path) (guard (e #f) (eq? (%stat-get (File stat path) (lit file-type)) (lit dir)))))
 
 ; Files received into target until the source ends; answers how many failed.
 (def %sink
-  (fn (_ in out target)
-    (def into-dir (%dir? target))
+  (fn (_ in out target recursive)
     (%send-byte out 0)
+    (%level in out target (%dir? target) recursive)))
+
+; One level's records until the source ends or its directory does (E):
+; files written, directories made and entered.  Answers how many failed.
+(def %level
+  (fn (_ in out target into-dir recursive)
     ((fn (self errs)
        (def b (%read-byte in))
        (match
@@ -177,29 +214,52 @@
                (%say (Str8 append (if (null? m) "" m) "\n"))
                (if (= b 2) (+ errs 1) (self (+ errs 1)))))
          ((= b (%char->int #\T)) (do (%read-line in b) (%send-byte out 0) (self errs)))
-         ((= b (%char->int #\C))
-           (do (def line (%read-line in ()))
-               (def ws (Str8 split " " line))
-               (def mode (%int (first ws) 8))
-               (def size (%int (List ref 1 ws) 10))
-               (def name (Str8 join " " (rest (rest ws))))
-               (def path (if into-dir (Str8 append target "/" name) target))
-               (def fd (File open path (list (lit wronly) (lit creat) (lit trunc)) mode))
-               (if (< fd 0)
-                 (do (%error-to out (Str8 append path ": cannot create")) (self (+ errs 1)))
-                 (do (%send-byte out 0)
-                     (def ok (%copy in fd size))
-                     (File close fd)
-                     (def end (%read-byte in))
-                     (%send-byte out 0)
-                     (self (if (if ok (eq? end 0) #f) errs (+ errs 1)))))))
-         (#t
-           (do (%read-line in b)
-               (%send-byte out 2)
-               (%send-text out "scp: directories are not served yet\n")
-               (%say "scp: directories are not served yet\n")
-               (+ errs 1)))))
+         ((= b (%char->int #\E)) (do (%read-line in ()) (%send-byte out 0) errs))
+         ((= b (%char->int #\C)) (self (+ errs (%file-in in out (%read-line in ()) target into-dir))))
+         ((= b (%char->int #\D))
+           (if recursive
+             (self (+ errs (%dir-in in out (%read-line in ()) target into-dir)))
+             (%fatal-to out "received directory without -r")))
+         (#t (%fatal-to out "expected a control record"))))
      0)))
+
+; The C record's file written, its bytes taken; answers 0 or 1 failed.
+(def %file-in
+  (fn (_ in out line target into-dir)
+    (def ws (Str8 split " " line))
+    (def mode (%int (first ws) 8))
+    (def size (%int (List ref 1 ws) 10))
+    (def name (Str8 join " " (rest (rest ws))))
+    (def path (if into-dir (Str8 append target "/" name) target))
+    (def fd (File open path (list (lit wronly) (lit creat) (lit trunc)) mode))
+    (if (< fd 0)
+      (do (%error-to out (Str8 append path ": cannot create")) 1)
+      (do (%send-byte out 0)
+          (def ok (%copy in fd size))
+          (File close fd)
+          (def end (%read-byte in))
+          (%send-byte out 0)
+          (if (if ok (eq? end 0) #f) 0 1)))))
+
+; The D record's directory, made when it is not there, its records taken
+; until E, then its mode set as sent; answers how many failed.
+(def %dir-in
+  (fn (_ in out line target into-dir)
+    (def ws (Str8 split " " line))
+    (def mode (%int (first ws) 8))
+    (def name (Str8 join " " (rest (rest ws))))
+    (def path (if into-dir (Str8 append target "/" name) target))
+    (def there (guard (e ()) (%stat-get (File stat path) (lit file-type))))
+    (match
+      ((if (null? there) #f (not (eq? there (lit dir))))
+        (do (%error-to out (Str8 append path ": Not a directory")) 1))
+      ((if (null? there) (not (guard (e #f) (do (File mkdir path (| mode 448)) #t))) #f)
+        (do (%error-to out (Str8 append path ": cannot create directory")) 1))
+      (#t
+        (do (%send-byte out 0)
+            (def errs (%level in out path #t #t))
+            (when (null? there) (guard (e ()) (File chmod path mode)))
+            errs)))))
 
 ; --- the client: the ssh program spawned on two pipes -------------------------
 
@@ -247,11 +307,11 @@
 
 ; The copy a client line asks for; answers the exit status.
 (def ssh-scp-client
-  (fn (_ operands program port key preserve)
+  (fn (_ operands program port key preserve recursive)
     (def target (List ref (- (List length operands) 1) operands))
     (def sources (List take (- (List length operands) 1) operands))
     (def t (%remote target))
-    (def flags (Str8 append (if preserve " -p" "") (if (> (List length sources) 1) " -d" "")))
+    (def flags (Str8 append (if preserve " -p" "") (if recursive " -r" "") (if (> (List length sources) 1) " -d" "")))
     (match
       ((not (null? t))
         (if (List any? (fn (_ s) (not (null? (%remote s)))) sources)
@@ -259,7 +319,7 @@
           (do (def kid (%spawn (%program-argv program port key (first t) (List ref 1 t)
                                 (Str8 append "scp" flags " -t " (%quote (List ref 2 t))))))
               (def errs (guard (e 1)
-                          (if (%response (List ref 2 kid)) (%source (List ref 2 kid) (List ref 1 kid) sources preserve) 1)))
+                          (if (%response (List ref 2 kid)) (%source (List ref 2 kid) (List ref 1 kid) sources preserve recursive) 1)))
               (Sys close (List ref 1 kid)) (Sys close (List ref 2 kid))
               (def status (Sys wait (first kid)))
               (if (if (= errs 0) (= status 0) #f) 0 1))))
@@ -271,19 +331,19 @@
               (do (%say "scp: a local copy is cp's\n") 1)
               (do (def kid (%spawn (%program-argv program port key (first s) (List ref 1 s)
                                     (Str8 append "scp" flags " -f " (%quote (List ref 2 s))))))
-                  (def errs (guard (e 1) (%sink (List ref 2 kid) (List ref 1 kid) target)))
+                  (def errs (guard (e 1) (%sink (List ref 2 kid) (List ref 1 kid) target recursive)))
                   (Sys close (List ref 1 kid)) (Sys close (List ref 2 kid))
                   (def status (Sys wait (first kid)))
                   (if (if (= errs 0) (= status 0) #f) 0 1))))))))
 
 ; The remote ends: -t receives into the target, -f sends the files.
 (def ssh-scp-remote
-  (fn (_ to? operands preserve)
+  (fn (_ to? operands preserve recursive)
     (def errs
       (guard (e 1)
         (if to?
-          (%sink 3 1 (first operands))
-          (if (%response 3) (%source 3 1 operands preserve) 1))))
+          (%sink 3 1 (first operands) recursive)
+          (if (%response 3) (%source 3 1 operands preserve recursive) 1))))
     (if (= errs 0) 0 1)))
 
 (provide ssh/scp ssh-scp-client ssh-scp-remote)

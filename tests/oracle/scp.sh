@@ -110,7 +110,7 @@ else
 fi
 
 # ends: x-ssh's server, its PATH finding x-ssh's scp
-PATH="$fx/bin:$PATH" "$X" -l ssh -- dropbear -r "$fx/hostkey" -p "127.0.0.1:$xport" -D "$fx" > "$fx/xserver.log" 2>&1 &
+PATH="$fx/bin:$PATH" "$X" -l ssh -- dropbear -F -E -r "$fx/hostkey" -p "127.0.0.1:$xport" -D "$fx" > "$fx/xserver.log" 2>&1 &
 xpid=$!
 i=0
 while ! grep -q 'Not backgrounding' "$fx/xserver.log" 2>/dev/null; do

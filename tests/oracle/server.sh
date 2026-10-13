@@ -19,6 +19,8 @@
 #   input     200000 random bytes through `cksum` on the server's side
 #   git       `git clone` over OpenSSH's client from the server's
 #             git-upload-pack: the clone's HEAD and its fsck
+#   background  a server started without -F returns at once, makes its
+#             host key under -R, writes -P's pidfile, and serves dbclient
 #
 # The clients and git are the oracles.
 set -u
@@ -33,7 +35,8 @@ kill_tree() {
 	kill "$1" 2>/dev/null
 }
 srvpid=
-trap 'kill_tree $srvpid; rm -rf "$fx"' EXIT
+bgpid=
+trap 'kill_tree $srvpid; kill $bgpid 2>/dev/null; rm -rf "$fx"' EXIT
 "$db/dropbearkey" -t ed25519 -f "$fx/hostkey" > /dev/null 2>&1
 "$db/dropbearkey" -t ed25519 -f "$fx/dbkey" > /dev/null 2>&1
 ssh-keygen -q -t ed25519 -N '' -C x-ssh-server -f "$fx/osshkey"
@@ -124,6 +127,27 @@ if [ "$got" = "$want" ] && git -C "$fx/dst" fsck --no-progress > /dev/null 2>> "
 else
 	fail "git: the clone's HEAD '$got', the repository's '$want'"
 fi
+
+# background: no -F, -R making the host key at -r's path, -P the pidfile;
+# the command returns, the server stays, a client is served through it
+bport=$((port + 1))
+"$X" -l ssh -- dropbear -E -R -r "$fx/madekey" -p "127.0.0.1:$bport" -D "$fx" -P "$fx/pid" > "$fx/bg.log" 2>&1
+status=$?
+i=0
+while [ ! -s "$fx/pid" ] && [ $i -lt 60 ]; do i=$((i + 1)); sleep 1; done
+bgpid=$(cat "$fx/pid" 2>/dev/null)
+out=$("$db/dbclient" -y -y -p "$bport" -i "$fx/dbkey" "$user@127.0.0.1" 'echo from the background; exit 5' < /dev/null 2> "$fx/client.err")
+bstatus=$?
+if [ "$status" = 0 ] && [ -n "$bgpid" ] && [ "$out" = "from the background" ] && [ "$bstatus" = 5 ] \
+	&& grep -q "Generated hostkey $fx/madekey, fingerprint is SHA256:" "$fx/bg.log" \
+	&& grep -q 'Running in background' "$fx/bg.log" \
+	&& "$db/dropbearkey" -y -f "$fx/madekey" > /dev/null 2>&1; then
+	echo "ok: background -- the server returned at once, made its key, wrote its pid and served"
+else
+	fail "background: status $status, pid '$bgpid', output '$out' status $bstatus"
+	cat "$fx/bg.log" >&2
+fi
+kill $bgpid 2>/dev/null
 
 echo "--- the server's log"
 cat "$fx/server.log"

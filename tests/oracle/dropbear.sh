@@ -19,6 +19,9 @@
 #   keys    a key x-ssh's dropbearkey makes is read by Dropbear's with
 #           the same fingerprint, x-ssh shows Dropbear's key as it does,
 #           and the made key, in Dropbear's format, authenticates the client
+#   convert dropbearconvert each way: ssh-keygen reads the OpenSSH file
+#           x-ssh wrote from Dropbear's host key, dropbearkey reads the
+#           Dropbear file x-ssh wrote from ssh-keygen's user key
 #   git     `git clone` of a repository behind the Dropbear, with x-ssh
 #           as git's ssh: the clone's HEAD and its fsck
 #
@@ -118,6 +121,26 @@ if [ "$out" = "made here" ]; then
 	echo "ok: keys -- the key x-ssh made authenticates it"
 else
 	fail "keys: a client with the key x-ssh made said '$out'"
+fi
+
+# convert: each way, the other side's tool reading what x-ssh wrote
+"$X" -l ssh -- dropbearconvert dropbear openssh "$fx/hostkey" "$fx/host.ossh" > /dev/null 2> "$fx/client.err"
+status=$?
+ours=$(ssh-keygen -y -f "$fx/host.ossh" 2>> "$fx/client.err" | cut -d' ' -f1-2)
+theirs=$("$db/dropbearkey" -y -f "$fx/hostkey" 2>/dev/null | sed -n 2p | cut -d' ' -f1-2)
+if [ "$status" = 0 ] && grep -q "Wrote key to '$fx/host.ossh'" "$fx/client.err" && [ -n "$ours" ] && [ "$ours" = "$theirs" ]; then
+	echo "ok: convert -- ssh-keygen reads the OpenSSH file x-ssh wrote from Dropbear's key"
+else
+	fail "convert: dropbear to openssh status $status, ssh-keygen '$ours', dropbearkey '$theirs'"
+fi
+"$X" -l ssh -- dropbearconvert openssh dropbear "$fx/userkey" "$fx/user.db" > /dev/null 2> "$fx/client.err"
+status=$?
+ours=$("$db/dropbearkey" -y -f "$fx/user.db" 2>> "$fx/client.err" | sed -n 2p | cut -d' ' -f1-2)
+theirs=$(ssh-keygen -y -f "$fx/userkey" 2>/dev/null | cut -d' ' -f1-2)
+if [ "$status" = 0 ] && [ -n "$ours" ] && [ "$ours" = "$theirs" ]; then
+	echo "ok: convert -- dropbearkey reads the Dropbear file x-ssh wrote from ssh-keygen's key"
+else
+	fail "convert: openssh to dropbear status $status, dropbearkey '$ours', ssh-keygen '$theirs'"
 fi
 
 # git

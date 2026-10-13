@@ -32,6 +32,7 @@
 (import ssh/keys ssh-key-of-file)
 (import ssh/keygen ssh-key-fingerprint)
 (import x/codec/ed25519)
+(import ssh/keygen ssh-keygen-make ssh-key-fingerprint)
 
 (def %oref (prim-ref (lit obj) (lit ref)))
 (def %oset! (prim-ref (lit obj) (lit set!)))
@@ -326,6 +327,59 @@
 
 ; --- the listener ----------------------------------------------------------
 
+; The host key read from keyfile, or under -R made there when the file is
+; not there, logged with its fingerprint as Dropbear logs it.  Without
+; one the server says what Dropbear says and exits 1.
+(def %host-key
+  (fn (_ keyfile make)
+    (def key (guard (e ()) (ssh-key-of-file keyfile)))
+    (match
+      ((not (null? key)) key)
+      ((not make)
+        (do (%log "No hostkeys available. 'dropbear -R' may be useful or run dropbearkey.")
+            (Sys exit 1)))
+      (#t
+        (do (def pub (ssh-keygen-make keyfile))
+            (unless pub
+              (do (%log (Str8 append "Couldn't read or generate hostkey " keyfile)) (Sys exit 1)))
+            (%log (Str8 append "Generated hostkey " keyfile ", fingerprint is " (ssh-key-fingerprint pub)))
+            (ssh-key-of-file keyfile))))))
+
+(def %dlopen (prim-ref (lit ffi) (lit dlopen)))
+(def %dlsym (prim-ref (lit ffi) (lit dlsym)))
+(def %ptr-call (prim-ref (lit ptr) (lit call)))
+
+; setsid(2) through libc: the platform's Darwin syscall table has no
+; number for it, and Sys has no door.
+(def %setsid! (fn (_) (%ptr-call (%dlsym (%dlopen () 1) "setsid"))))
+
+; Into the background as daemon(3) has it: the parent exits 0, the child
+; leads a session of its own and works in /.
+(def %background!
+  (fn (_)
+    (unless (= (Sys fork) 0) (Sys exit 0))
+    (%setsid!)
+    (Sys chdir "/")))
+
+; The standard descriptors on /dev/null: in the background the log goes
+; nowhere, as Dropbear's does without syslog.
+(def %quiet!
+  (fn (_)
+    (def null (File open "/dev/null" (lit rdwr)))
+    (unless (< null 0)
+      (do (Sys dup2 null 0) (Sys dup2 null 1) (Sys dup2 null 2)
+          (when (> null 2) (File close null))))))
+
+; The pid written to pidfile, so the server can be killed easily; a path
+; that cannot be written is let be, as Dropbear lets it.
+(def %pidfile!
+  (fn (_ path)
+    (def fd (File open path (list (lit wronly) (lit creat) (lit trunc)) 420))
+    (unless (< fd 0)
+      (do (def line (Str8 append (%num (Sys getpid)) "\n"))
+          (File write fd line (%byte-len line))
+          (File close fd)))))
+
 (def %signal-number
   (fn (_ name)
     (def e (List find (fn (_ p) (str=? (first p) name)) (Sys signals)))
@@ -351,17 +405,20 @@
 ; process of its own while this one goes back to listening.  The host key
 ; is read once; a dead connection's process is reaped by the kernel.
 (def ssh-serve
-  (fn (_ keyfile addr port dir)
-    (def key (ssh-key-of-file keyfile))
-    ; the engines, built once: each connection's process inherits them
-    (ssh-engines! ())
-    (def chld (%signal-number "CHLD"))
+  (fn (_ keyfile addr port dir make background pidfile)
+    (def key (%host-key keyfile make))
     (def lfd
       (guard (e (do (%log (Str8 append "Failed listening on '" (if (null? addr) "" addr) ":" (%num port)
                                        "': the address could not be bound"))
                     (Sys exit 1)))
         (if (null? addr) (Socket tcp-listen port) (Socket tcp-listen-on addr port))))
-    (%log "Not backgrounding")
+    (when background (%background!))
+    (%log (if background "Running in background" "Not backgrounding"))
+    (%pidfile! pidfile)
+    (when background (%quiet!))
+    ; the engines, built once: each connection's process inherits them
+    (ssh-engines! ())
+    (def chld (%signal-number "CHLD"))
     (unless (null? chld) (Sys signal chld (Sys sig-ign)))
     ((fn (self)
        (def fd (Socket accept lfd))

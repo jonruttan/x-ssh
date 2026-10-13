@@ -29,9 +29,13 @@ command a connection.
   Dropbear ssh-ed25519 key, `-l` the user, `-p` the port; hosts are
   checked against `~/.ssh/known_hosts`, `-y` accepting and recording a
   new one.  `-v` traces the connection, with CPU milliseconds a step.
-- `dropbear`: the server, in the foreground, logging to standard error:
-  `-r` its host key, `-p` where it listens, `-D` the directory of the
-  `authorized_keys` it admits.  Each connection is served by a forked
+- `dropbear`: the server: `-r` its host key (default
+  `/etc/dropbear/dropbear_ed25519_host_key`), made there under `-R` when
+  the file is missing; `-p` where it listens, `-D` the directory of the
+  `authorized_keys` it admits.  Without `-F` it forks into the background
+  as daemon(3) has it, writing `-P`'s pidfile (default
+  `/var/run/dropbear.pid`); it logs to standard error, so in the
+  background its log goes nowhere.  Each connection is served by a forked
   child; the command runs under the user's shell, with its standard
   input, output and error on the channel.  `git clone` over it works.
 - `dropbearkey`: `-t ed25519 -f FILE` makes a key in Dropbear's format;
@@ -44,8 +48,8 @@ command a connection.
   the platform's File has no door that sets a given time yet.
 - `-V` on each, and `--help` from its option declaration.
 
-Not served yet: `dropbearconvert`, the server's `-R` and backgrounding,
-other ciphers and key types, port forwarding, agents, passwords.
+Not served yet: `dropbearconvert`, other ciphers and key types, port
+forwarding, agents, passwords, syslog.
 
 The oracles in `tests/oracle/` are the live tests: `dropbear.sh` drives
 the client against a built Dropbear, `server.sh` drives the server with

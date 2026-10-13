@@ -80,11 +80,10 @@
     (if (< fd 0) #f
       (do (File write fd s n) (File close fd) #t))))
 
-; A key made and written to path, path.pub beside it, and shown.  The
-; status: 0, or 1 when path is there already.
-(def ssh-keygen-generate
-  (fn (_ path comment)
-    (%say 2 "Generating 256 bit ed25519 key, this may take a while...\n")
+; A key made and written new to path in Dropbear's format, owner-only;
+; answers its public key, or #f when the file could not be made.
+(def ssh-keygen-make
+  (fn (_ path)
     (def seed (ssh-random 32))
     (def pub (Ed25519 public seed))
     (def file (ssh-out))
@@ -93,8 +92,16 @@
     (ssh-put-bytes file seed 0 32)
     (ssh-put-bytes file pub 0 32)
     (def r (ssh-out-run file))
+    (if (%write-new path (first r) (rest r)) pub #f)))
+
+; A key made and written to path, path.pub beside it, and shown.  The
+; status: 0, or 1 when path is there already.
+(def ssh-keygen-generate
+  (fn (_ path comment)
+    (%say 2 "Generating 256 bit ed25519 key, this may take a while...\n")
+    (def pub (ssh-keygen-make path))
     (def c (if (null? comment) (%default-comment) comment))
-    (if (%write-new path (first r) (rest r))
+    (if pub
       (do (def line (Str8 append (ssh-key-public-line pub c) "\n"))
           (unless (%write-new (Str8 append path ".pub") line (%byte-len line))
             (%say 2 (Str8 append "Save public key to " path ".pub failed: File exists\n")))
@@ -119,4 +126,4 @@
             (do (%say 2 (Str8 append "Bad key in '" path "'\n")) 1)
             (do (%show (rest key) (if (null? comment) (%default-comment) comment)) 0))))))
 
-(provide ssh/keygen ssh-keygen-generate ssh-keygen-print ssh-key-public-line ssh-key-fingerprint)
+(provide ssh/keygen ssh-keygen-make ssh-keygen-generate ssh-keygen-print ssh-key-public-line ssh-key-fingerprint)

@@ -39,8 +39,10 @@
       (list (Opts arg "-r" "keyfile" "Specify the host key: ssh-ed25519, Dropbear's or OpenSSH's file")
             (Opts arg "-p" "[address:]port" "Listen on the address and port, default 22 on every address")
             (Opts arg "-D" "dir" "Directory containing the authorized_keys file, default ~/.ssh")
-            (Opts flag "-F" "Don't fork into background (x-ssh never does yet)")
-            (Opts flag "-E" "Log to stderr rather than syslog (x-ssh always does)")
+            (Opts flag "-R" "Create hostkeys as required")
+            (Opts flag "-F" "Don't fork into background")
+            (Opts flag "-E" "Log to stderr rather than syslog (x-ssh has no syslog: in the background its log goes nowhere)")
+            (Opts arg "-P" "pidfile" "Create pid file PidFile, default /var/run/dropbear.pid")
             (Opts flag "-s" "Disable password logins (x-ssh has none)")
             %version-row))
     (%row (lit client) (list "dbclient" "ssh") "the client"
@@ -133,11 +135,13 @@
                       preserve recursive)
                 0)))))
 
-; The server's line as what to do: (server (serve KEYFILE ADDRESS PORT
-; DIR) 0), the address () for every one.
+; The server's line as what to do: (server (serve KEYFILE ADDRESS PORT DIR
+; MAKE-KEY BACKGROUND PIDFILE) 0), the address () for every one, the key
+; and pidfile Dropbear's defaults unless given.
 (def %server-plan
   (fn (_ o)
-    (def key (if (Opts on? o "-r") (Opts value o "-r") ()))
+    (def key (if (Opts on? o "-r") (Opts value o "-r") "/etc/dropbear/dropbear_ed25519_host_key"))
+    (def pidfile (if (Opts on? o "-P") (Opts value o "-P") "/var/run/dropbear.pid"))
     (def p (if (Opts on? o "-p") (Opts value o "-p") "22"))
     (def colon ((fn (self i) (if (< i 0) () (if (= ((prim-ref (lit str) (lit byte-ref)) p i) #\:) i (self (- i 1)))))
                 (- (Str8 length p) 1)))
@@ -145,9 +149,10 @@
     (def port (%int-or-nil (if (null? colon) p (Str8 sub (+ colon 1) (- (Str8 length p) colon 1) p))))
     (def dir (if (Opts on? o "-D") (Opts value o "-D") (Str8 append (Sys getenv "HOME") "/.ssh")))
     (match
-      ((null? key) (list (lit server) "x-ssh: -r keyfile is required; no default host keys yet\n" 1))
       ((null? port) (list (lit server) (Str8 append "Bad port '" p "'\n") 1))
-      (#t (list (lit server) (list (lit serve) key addr port dir) 0)))))
+      (#t (list (lit server)
+                (list (lit serve) key addr port dir (Opts on? o "-R") (not (Opts on? o "-F")) pidfile)
+                0)))))
 
 ; The key generator's line as what to do, in dropbearkey's order of
 ; checks: (keygen (generate FILE COMMENT) 0) or (keygen (print FILE
@@ -227,7 +232,8 @@
             (ssh-scp-client (List ref 1 what) (List ref 2 what) (List ref 3 what) (List ref 4 what)
                             (List ref 5 what) (List ref 6 what)))
           ((eq? (first what) (lit serve))
-            (ssh-serve (List ref 1 what) (List ref 2 what) (List ref 3 what) (List ref 4 what)))
+            (ssh-serve (List ref 1 what) (List ref 2 what) (List ref 3 what) (List ref 4 what)
+                       (List ref 5 what) (List ref 6 what) (List ref 7 what)))
           (#t (ssh-keygen-print (List ref 1 what) (List ref 2 what)))))
       (do (File write 2 what (%byte-len what))
           (Sys exit (first (rest (rest plan))))))))

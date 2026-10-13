@@ -22,6 +22,7 @@
 (import ssh/keygen ssh-keygen-generate ssh-keygen-print)
 (import ssh/server ssh-serve)
 (import ssh/scp ssh-scp-client ssh-scp-remote)
+(import ssh/convert ssh-convert)
 
 (def %byte-len (prim-ref (lit str) (lit byte-len)))
 
@@ -112,7 +113,22 @@
       ((eq? (first p) (lit keygen)) (%keygen-plan o decl))
       ((eq? (first p) (lit server)) (%server-plan o))
       ((eq? (first p) (lit scp)) (%scp-plan o decl))
-      (#t (list (first p) (Str8 append (first ops) ": not served yet\n") 1)))))
+      (#t (%convert-plan o decl)))))
+
+; dropbearconvert's line as what to do: (convert (convert IN-TYPE OUT-TYPE
+; IN-FILE OUT-FILE) 0), or what Dropbear says of a bad line, status 1.
+(def %convert-plan
+  (fn (_ o decl)
+    (def ops (Opts operands o))
+    (def %type? (fn (_ t) (if (str=? t "openssh") #t (str=? t "dropbear"))))
+    (match
+      ((not (= (List length ops) 4))
+        (list (lit convert) (Str8 append "All arguments must be specified\n" (Opts usage decl)) 1))
+      ((not (%type? (first ops)))
+        (list (lit convert) (Str8 append "Invalid input key type\n" (Opts usage decl)) 1))
+      ((not (%type? (List ref 1 ops)))
+        (list (lit convert) (Str8 append "Invalid output key type\n" (Opts usage decl)) 1))
+      (#t (list (lit convert) (pair (lit convert) ops) 0)))))
 
 ; scp's line as what to do: (scp (to OPERANDS PRESERVE RECURSIVE) 0) or
 ; (scp (from OPERANDS PRESERVE RECURSIVE) 0) for the remote ends, (scp
@@ -234,6 +250,8 @@
           ((eq? (first what) (lit serve))
             (ssh-serve (List ref 1 what) (List ref 2 what) (List ref 3 what) (List ref 4 what)
                        (List ref 5 what) (List ref 6 what) (List ref 7 what)))
+          ((eq? (first what) (lit convert))
+            (ssh-convert (List ref 1 what) (List ref 2 what) (List ref 3 what) (List ref 4 what)))
           (#t (ssh-keygen-print (List ref 1 what) (List ref 2 what)))))
       (do (File write 2 what (%byte-len what))
           (Sys exit (first (rest (rest plan))))))))

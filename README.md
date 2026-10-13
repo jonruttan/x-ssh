@@ -40,6 +40,9 @@ command a connection.
   input, output and error on the channel.  `git clone` over it works.
 - `dropbearkey`: `-t ed25519 -f FILE` makes a key in Dropbear's format;
   `-y` prints a key's public line and fingerprint.
+- `dropbearconvert`: `openssh|dropbear openssh|dropbear IN OUT` writes an
+  ssh-ed25519 key read in one format in the other, with Dropbear's
+  messages.
 - `scp`: files to and from a host, either end.  As the client it spawns
   the ssh program (`-S`, default `ssh`; `-P` and `-i` are passed on) and
   speaks the protocol over its pipes, `-r` walking directories and `-p`
@@ -48,7 +51,7 @@ command a connection.
   the platform's File has no door that sets a given time yet.
 - `-V` on each, and `--help` from its option declaration.
 
-Not served yet: `dropbearconvert`, other ciphers and key types, port
+Not served yet: other ciphers and key types, encrypted key files, port
 forwarding, agents, passwords, syslog.
 
 The oracles in `tests/oracle/` are the live tests: `dropbear.sh` drives
@@ -77,6 +80,7 @@ Set `X=/path/to/x` to use a particular x.
     ssh/keys.x        key files, OpenSSH's and Dropbear's
     ssh/known.x       known_hosts
     ssh/keygen.x      dropbearkey
+    ssh/convert.x     dropbearconvert
     ssh/scp.x         scp, either end
     ssh/cli.x         the command line: ssh-argv, ssh-program, ssh-plan, ssh-main
     tests/            the spec suite and its runner, gate, harness and oracles

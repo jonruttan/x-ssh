@@ -93,13 +93,15 @@ Usage: dbclient [options] [user@]host[/port] [command]
 ---
     (('to ("dir") #f #f) ('from ("a" "b") #f #t) ('copy ("d" "h:e") "ssh" () () #f #t))
 
-### a program not written yet says so, status 1
+### dropbearconvert's line plans a conversion; a bad type says so, status 1
 
 ```ssh
-(write (ssh-plan (list "dropbearconvert" "openssh" "dropbear" "a" "b")))
+(write (list (ssh-plan (list "dropbearconvert" "openssh" "dropbear" "a" "b"))
+             (List take 2 (ssh-plan (list "dropbearconvert" "openssh" "pem" "a" "b")))
+             (first (rest (rest (ssh-plan (list "dropbearconvert" "openssh" "dropbear" "a")))))))
 ```
 ---
-    ('convert "dropbearconvert: not served yet\n" 1)
+    (('convert ('convert "openssh" "dropbear" "a" "b") 0) ('convert "Invalid output key type\nUsage: dropbearconvert <inputtype> <outputtype> <inputfile> <outputfile>\n") 1)
 
 ## main
 

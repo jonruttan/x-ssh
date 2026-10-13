@@ -22,6 +22,8 @@
 #   convert dropbearconvert each way: ssh-keygen reads the OpenSSH file
 #           x-ssh wrote from Dropbear's host key, dropbearkey reads the
 #           Dropbear file x-ssh wrote from ssh-keygen's user key
+#   forward -N -L: a local port carried through the Dropbear to its own
+#           ssh port, two connections in turn reading its version line
 #   git     `git clone` of a repository behind the Dropbear, with x-ssh
 #           as git's ssh: the clone's HEAD and its fsck
 #
@@ -32,8 +34,15 @@ db=${1:?a built Dropbear directory}
 port=${2:-22222}
 X=${X:-x}
 fx=$(mktemp -d "${TMPDIR:-/tmp}/x-ssh-oracle.XXXXXX")
+# The launcher pipes the program into the engine, a child of its own,
+# so a client's pid is a shell's: the whole tree under it goes.
+kill_tree() {
+	for c in $(ps -axo pid,ppid | awk -v p="$1" '$2 == p { print $1 }'); do kill_tree "$c"; done
+	kill "$1" 2>/dev/null
+}
 dbpid=
-trap 'kill $dbpid 2>/dev/null; rm -rf "$fx"' EXIT
+fwdpid=
+trap 'kill $dbpid 2>/dev/null; kill_tree $fwdpid; rm -rf "$fx"' EXIT
 "$db/dropbearkey" -t ed25519 -f "$fx/hostkey" > /dev/null 2>&1
 ssh-keygen -q -t ed25519 -N '' -C x-ssh-oracle -f "$fx/userkey"
 cp "$fx/userkey.pub" "$fx/authorized_keys"
@@ -141,6 +150,24 @@ if [ "$status" = 0 ] && [ -n "$ours" ] && [ "$ours" = "$theirs" ]; then
 	echo "ok: convert -- dropbearkey reads the Dropbear file x-ssh wrote from ssh-keygen's key"
 else
 	fail "convert: openssh to dropbear status $status, dropbearkey '$ours', ssh-keygen '$theirs'"
+fi
+
+# forward: -N -L, a local port carried through the Dropbear to its own
+# ssh port: each connection reads the server's version line, two in turn
+fport=$((port + 10))
+HOME="$home" "$X" -l ssh -- dbclient -p "$port" -i "$fx/userkey" -l "$user" -N -L "$fport:127.0.0.1:$port" 127.0.0.1 < /dev/null 2> "$fx/fwd.err" &
+fwdpid=$!
+i=0
+while ! nc -z 127.0.0.1 "$fport" 2>/dev/null && [ $i -lt 60 ]; do i=$((i + 1)); sleep 1; done
+one=$(nc -w 3 127.0.0.1 "$fport" < /dev/null 2>/dev/null | head -c 16)
+two=$(nc -w 3 127.0.0.1 "$fport" < /dev/null 2>/dev/null | head -c 16)
+kill_tree $fwdpid
+fwdpid=
+if [ "$one" = "SSH-2.0-dropbear" ] && [ "$two" = "SSH-2.0-dropbear" ]; then
+	echo "ok: forward -- -L carries two connections in turn through the Dropbear"
+else
+	fail "forward: read '$one' then '$two' through the forwarded port"
+	cat "$fx/fwd.err" >&2
 fi
 
 # git

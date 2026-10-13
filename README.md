@@ -28,7 +28,10 @@ command a connection.
   the client's standard input carried to it.  `-i` names an OpenSSH or
   Dropbear ssh-ed25519 key, `-l` the user, `-p` the port; hosts are
   checked against `~/.ssh/known_hosts`, `-y` accepting and recording a
-  new one.  `-v` traces the connection, with CPU milliseconds a step.
+  new one.  `-L [address:]port:host:port` carries each connection to a
+  local port through the server to `host:port` (`-g` listens on every
+  interface, `-N` runs no command).  `-v` traces the connection, with
+  CPU milliseconds a step.
 - `dropbear`: the server: `-r` its host key (default
   `/etc/dropbear/dropbear_ed25519_host_key`), made there under `-R` when
   the file is missing; `-p` where it listens, `-D` the directory of the

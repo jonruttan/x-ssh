@@ -52,6 +52,9 @@
             (Opts arg "-i" "keyfile" "The ssh-ed25519 key to authenticate with (OpenSSH format)")
             (Opts arg "-l" "user" "The user to log in as")
             (Opts flag "-y" "Accept and record the key of a host not in known_hosts")
+            (Opts arg "-L" "forward" "Local port forwarding: [listenaddress:]listenport:remotehost:remoteport")
+            (Opts flag "-N" "Don't run a remote command")
+            (Opts flag "-g" "Allow remote hosts to connect to forwarded ports")
             (Opts flag "-v" "Trace the connection on standard error")
             %version-row))
     (%row (lit keygen) (list "dropbearkey" "ssh-keygen") "the key generator"
@@ -222,10 +225,32 @@
                      (#t (%int port-text))))
     (def key (if (Opts on? o "-i") (Opts value o "-i") ()))
     (def command (Str8 join " " (rest (Opts operands o))))
+    (def forwards (List map (fn (_ s) (%forward-spec s (Opts on? o "-g"))) (Opts values o "-L")))
+    (def bad (List find (fn (_ f) (null? (rest f))) forwards))
     (match
       ((null? key) (list (lit client) "x-ssh: -i keyfile is required; no agent or password yet\n" 1))
-      ((= (Str8 length command) 0) (list (lit client) "x-ssh: a command is required; no shell yet\n" 1))
-      (#t (list (lit client) (list (lit exec) host port user key command (Opts on? o "-v") (Opts on? o "-y")) 0)))))
+      ((not (null? bad)) (list (lit client) (Str8 append "Bad TCP forward '" (first bad) "'\n") 1))
+      ((if (Opts on? o "-N") #f (= (Str8 length command) 0))
+        (list (lit client) "x-ssh: a command is required; no shell yet\n" 1))
+      (#t (list (lit client)
+                (list (lit exec) host port user key (if (Opts on? o "-N") () command)
+                      (Opts on? o "-v") (Opts on? o "-y") (List map rest forwards))
+                0)))))
+
+; A -L spec as (SPEC . (ADDRESS PORT HOST PORT)), Dropbear's shape:
+; [listenaddress:]listenport:remotehost:remoteport, the address
+; "localhost" unless given, or () for every interface under -g; a bad
+; one as (SPEC).
+(def %forward-spec
+  (fn (_ s any)
+    (def parts (Str8 split ":" s))
+    (def n (List length parts))
+    (def listen (if (= n 4) (first parts) (if any () "localhost")))
+    (def lport (if (if (= n 3) #t (= n 4)) (%int-or-nil (List ref (- n 3) parts)) ()))
+    (def rport (if (if (= n 3) #t (= n 4)) (%int-or-nil (List ref (- n 1) parts)) ()))
+    (if (if (null? lport) #t (null? rport))
+      (list s)
+      (list s listen lport (List ref (- n 2) parts) rport))))
 
 (def %int (fn (_ t) ((prim-ref (lit convert) (lit to)) t (Type named INTEGER) 10)))
 
@@ -239,8 +264,8 @@
       (Sys exit
         (match
           ((eq? (first what) (lit exec))
-            (ssh-client-run (List ref 1 what) (List ref 2 what) (List ref 3 what)
-                            (List ref 4 what) (List ref 5 what) (List ref 6 what) (List ref 7 what)))
+            (ssh-client-run (List ref 1 what) (List ref 2 what) (List ref 3 what) (List ref 4 what)
+                            (List ref 5 what) (List ref 6 what) (List ref 7 what) (List ref 8 what)))
           ((eq? (first what) (lit generate)) (ssh-keygen-generate (List ref 1 what) (List ref 2 what)))
           ((eq? (first what) (lit to)) (ssh-scp-remote #t (List ref 1 what) (List ref 2 what) (List ref 3 what)))
           ((eq? (first what) (lit from)) (ssh-scp-remote #f (List ref 1 what) (List ref 2 what) (List ref 3 what)))

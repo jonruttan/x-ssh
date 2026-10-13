@@ -65,7 +65,7 @@
             (Opts arg "-i" "identity_file" "The key to authenticate with, passed to the ssh program")
             (Opts arg "-S" "program" "The program to connect with, default ssh")
             (Opts flag "-p" "Preserve modification times")
-            (Opts flag "-r" "Copy directories recursively (not served yet)")
+            (Opts flag "-r" "Copy directories recursively")
             (Opts flag "-q" "Quiet: no progress meter (x-ssh has none)")
             (Opts flag "-v" "Verbose")
             (Opts hidden (Opts flag "-d" "The target must be a directory (the remote end)"))
@@ -112,24 +112,25 @@
       ((eq? (first p) (lit scp)) (%scp-plan o decl))
       (#t (list (first p) (Str8 append (first ops) ": not served yet\n") 1)))))
 
-; scp's line as what to do: (scp (to OPERANDS PRESERVE) 0) or (scp (from
-; OPERANDS PRESERVE) 0) for the remote ends, (scp (copy OPERANDS PROGRAM
-; PORT KEY PRESERVE) 0) for a client, or what it says and its status.
+; scp's line as what to do: (scp (to OPERANDS PRESERVE RECURSIVE) 0) or
+; (scp (from OPERANDS PRESERVE RECURSIVE) 0) for the remote ends, (scp
+; (copy OPERANDS PROGRAM PORT KEY PRESERVE RECURSIVE) 0) for a client, or
+; what it says and its status.
 (def %scp-plan
   (fn (_ o decl)
     (def ops (Opts operands o))
     (def preserve (Opts on? o "-p"))
+    (def recursive (Opts on? o "-r"))
     (match
-      ((Opts on? o "-r") (list (lit scp) "scp: directories are not served yet\n" 1))
-      ((Opts on? o "-t") (list (lit scp) (list (lit to) ops preserve) 0))
-      ((Opts on? o "-f") (list (lit scp) (list (lit from) ops preserve) 0))
+      ((Opts on? o "-t") (list (lit scp) (list (lit to) ops preserve recursive) 0))
+      ((Opts on? o "-f") (list (lit scp) (list (lit from) ops preserve recursive) 0))
       ((< (List length ops) 2) (list (lit scp) (Opts usage decl) 1))
       (#t (list (lit scp)
                 (list (lit copy) ops
                       (if (Opts on? o "-S") (Opts value o "-S") "ssh")
                       (if (Opts on? o "-P") (Opts value o "-P") ())
                       (if (Opts on? o "-i") (Opts value o "-i") ())
-                      preserve)
+                      preserve recursive)
                 0)))))
 
 ; The server's line as what to do: (server (serve KEYFILE ADDRESS PORT
@@ -220,10 +221,11 @@
             (ssh-client-run (List ref 1 what) (List ref 2 what) (List ref 3 what)
                             (List ref 4 what) (List ref 5 what) (List ref 6 what) (List ref 7 what)))
           ((eq? (first what) (lit generate)) (ssh-keygen-generate (List ref 1 what) (List ref 2 what)))
-          ((eq? (first what) (lit to)) (ssh-scp-remote #t (List ref 1 what) (List ref 2 what)))
-          ((eq? (first what) (lit from)) (ssh-scp-remote #f (List ref 1 what) (List ref 2 what)))
+          ((eq? (first what) (lit to)) (ssh-scp-remote #t (List ref 1 what) (List ref 2 what) (List ref 3 what)))
+          ((eq? (first what) (lit from)) (ssh-scp-remote #f (List ref 1 what) (List ref 2 what) (List ref 3 what)))
           ((eq? (first what) (lit copy))
-            (ssh-scp-client (List ref 1 what) (List ref 2 what) (List ref 3 what) (List ref 4 what) (List ref 5 what)))
+            (ssh-scp-client (List ref 1 what) (List ref 2 what) (List ref 3 what) (List ref 4 what)
+                            (List ref 5 what) (List ref 6 what)))
           ((eq? (first what) (lit serve))
             (ssh-serve (List ref 1 what) (List ref 2 what) (List ref 3 what) (List ref 4 what)))
           (#t (ssh-keygen-print (List ref 1 what) (List ref 2 what)))))

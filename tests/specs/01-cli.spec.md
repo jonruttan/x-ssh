@@ -82,16 +82,16 @@ Usage: dbclient [options] [user@]host[/port] [command]
 (write (ssh-plan (list "scp" "-p" "-P" "2222" "-i" "k" "a" "b" "h:dir")))
 ```
 ---
-    ('scp ('copy ("a" "b" "h:dir") "ssh" "2222" "k" #t) 0)
+    ('scp ('copy ("a" "b" "h:dir") "ssh" "2222" "k" #t #f) 0)
 
-### -t and -f are the remote ends; -r is refused, status 1
+### -t and -f are the remote ends; -r rides along to either
 
 ```ssh
 (write (List map (fn (_ l) (first (rest (ssh-plan l))))
-  (list (list "scp" "-t" "dir") (list "scp" "-f" "a" "b") (list "scp" "-r" "d" "h:e"))))
+  (list (list "scp" "-t" "dir") (list "scp" "-rf" "a" "b") (list "scp" "-r" "d" "h:e"))))
 ```
 ---
-    (('to ("dir") #f) ('from ("a" "b") #f) "scp: directories are not served yet\n")
+    (('to ("dir") #f #f) ('from ("a" "b") #f #t) ('copy ("d" "h:e") "ssh" () () #f #t))
 
 ### a program not written yet says so, status 1
 

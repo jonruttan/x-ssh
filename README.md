@@ -38,9 +38,10 @@ command a connection.
   `-y` prints a key's public line and fingerprint.
 - `scp`: files to and from a host, either end.  As the client it spawns
   the ssh program (`-S`, default `ssh`; `-P` and `-i` are passed on) and
-  speaks the protocol over its pipes, `-p` preserving times.  As the
-  remote end (`-t`, `-f`, `-d`) it is what an OpenSSH `scp -O` reaches.
-  Directories, and so `-r`, are not served yet.
+  speaks the protocol over its pipes, `-r` walking directories and `-p`
+  sending times.  As the remote end (`-t`, `-f`, `-d`) it is what an
+  OpenSSH `scp -O` reaches.  A received time is acknowledged and not set:
+  the platform's File has no door that sets a given time yet.
 - `-V` on each, and `--help` from its option declaration.
 
 Not served yet: `dropbearconvert`, the server's `-R` and backgrounding,

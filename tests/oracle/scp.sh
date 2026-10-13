@@ -84,6 +84,31 @@ else
 	fail "times"
 fi
 
+# tree: a directory under -r, both ways; without -r it is refused
+mkdir -p "$fx/tree/sub/deep"
+head -c 50000 /dev/urandom > "$fx/tree/one"
+head -c 50000 /dev/urandom > "$fx/tree/sub/two"
+head -c 50000 /dev/urandom > "$fx/tree/sub/deep/three"
+if xscp -r "$fx/tree" "$user@127.0.0.1:$fx/remote" && diff -r "$fx/tree" "$fx/remote/tree" > /dev/null; then
+	echo "ok: tree -- -r sends a directory to a Dropbear whole"
+else
+	fail "tree up"
+fi
+if xscp -r "$user@127.0.0.1:$fx/remote/tree" "$fx/local/tree" && diff -r "$fx/tree" "$fx/local/tree" > /dev/null; then
+	echo "ok: tree -- -r fetches a directory from a Dropbear whole"
+else
+	fail "tree down"
+fi
+if xscp "$fx/tree" "$user@127.0.0.1:$fx/remote/flat"; then
+	fail "tree: a directory without -r was accepted"
+else
+	if grep -q 'not a regular file' "$fx/err" && [ ! -e "$fx/remote/flat" ]; then
+		echo "ok: tree -- a directory without -r is refused"
+	else
+		fail "tree: a directory without -r"
+	fi
+fi
+
 # ends: x-ssh's server, its PATH finding x-ssh's scp
 PATH="$fx/bin:$PATH" "$X" -l ssh -- dropbear -r "$fx/hostkey" -p "127.0.0.1:$xport" -D "$fx" > "$fx/xserver.log" 2>&1 &
 xpid=$!
@@ -101,6 +126,16 @@ if $oscp "$user@127.0.0.1:$fx/b" "$fx/local/b-x" 2> "$fx/err" && cmp -s "$fx/b" 
 	echo "ok: ends -- OpenSSH's scp from x-ssh's scp -f"
 else
 	fail "ends: from x-ssh's scp -f"; tail -5 "$fx/xserver.log" >&2
+fi
+if $oscp -r "$fx/tree" "$user@127.0.0.1:$fx/remote/tree-x" 2> "$fx/err" && diff -r "$fx/tree" "$fx/remote/tree-x" > /dev/null; then
+	echo "ok: ends -- OpenSSH's scp -r to x-ssh's scp -t"
+else
+	fail "ends: -r to x-ssh's scp -t"; tail -5 "$fx/xserver.log" >&2
+fi
+if $oscp -r "$user@127.0.0.1:$fx/tree" "$fx/local/tree-x" 2> "$fx/err" && diff -r "$fx/tree" "$fx/local/tree-x" > /dev/null; then
+	echo "ok: ends -- OpenSSH's scp -r from x-ssh's scp -f"
+else
+	fail "ends: -r from x-ssh's scp -f"; tail -5 "$fx/xserver.log" >&2
 fi
 
 exit $failed

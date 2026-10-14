@@ -45,6 +45,8 @@
             (Opts flag "-E" "Log to stderr rather than syslog (x-ssh has no syslog: in the background its log goes nowhere)")
             (Opts arg "-P" "pidfile" "Create pid file PidFile, default /var/run/dropbear.pid")
             (Opts flag "-j" "Disable local port forwarding")
+            (Opts flag "-k" "Disable remote port forwarding")
+            (Opts flag "-a" "Allow connections to forwarded ports from any host")
             (Opts flag "-s" "Disable password logins (x-ssh has none)")
             %version-row))
     (%row (lit client) (list "dbclient" "ssh") "the client"
@@ -54,6 +56,7 @@
             (Opts arg "-l" "user" "The user to log in as")
             (Opts flag "-y" "Accept and record the key of a host not in known_hosts")
             (Opts arg "-L" "forward" "Local port forwarding: [listenaddress:]listenport:remotehost:remoteport")
+            (Opts arg "-R" "forward" "Remote port forwarding: [listenaddress:]listenport:remotehost:remoteport")
             (Opts flag "-N" "Don't run a remote command")
             (Opts flag "-g" "Allow remote hosts to connect to forwarded ports")
             (Opts flag "-v" "Trace the connection on standard error")
@@ -171,7 +174,7 @@
     (match
       ((null? port) (list (lit server) (Str8 append "Bad port '" p "'\n") 1))
       (#t (list (lit server)
-                (list (lit serve) key addr port dir (Opts on? o "-R") (not (Opts on? o "-F")) pidfile (not (Opts on? o "-j")))
+                (list (lit serve) key addr port dir (Opts on? o "-R") (not (Opts on? o "-F")) pidfile (not (Opts on? o "-j")) (not (Opts on? o "-k")) (Opts on? o "-a"))
                 0)))))
 
 ; The key generator's line as what to do, in dropbearkey's order of
@@ -227,7 +230,8 @@
     (def key (if (Opts on? o "-i") (Opts value o "-i") ()))
     (def command (Str8 join " " (rest (Opts operands o))))
     (def forwards (List map (fn (_ s) (%forward-spec s (Opts on? o "-g"))) (Opts values o "-L")))
-    (def bad (List find (fn (_ f) (null? (rest f))) forwards))
+    (def remotes (List map (fn (_ s) (%forward-spec s (Opts on? o "-g"))) (Opts values o "-R")))
+    (def bad (List find (fn (_ f) (null? (rest f))) (List append forwards remotes)))
     (match
       ((null? key) (list (lit client) "x-ssh: -i keyfile is required; no agent or password yet\n" 1))
       ((not (null? bad)) (list (lit client) (Str8 append "Bad TCP forward '" (first bad) "'\n") 1))
@@ -235,7 +239,7 @@
         (list (lit client) "x-ssh: a command is required; no shell yet\n" 1))
       (#t (list (lit client)
                 (list (lit exec) host port user key (if (Opts on? o "-N") () command)
-                      (Opts on? o "-v") (Opts on? o "-y") (List map rest forwards))
+                      (Opts on? o "-v") (Opts on? o "-y") (List map rest forwards) (List map rest remotes))
                 0)))))
 
 ; A -L spec as (SPEC . (ADDRESS PORT HOST PORT)), Dropbear's shape:
@@ -266,7 +270,7 @@
         (match
           ((eq? (first what) (lit exec))
             (ssh-client-run (List ref 1 what) (List ref 2 what) (List ref 3 what) (List ref 4 what)
-                            (List ref 5 what) (List ref 6 what) (List ref 7 what) (List ref 8 what)))
+                            (List ref 5 what) (List ref 6 what) (List ref 7 what) (List ref 8 what) (List ref 9 what)))
           ((eq? (first what) (lit generate)) (ssh-keygen-generate (List ref 1 what) (List ref 2 what)))
           ((eq? (first what) (lit to)) (ssh-scp-remote #t (List ref 1 what) (List ref 2 what) (List ref 3 what)))
           ((eq? (first what) (lit from)) (ssh-scp-remote #f (List ref 1 what) (List ref 2 what) (List ref 3 what)))
@@ -275,7 +279,7 @@
                             (List ref 5 what) (List ref 6 what)))
           ((eq? (first what) (lit serve))
             (ssh-serve (List ref 1 what) (List ref 2 what) (List ref 3 what) (List ref 4 what)
-                       (List ref 5 what) (List ref 6 what) (List ref 7 what) (List ref 8 what)))
+                       (List ref 5 what) (List ref 6 what) (List ref 7 what) (List ref 8 what) (List ref 9 what) (List ref 10 what)))
           ((eq? (first what) (lit convert))
             (ssh-convert (List ref 1 what) (List ref 2 what) (List ref 3 what) (List ref 4 what)))
           (#t (ssh-keygen-print (List ref 1 what) (List ref 2 what)))))

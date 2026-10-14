@@ -11,11 +11,14 @@
 ; to the caller as they arrive, our input pumped to it as the server's
 ; window allows, its exit status taken from the request that carries it.
 ; Beside it, each connection accepted on a -L listener is a direct-tcpip
-; channel to the host and port the forward names, the connection's bytes
-; pumped each way until both ends close.  The channels are a table keyed
-; by our channel number, which every message from the server names
-; first; one loop waits on the socket, the listeners, and each channel's
-; input while that channel's window has room.
+; channel to the host and port the forward names, and each -R forward is
+; asked of the server by a tcpip-forward global request, the connections
+; it then opens as forwarded-tcpip channels connected here to the host
+; and port the forward names; a forward's bytes are pumped each way until
+; both ends close.  The channels are a table keyed by our channel
+; number, which every message from the server names first; one loop
+; waits on the socket, the listeners, and each channel's input while
+; that channel's window has room.
 
 (module ssh/session)
 
@@ -25,12 +28,14 @@
 (import x/sys/gc)
 (import ssh/bytes ssh-out ssh-put-byte ssh-put-bool ssh-put-uint32 ssh-put-text ssh-put-string ssh-out-run
   ssh-in ssh-get-byte ssh-get-bool ssh-get-uint32 ssh-get-string ssh-get-text ssh-in-buf ssh-copy)
-(import ssh/transport ssh-fd ssh-pending? ssh-send-packet! ssh-next-packet! ssh-msg-disconnect)
+(import ssh/transport ssh-fd ssh-pending? ssh-send-packet! ssh-next-packet! ssh-msg-disconnect
+  ssh-msg-global-request ssh-msg-request-success ssh-msg-request-failure)
 
 (def %byte-ref (prim-ref (lit str) (lit byte-ref)))
 (def %char->int (prim-ref (lit char) (lit ->int)))
 (def %byte-len (prim-ref (lit str) (lit byte-len)))
 (def %byte (fn (_ s i) (%char->int (%byte-ref s i))))
+(def %num (fn (_ n) ((prim-ref (lit convert) (lit to)) n (Type named STRING) 10)))
 
 (def %msg-channel-open 90) (def %msg-channel-open-confirmation 91)
 (def %msg-channel-open-failure 92) (def %msg-channel-window-adjust 93)
@@ -72,8 +77,11 @@
 
 ; The run's state: 1 the channels, 2 the next channel number, 3 the
 ; bytes moved since the last collect, 4 the listeners as (FD HOST PORT),
-; 5 the session channel or ().
+; 5 the session channel or (), 6 the remote forwards as (ADDRESS PORT
+; HOST PORT), 7 those whose request the server has yet to answer, in
+; the order asked.
 (def %CHANNELS 1) (def %NEXT 2) (def %MOVED 3) (def %LISTENERS 4) (def %SESSION 5)
+(def %REMOTES 6) (def %ASKED 7)
 (def %rn (fn (_ run i) (%oref run i)))
 (def %rn! (fn (_ run i v) (%oset! run i v)))
 
@@ -89,6 +97,13 @@
 
 (def %moved! (fn (_ run n) (%rn! run %MOVED (+ (%rn run %MOVED) n))))
 
+; A dotted address for a name: what the resolver says, or the name when
+; it already is one.
+(def %address
+  (fn (_ host)
+    (def r (Socket resolve host))
+    (if (null? r) host (if (pair? r) (first r) r))))
+
 ; A channel added to the table, numbered next.
 (def %channel!
   (fn (_ run kind input out err fd command)
@@ -100,13 +115,21 @@
     (%rn! run %CHANNELS (List append (%rn run %CHANNELS) (list ch)))
     ch))
 
+; A forward channel over a connection: the connection its input, and
+; what its data is written to.
+(def %forward-channel!
+  (fn (_ run fd)
+    (%channel! run (lit forward) fd
+      (fn (_ buf start len) (Socket send-run fd (ssh-copy buf start len) len))
+      () fd ())))
+
 (def %find
   (fn (_ run ours)
     (List find (fn (_ ch) (= (%ch ch %OURS) ours)) (%rn run %CHANNELS))))
 
 (def %drop!
   (fn (_ run ch)
-    (%rn! run %CHANNELS (List filter (fn (_ x) (not (eq? x ch))) (%rn run %CHANNELS)))))
+    (%rn! run %CHANNELS (List filter (fn (_ x) (not (= (%ch x %OURS) (%ch ch %OURS)))) (%rn run %CHANNELS)))))
 
 ; The open of a channel, its kind's fields put by the caller after.
 (def %open-packet
@@ -131,15 +154,66 @@
 (def %open-forward!
   (fn (_ c run fd host port)
     (def peer (Socket peer fd))
-    (def ch (%channel! run (lit forward) fd
-              (fn (_ buf start len) (Socket send-run fd (ssh-copy buf start len) len))
-              () fd ()))
+    (def ch (%forward-channel! run fd))
     (def open (%open-packet ch "direct-tcpip"))
     (ssh-put-text open host)
     (ssh-put-uint32 open port)
     (ssh-put-text open (first peer))
     (ssh-put-uint32 open (rest peer))
     (%send c open)))
+
+; A remote forward asked of the server: tcpip-forward for its address
+; and port, the address "" for every interface, as Dropbear asks.
+(def %ask-remote!
+  (fn (_ c run remote)
+    (def req (%packet-of ssh-msg-global-request))
+    (ssh-put-text req "tcpip-forward")
+    (ssh-put-bool req #t)
+    (ssh-put-text req (if (null? (first remote)) "" (first remote)))
+    (ssh-put-uint32 req (List ref 1 remote))
+    (%send c req)
+    (%rn! run %ASKED (List append (%rn run %ASKED) (list remote)))))
+
+; The server's answer to the oldest request still open: a refusal said
+; as Dropbear says it.
+(def %answered!
+  (fn (_ run ok)
+    (def asked (%rn run %ASKED))
+    (unless (null? asked)
+      (do (def r (first asked))
+          (%rn! run %ASKED (rest asked))
+          (unless ok
+            (%say (Str8 append "x-ssh: Remote TCP forward request failed (port " (%num (List ref 1 r))
+                              " -> " (List ref 2 r) ":" (%num (List ref 3 r)) ")\n")))))))
+
+; A channel the server opens: a forwarded-tcpip for a remote forward's
+; port, connected here to the forward's host and port and confirmed; any
+; other, or a connect that fails, refused.
+(def %opened!
+  (fn (_ c run in)
+    (def type (ssh-get-text in))
+    (def sender (ssh-get-uint32 in))
+    (def window (ssh-get-uint32 in))
+    (def max (ssh-get-uint32 in))
+    (def port (if (str=? type "forwarded-tcpip") (do (ssh-get-text in) (ssh-get-uint32 in)) ()))
+    (def remote (if (null? port) () (List find (fn (_ r) (= (List ref 1 r) port)) (%rn run %REMOTES))))
+    (def fd (if (null? remote) ()
+              (guard (e ()) (Socket tcp-connect (%address (List ref 2 remote)) (List ref 3 remote)))))
+    (if (null? fd)
+      (do (def no (%packet-of %msg-channel-open-failure))
+          (ssh-put-uint32 no sender)
+          (ssh-put-uint32 no (if (null? remote) 1 2))
+          (ssh-put-text no (if (null? remote) (Str8 append "unrequested channel: " type) "connect failed"))
+          (ssh-put-text no "")
+          (%send c no))
+      (do (def ch (%forward-channel! run fd))
+          (%ch! ch %SERVER sender) (%ch! ch %WINDOW window) (%ch! ch %MAX max)
+          (def ok (%packet-of %msg-channel-open-confirmation))
+          (ssh-put-uint32 ok sender)
+          (ssh-put-uint32 ok (%ch ch %OURS))
+          (ssh-put-uint32 ok %window)
+          (ssh-put-uint32 ok %max-packet)
+          (%send c ok)))))
 
 ; A channel's input's end: EOF to the server, and no more reads.
 (def %input-done!
@@ -177,6 +251,13 @@
       (do (guard (e ()) (Socket close (%ch ch %FD)))
           (%drop! run ch)))))
 
+; A global request from the server: none is served; answered when it
+; wants an answer.
+(def %global!
+  (fn (_ c in)
+    (ssh-get-text in)
+    (when (ssh-get-bool in) (%send c (%packet-of ssh-msg-request-failure)))))
+
 ; One packet from the server handled: a channel message is for the
 ; channel it names, ours.
 (def %handle!
@@ -188,6 +269,10 @@
               (%find run (ssh-get-uint32 in))
               ()))
     (match
+      ((= t ssh-msg-global-request) (%global! c in))
+      ((= t ssh-msg-request-success) (%answered! run #t))
+      ((= t ssh-msg-request-failure) (%answered! run #f))
+      ((= t %msg-channel-open) (%opened! c run in))
       ((null? ch) ())
       ((= t %msg-channel-open-confirmation)
         (do (%ch! ch %SERVER (ssh-get-uint32 in))
@@ -255,20 +340,24 @@
 ; The command run on the server, () for none, with input the descriptor
 ; its standard input is read from (() for none: EOF at once), on-out and
 ; on-err called with each (BUF START LEN) of its output as it arrives;
-; and each forward (ADDRESS PORT HOST PORT) listened on, ADDRESS () for
-; every one, its connections carried to HOST:PORT through the server.
+; each forward (ADDRESS PORT HOST PORT) listened on, ADDRESS () for every
+; one, its connections carried to HOST:PORT through the server; and each
+; remote (ADDRESS PORT HOST PORT) asked of the server, ADDRESS () for
+; every one, the connections it opens carried to HOST:PORT from here.
 ; Runs until the session channel closes, or, with no command, until the
 ; connection ends.  Answers the exit status, or () when the server gave
 ; none.
 (def ssh-session-run!
-  (fn (_ c command input on-out on-err forwards)
-    (def run (Vector make 5 ()))
+  (fn (_ c command input on-out on-err forwards remotes)
+    (def run (Vector make 7 ()))
     (%rn! run %CHANNELS ()) (%rn! run %NEXT 0) (%rn! run %MOVED 0)
+    (%rn! run %REMOTES remotes) (%rn! run %ASKED ())
     (%rn! run %LISTENERS
       (List map (fn (_ f) (list (if (null? (first f)) (Socket tcp-listen (List ref 1 f))
                                   (Socket tcp-listen-on (first f) (List ref 1 f)))
                                 (List ref 2 f) (List ref 3 f)))
         forwards))
+    (List for-each (fn (_ r) (%ask-remote! c run r)) remotes)
     (unless (null? command) (%open-session! c run command input on-out on-err))
     (def sock (ssh-fd c))
     ((fn (self)

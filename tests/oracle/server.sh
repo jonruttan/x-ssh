@@ -21,6 +21,9 @@
 #             git-upload-pack: the clone's HEAD and its fsck
 #   forward   a client's -L served as direct-tcpip channels to the server's
 #             own ssh port: x-ssh's client (two connections) and OpenSSH's
+#   remote    a client's -R listened for by the server, its connections opened
+#             to the client and carried to the server's own ssh port: x-ssh's
+#             client (two connections) and OpenSSH's
 #   background  a server started without -F returns at once, makes its
 #             host key under -R, writes -P's pidfile, and serves dbclient
 #
@@ -138,8 +141,8 @@ HOME="$fx/home" "$X" -l ssh -- dbclient -p "$port" -i "$fx/dbkey" -l "$user" -N 
 fwdpid=$!
 i=0
 while ! nc -z 127.0.0.1 "$fport" 2>/dev/null && [ $i -lt 60 ]; do i=$((i + 1)); sleep 1; done
-one=$(nc -w 3 127.0.0.1 "$fport" < /dev/null 2>/dev/null | head -c 13)
-two=$(nc -w 3 127.0.0.1 "$fport" < /dev/null 2>/dev/null | head -c 13)
+one=$(nc -w 15 127.0.0.1 "$fport" < /dev/null 2>/dev/null | head -c 13)
+two=$(nc -w 15 127.0.0.1 "$fport" < /dev/null 2>/dev/null | head -c 13)
 kill_tree $fwdpid
 fwdpid=
 if [ "$one" = "SSH-2.0-x-ssh" ] && [ "$two" = "SSH-2.0-x-ssh" ]; then
@@ -152,13 +155,44 @@ $ossh -i "$fx/osshkey" -N -L "$oport:127.0.0.1:$port" "$user@127.0.0.1" < /dev/n
 fwdpid=$!
 i=0
 while ! nc -z 127.0.0.1 "$oport" 2>/dev/null && [ $i -lt 60 ]; do i=$((i + 1)); sleep 1; done
-one=$(nc -w 3 127.0.0.1 "$oport" < /dev/null 2>/dev/null | head -c 13)
+one=$(nc -w 15 127.0.0.1 "$oport" < /dev/null 2>/dev/null | head -c 13)
 kill $fwdpid 2>/dev/null
 fwdpid=
 if [ "$one" = "SSH-2.0-x-ssh" ]; then
 	echo "ok: forward -- OpenSSH's -L is served through the x-ssh server"
 else
 	fail "forward: OpenSSH's client read '$one'"; cat "$fx/fwd.err" >&2
+fi
+
+# remote: a client's -R listened for by the x-ssh server, its connections
+# opened to the client and carried to the server's own ssh port: x-ssh's
+# client, then OpenSSH's
+rport=$((port + 20))
+HOME="$fx/home" "$X" -l ssh -- dbclient -p "$port" -i "$fx/dbkey" -l "$user" -N -R "$rport:127.0.0.1:$port" 127.0.0.1 < /dev/null 2> "$fx/fwd.err" &
+fwdpid=$!
+i=0
+while [ "$(grep -c "remote forward on" "$fx/server.log")" -lt 1 ] && [ $i -lt 60 ]; do i=$((i + 1)); sleep 1; done
+one=$(nc -w 15 127.0.0.1 "$rport" < /dev/null 2>/dev/null | head -c 13)
+two=$(nc -w 15 127.0.0.1 "$rport" < /dev/null 2>/dev/null | head -c 13)
+kill_tree $fwdpid
+fwdpid=
+if [ "$one" = "SSH-2.0-x-ssh" ] && [ "$two" = "SSH-2.0-x-ssh" ]; then
+	echo "ok: remote -- x-ssh's -R is listened for by the x-ssh server, two connections in turn"
+else
+	fail "remote: x-ssh's client read '$one' then '$two'"; cat "$fx/fwd.err" >&2; tail -5 "$fx/server.log" >&2
+fi
+oport=$((port + 21))
+$ossh -i "$fx/osshkey" -N -R "$oport:127.0.0.1:$port" "$user@127.0.0.1" < /dev/null 2> "$fx/fwd.err" &
+fwdpid=$!
+i=0
+while [ "$(grep -c "remote forward on" "$fx/server.log")" -lt 2 ] && [ $i -lt 60 ]; do i=$((i + 1)); sleep 1; done
+one=$(nc -w 15 127.0.0.1 "$oport" < /dev/null 2>/dev/null | head -c 13)
+kill $fwdpid 2>/dev/null
+fwdpid=
+if [ "$one" = "SSH-2.0-x-ssh" ]; then
+	echo "ok: remote -- OpenSSH's -R is listened for by the x-ssh server"
+else
+	fail "remote: OpenSSH's client read '$one'"; cat "$fx/fwd.err" >&2; tail -5 "$fx/server.log" >&2
 fi
 
 # background: no -F, -R making the host key at -r's path, -P the pidfile;

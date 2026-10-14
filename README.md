@@ -31,8 +31,10 @@ command a connection.
   new one.  `-L [address:]port:host:port` carries each connection to a
   local port through the server to `host:port`; `-R` the same shape asks
   the server to listen, its connections carried here to `host:port`
-  (`-g` on every interface, `-N` runs no command).  `-v` traces the
-  connection, with CPU milliseconds a step.
+  (`-g` on every interface, `-N` runs no command); `-B host:port` is
+  Dropbear's netcat mode, the client's own input and output carried
+  through the server to `host:port`, as git's or ssh's ProxyCommand
+  wants.  `-v` traces the connection, with CPU milliseconds a step.
 - `dropbear`: the server: `-r` its host key (default
   `/etc/dropbear/dropbear_ed25519_host_key`), made there under `-R` when
   the file is missing; `-p` where it listens, `-D` the directory of the

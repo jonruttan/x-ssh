@@ -57,6 +57,7 @@
             (Opts flag "-y" "Accept and record the key of a host not in known_hosts")
             (Opts arg "-L" "forward" "Local port forwarding: [listenaddress:]listenport:remotehost:remoteport")
             (Opts arg "-R" "forward" "Remote port forwarding: [listenaddress:]listenport:remotehost:remoteport")
+            (Opts arg "-B" "endpoint" "Netcat-alike forwarding to endhost:endport")
             (Opts flag "-N" "Don't run a remote command")
             (Opts flag "-g" "Allow remote hosts to connect to forwarded ports")
             (Opts flag "-v" "Trace the connection on standard error")
@@ -232,15 +233,25 @@
     (def forwards (List map (fn (_ s) (%forward-spec s (Opts on? o "-g"))) (Opts values o "-L")))
     (def remotes (List map (fn (_ s) (%forward-spec s (Opts on? o "-g"))) (Opts values o "-R")))
     (def bad (List find (fn (_ f) (null? (rest f))) (List append forwards remotes)))
+    (def netcat (if (Opts on? o "-B") (%endpoint (Opts value o "-B")) #f))
     (match
       ((null? key) (list (lit client) "x-ssh: -i keyfile is required; no agent or password yet\n" 1))
       ((not (null? bad)) (list (lit client) (Str8 append "Bad TCP forward '" (first bad) "'\n") 1))
-      ((if (Opts on? o "-N") #f (= (Str8 length command) 0))
+      ((null? netcat) (list (lit client) (Str8 append "Bad -B endpoint '" (Opts value o "-B") "'\n") 1))
+      ((if (if (Opts on? o "-N") #t netcat) #f (= (Str8 length command) 0))
         (list (lit client) "x-ssh: a command is required; no shell yet\n" 1))
       (#t (list (lit client)
-                (list (lit exec) host port user key (if (Opts on? o "-N") () command)
-                      (Opts on? o "-v") (Opts on? o "-y") (List map rest forwards) (List map rest remotes))
+                (list (lit exec) host port user key (if (if (Opts on? o "-N") #t netcat) () command)
+                      (Opts on? o "-v") (Opts on? o "-y") (List map rest forwards) (List map rest remotes)
+                      (if netcat netcat ()))
                 0)))))
+
+; A -B endpoint host:port as (HOST . PORT), or () for a bad one; #f for none.
+(def %endpoint
+  (fn (_ s)
+    (def colon (Str8 index-of ":" s))
+    (def port (if (null? colon) () (%int-or-nil (Str8 sub (+ colon 1) (- (Str8 length s) colon 1) s))))
+    (if (if (null? colon) #t (if (null? port) #t (= colon 0))) () (pair (Str8 sub 0 colon s) port))))
 
 ; A -L spec as (SPEC . (ADDRESS PORT HOST PORT)), Dropbear's shape:
 ; [listenaddress:]listenport:remotehost:remoteport, the address
@@ -270,7 +281,7 @@
         (match
           ((eq? (first what) (lit exec))
             (ssh-client-run (List ref 1 what) (List ref 2 what) (List ref 3 what) (List ref 4 what)
-                            (List ref 5 what) (List ref 6 what) (List ref 7 what) (List ref 8 what) (List ref 9 what)))
+                            (List ref 5 what) (List ref 6 what) (List ref 7 what) (List ref 8 what) (List ref 9 what) (List ref 10 what)))
           ((eq? (first what) (lit generate)) (ssh-keygen-generate (List ref 1 what) (List ref 2 what)))
           ((eq? (first what) (lit to)) (ssh-scp-remote #t (List ref 1 what) (List ref 2 what) (List ref 3 what)))
           ((eq? (first what) (lit from)) (ssh-scp-remote #f (List ref 1 what) (List ref 2 what) (List ref 3 what)))

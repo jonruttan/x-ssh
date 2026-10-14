@@ -162,6 +162,20 @@
     (ssh-put-uint32 open (rest peer))
     (%send c open)))
 
+; Dropbear's -B: a direct-tcpip channel to a host and port whose two
+; ways are this process's own input and output, the loop's to end as a
+; session's is.
+(def %open-netcat!
+  (fn (_ c run host port input on-out)
+    (def ch (%channel! run (lit netcat) input on-out () () ()))
+    (%rn! run %SESSION ch)
+    (def open (%open-packet ch "direct-tcpip"))
+    (ssh-put-text open host)
+    (ssh-put-uint32 open port)
+    (ssh-put-text open "127.0.0.1")
+    (ssh-put-uint32 open 0)
+    (%send c open)))
+
 ; A remote forward asked of the server: tcpip-forward for its address
 ; and port, the address "" for every interface, as Dropbear asks.
 (def %ask-remote!
@@ -289,8 +303,8 @@
       ((= t %msg-channel-open-failure)
         (do (ssh-get-uint32 in)
             (def why (ssh-get-text in))
-            (if (eq? (%ch ch %KIND) (lit session))
-              (Err raise 'io (Str8 append "ssh: the server refused a session: " why) ())
+            (if (not (eq? (%ch ch %KIND) (lit forward)))
+              (Err raise 'io (Str8 append "ssh: the server refused the channel: " why) ())
               (do (%say (Str8 append "x-ssh: the server refused the forward: " why "\n"))
                   (guard (e ()) (Socket close (%ch ch %FD)))
                   (%drop! run ch)))))
@@ -343,12 +357,14 @@
 ; each forward (ADDRESS PORT HOST PORT) listened on, ADDRESS () for every
 ; one, its connections carried to HOST:PORT through the server; and each
 ; remote (ADDRESS PORT HOST PORT) asked of the server, ADDRESS () for
-; every one, the connections it opens carried to HOST:PORT from here.
+; every one, the connections it opens carried to HOST:PORT from here;
+; and netcat (HOST . PORT) or (), Dropbear's -B: a direct-tcpip channel to
+; HOST:PORT whose two ways are input and on-out, in a session's place.
 ; Runs until the session channel closes, or, with no command, until the
 ; connection ends.  Answers the exit status, or () when the server gave
 ; none.
 (def ssh-session-run!
-  (fn (_ c command input on-out on-err forwards remotes)
+  (fn (_ c command input on-out on-err forwards remotes netcat)
     (def run (Vector make 7 ()))
     (%rn! run %CHANNELS ()) (%rn! run %NEXT 0) (%rn! run %MOVED 0)
     (%rn! run %REMOTES remotes) (%rn! run %ASKED ())
@@ -359,6 +375,7 @@
         forwards))
     (List for-each (fn (_ r) (%ask-remote! c run r)) remotes)
     (unless (null? command) (%open-session! c run command input on-out on-err))
+    (unless (null? netcat) (%open-netcat! c run (first netcat) (rest netcat) input on-out))
     (def sock (ssh-fd c))
     ((fn (self)
        (unless (if (null? (%rn run %SESSION)) #f (%ch (%rn run %SESSION) %CLOSED))

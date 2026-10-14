@@ -28,7 +28,8 @@
   ssh-in ssh-in-buf ssh-get-byte ssh-get-bool ssh-get-uint32 ssh-get-string ssh-get-bytes ssh-get-text ssh-copy)
 (import ssh/transport ssh-open ssh-fd ssh-session-id ssh-pending? ssh-engines! ssh-exchange-versions! ssh-kex-server!
   ssh-send-packet! ssh-next-packet! ssh-expect! ssh-msg-service-request ssh-msg-service-accept
-  ssh-msg-userauth-request ssh-msg-userauth-failure ssh-msg-userauth-success)
+  ssh-msg-userauth-request ssh-msg-userauth-failure ssh-msg-userauth-success
+  ssh-msg-global-request ssh-msg-request-success ssh-msg-request-failure)
 (import ssh/keys ssh-key-of-file)
 (import x/codec/ed25519)
 (import ssh/keygen ssh-keygen-make ssh-key-fingerprint)
@@ -180,20 +181,26 @@
 
 ; --- the channels (RFC 4254) ---------------------------------------------------
 ;
-; A channel's state, in a vector: 1 the client's channel number, 2 ours,
-; 3 its window, 4 its largest packet, 5 its kind, session or forward, 6 a
-; session's command as (PID IN OUT ERR) or (), 7 whether OUT and 8
-; whether ERR are still open, 9 a forward's connection, 10 whether the
-; client has closed the channel, 11 whether we have.
+; A channel's state, in a vector: 1 the client's channel number, () until
+; the client has confirmed one we opened, 2 ours, 3 its window, 4 its
+; largest packet, 5 its kind, session or forward, 6 a session's command
+; as (PID IN OUT ERR) or (), 7 whether OUT and 8 whether ERR are still
+; open (a forward's OUT: whether its connection is still read), 9 a
+; forward's connection, 10 whether the client has closed the
+; channel, 11 whether we have, 12 whether the client has sent EOF.
 (def %PEER 1) (def %OURS 2) (def %WINDOW 3) (def %MAX 4) (def %KIND 5) (def %CHILD 6)
-(def %OUT 7) (def %ERR 8) (def %FD 9) (def %PEER-CLOSED 10) (def %CLOSED 11)
+(def %OUT 7) (def %ERR 8) (def %FD 9) (def %PEER-CLOSED 10) (def %CLOSED 11) (def %PEER-EOF 12)
 (def %ch (fn (_ ch i) (%oref ch i)))
 (def %ch! (fn (_ ch i v) (%oset! ch i v)))
 
 ; The connection's state: 1 the channels, 2 the next channel number, 3
-; the bytes moved since the last collect, 4 whether forwarding is
-; allowed, 5 the session channel or ().
+; the bytes moved since the last collect, 4 whether a client's forwards
+; are served, 5 the session channel or (), 6 whether a client's remote
+; forwards are served, 7 whether their listeners may bind an address
+; other than localhost, 8 the listeners as (FD ADDRESS PORT), ADDRESS as
+; the client asked.
 (def %CHANNELS 1) (def %NEXT 2) (def %MOVED 3) (def %FORWARDING 4) (def %SESSION 5)
+(def %REMOTE 6) (def %ANY-HOST 7) (def %LISTENERS 8)
 (def %rn (fn (_ run i) (%oref run i)))
 (def %rn! (fn (_ run i v) (%oset! run i v)))
 (def %min (fn (_ a b) (if (< a b) a b)))
@@ -203,11 +210,12 @@
 ; A channel added to the table, numbered next.
 (def %channel!
   (fn (_ run kind peer window max)
-    (def ch (Vector make 11 ()))
+    (def ch (Vector make 12 ()))
     (%ch! ch %PEER peer) (%ch! ch %OURS (%rn run %NEXT))
     (%rn! run %NEXT (+ (%rn run %NEXT) 1))
     (%ch! ch %WINDOW window) (%ch! ch %MAX max) (%ch! ch %KIND kind)
-    (%ch! ch %OUT #f) (%ch! ch %ERR #f) (%ch! ch %PEER-CLOSED #f) (%ch! ch %CLOSED #f)
+    (%ch! ch %OUT (eq? kind (lit forward))) (%ch! ch %ERR #f) (%ch! ch %PEER-CLOSED #f) (%ch! ch %CLOSED #f)
+    (%ch! ch %PEER-EOF #f)
     (%rn! run %CHANNELS (List append (%rn run %CHANNELS) (list ch)))
     ch))
 
@@ -217,7 +225,7 @@
 
 (def %drop!
   (fn (_ run ch)
-    (%rn! run %CHANNELS (List filter (fn (_ x) (not (eq? x ch))) (%rn run %CHANNELS)))))
+    (%rn! run %CHANNELS (List filter (fn (_ x) (not (= (%ch x %OURS) (%ch ch %OURS)))) (%rn run %CHANNELS)))))
 
 (def %forwards
   (fn (_ run) (List filter (fn (_ ch) (eq? (%ch ch %KIND) (lit forward))) (%rn run %CHANNELS))))
@@ -285,9 +293,62 @@
                       (%confirm! c ch))))))
       (#t (%refuse! c sender 3 (Str8 append "channel type not served: " type))))))
 
+; A global request from the client answered: tcpip-forward listens for
+; a remote forward, on localhost unless the server allows any host and
+; the client asked for another address, "" every one, as Dropbear has
+; it; cancel-tcpip-forward closes that listener; nothing else is served.
+(def %global!
+  (fn (_ c run in)
+    (def name (ssh-get-text in))
+    (def want-reply (ssh-get-bool in))
+    (def ok
+      (match
+        ((str=? name "tcpip-forward")
+          (do (def address (ssh-get-text in))
+              (def port (ssh-get-uint32 in))
+              (def bind (if (if (%rn run %ANY-HOST) (not (str=? address "localhost")) #f)
+                          (if (str=? address "") () (%address address))
+                          "127.0.0.1"))
+              (def fd (if (if (%rn run %REMOTE) (> port 0) #f)
+                        (guard (e ()) (if (null? bind) (Socket tcp-listen port) (Socket tcp-listen-on bind port)))
+                        ()))
+              (unless (null? fd)
+                (do (%log (Str8 append "remote forward on " address ":" (%num port)))
+                    (%rn! run %LISTENERS (List append (%rn run %LISTENERS) (list (list fd address port))))))
+              (not (null? fd))))
+        ((str=? name "cancel-tcpip-forward")
+          (do (def address (ssh-get-text in))
+              (def port (ssh-get-uint32 in))
+              (def gone (List filter (fn (_ l) (= (List ref 2 l) port)) (%rn run %LISTENERS)))
+              (List for-each (fn (_ l) (guard (e ()) (Socket close (first l)))) gone)
+              (%rn! run %LISTENERS (List filter (fn (_ l) (not (= (List ref 2 l) port))) (%rn run %LISTENERS)))
+              (not (null? gone))))
+        (#t #f)))
+    (when want-reply (%send c (%packet-of (if ok ssh-msg-request-success ssh-msg-request-failure))))))
+
+; A connection accepted on a remote forward's listener opened to the
+; client as a forwarded-tcpip channel, the connection its two ways; the
+; client's confirmation sets its number and window.
+(def %open-forwarded!
+  (fn (_ c run fd address port)
+    (def peer (Socket peer fd))
+    (def ch (%channel! run (lit forward) () 0 32768))
+    (%ch! ch %FD fd)
+    (def open (%packet-of %msg-channel-open))
+    (ssh-put-text open "forwarded-tcpip")
+    (ssh-put-uint32 open (%ch ch %OURS))
+    (ssh-put-uint32 open %window)
+    (ssh-put-uint32 open %max-packet)
+    (ssh-put-text open address)
+    (ssh-put-uint32 open port)
+    (ssh-put-text open (first peer))
+    (ssh-put-uint32 open (rest peer))
+    (%send c open)))
+
 ; One read of a session's output or error, or of a forward's connection,
 ; sent as the channel's data; a read of nothing is its end: a session's
-; pipe closes, a forward's far end has no more, so EOF and CLOSE go.
+; pipe closes, a forward's far end has no more, so EOF goes, and CLOSE
+; once the client's EOF has come too: a half-close is only EOF.
 (def %pump!
   (fn (_ c run ch fd slot extended)
     (def n (%min %chunk (%min (%ch ch %WINDOW) (- (%ch ch %MAX) 64))))
@@ -299,7 +360,8 @@
         (do (def eof (%packet-of %msg-channel-eof))
             (ssh-put-uint32 eof (%ch ch %PEER))
             (%send c eof)
-            (%close! c ch)))
+            (%ch! ch %OUT #f)
+            (when (%ch ch %PEER-EOF) (%close! c ch))))
       (do (def d (%packet-of (if extended %msg-channel-extended-data %msg-channel-data)))
           (ssh-put-uint32 d (%ch ch %PEER))
           (when extended (ssh-put-uint32 d 1))
@@ -340,12 +402,22 @@
     (def p (ssh-next-packet! c))
     (def t (%byte (first p) 0))
     (def in (ssh-in (first p) 1 (- (rest p) 1)))
-    (def ch (if (if (>= t %msg-channel-window-adjust) (<= t %msg-channel-failure) #f)
+    (def ch (if (if (>= t %msg-channel-open-confirmation) (<= t %msg-channel-failure) #f)
               (%find run (ssh-get-uint32 in))
               ()))
     (match
+      ((= t ssh-msg-global-request) (%global! c run in))
       ((= t %msg-channel-open) (%open! c run in))
       ((null? ch) ())
+      ((= t %msg-channel-open-confirmation)
+        (do (%ch! ch %PEER (ssh-get-uint32 in))
+            (%ch! ch %WINDOW (ssh-get-uint32 in))
+            (%ch! ch %MAX (ssh-get-uint32 in))))
+      ((= t %msg-channel-open-failure)
+        (do (ssh-get-uint32 in)
+            (%log (Str8 append "the client refused a forwarded connection: " (ssh-get-text in)))
+            (guard (e ()) (Socket close (%ch ch %FD)))
+            (%drop! run ch)))
       ((= t %msg-channel-request)
         (do (def name (ssh-get-text in))
             (def want-reply (ssh-get-bool in))
@@ -372,7 +444,9 @@
       ((= t %msg-channel-eof)
         (if (eq? (%ch ch %KIND) (lit session))
           (unless (null? (%ch ch %CHILD)) (Sys close (List ref 1 (%ch ch %CHILD))))
-          (guard (e ()) (Socket shutdown (%ch ch %FD) (lit write)))))
+          (do (guard (e ()) (Socket shutdown (%ch ch %FD) (lit write)))
+              (%ch! ch %PEER-EOF #t)
+              (unless (%ch ch %OUT) (%close! c ch)))))
       ((= t %msg-channel-close)
         (do (%ch! ch %PEER-CLOSED #t)
             (when (eq? (%ch ch %KIND) (lit forward))
@@ -387,12 +461,15 @@
 
 ; The connection's channels served: until the session channel has
 ; closed both ways and no forward remains, or, with no session opened,
-; until the connection ends.
+; until the connection ends.  local, remote and any-host are what the
+; server allows: a client's forwards, its remote forwards, and those on
+; an address other than localhost.
 (def %serve-session
-  (fn (_ c sock forwarding)
-    (def run (Vector make 5 ()))
+  (fn (_ c sock local remote any-host)
+    (def run (Vector make 8 ()))
     (%rn! run %CHANNELS ()) (%rn! run %NEXT 0) (%rn! run %MOVED 0)
-    (%rn! run %FORWARDING forwarding) (%rn! run %SESSION ())
+    (%rn! run %FORWARDING local) (%rn! run %SESSION ())
+    (%rn! run %REMOTE remote) (%rn! run %ANY-HOST any-host) (%rn! run %LISTENERS ())
     ((fn (self)
        (def session (%rn run %SESSION))
        (unless (if (null? session) #f
@@ -402,17 +479,23 @@
              (def out (if (if room (%ch session %OUT) #f) (List ref 2 child) ()))
              (def err (if (if room (%ch session %ERR) #f) (List ref 3 child) ()))
              (def open-forwards
-               (List filter (fn (_ ch) (if (%ch ch %CLOSED) #f (> (%ch ch %WINDOW) 0))) (%forwards run)))
+               (List filter (fn (_ ch) (if (null? (%ch ch %PEER)) #f (if (%ch ch %CLOSED) #f (if (%ch ch %OUT) (> (%ch ch %WINDOW) 0) #f))))
+                 (%forwards run)))
              (if (ssh-pending? c)
                (%handle! c run sock)
                (do (def ready
                      (Sys poll (List append (list (pair sock (list (lit in))))
                                             (if (null? out) () (list (pair out (list (lit in)))))
                                             (if (null? err) () (list (pair err (list (lit in)))))
+                                            (List map (fn (_ l) (pair (first l) (list (lit in)))) (%rn run %LISTENERS))
                                             (List map (fn (_ ch) (pair (%ch ch %FD) (list (lit in)))) open-forwards))
                                -1))
                    (when (if (null? out) #f (%ready? ready out)) (%pump! c run session out %OUT #f))
                    (when (if (null? err) #f (%ready? ready err)) (%pump! c run session err %ERR #t))
+                   (List for-each
+                     (fn (_ l) (when (%ready? ready (first l))
+                                 (%open-forwarded! c run (Socket accept (first l)) (List ref 1 l) (List ref 2 l))))
+                     (%rn run %LISTENERS))
                    (List for-each
                      (fn (_ ch) (when (%ready? ready (%ch ch %FD)) (%pump! c run ch (%ch ch %FD) %FD #f)))
                      open-forwards)
@@ -485,7 +568,7 @@
 
 ; One connection served, in its own process.
 (def %serve-connection
-  (fn (_ fd seed pub dir forwarding)
+  (fn (_ fd seed pub dir local remote any-host)
     (def peer ((fn (_ p) (Str8 append (first p) ":" (%num (rest p)))) (Socket peer fd)))
     (%log (Str8 append "Child connection from " peer))
     (def c (ssh-open fd ()))
@@ -494,7 +577,7 @@
         (ssh-exchange-versions! c)
         (ssh-kex-server! c seed pub)
         (def user (%authenticate c dir peer))
-        (%serve-session c fd forwarding)
+        (%serve-session c fd local remote any-host)
         (Str8 append "Exit (" user ") from <" peer ">: Exited normally")))
     (%log outcome)
     (Socket close fd)))
@@ -503,7 +586,7 @@
 ; process of its own while this one goes back to listening.  The host key
 ; is read once; a dead connection's process is reaped by the kernel.
 (def ssh-serve
-  (fn (_ keyfile addr port dir make background pidfile forwarding)
+  (fn (_ keyfile addr port dir make background pidfile local remote any-host)
     (def key (%host-key keyfile make))
     (def lfd
       (guard (e (do (%log (Str8 append "Failed listening on '" (if (null? addr) "" addr) ":" (%num port)
@@ -524,7 +607,7 @@
        (if (= pid 0)
          (do (Socket close lfd)
              (unless (null? chld) (Sys signal chld (Sys sig-dfl)))
-             (%serve-connection fd (first key) (rest key) dir forwarding)
+             (%serve-connection fd (first key) (rest key) dir local remote any-host)
              (Sys exit 0))
          (do (Socket close fd)
              (self)))))))

@@ -29,9 +29,10 @@ command a connection.
   Dropbear ssh-ed25519 key, `-l` the user, `-p` the port; hosts are
   checked against `~/.ssh/known_hosts`, `-y` accepting and recording a
   new one.  `-L [address:]port:host:port` carries each connection to a
-  local port through the server to `host:port` (`-g` listens on every
-  interface, `-N` runs no command).  `-v` traces the connection, with
-  CPU milliseconds a step.
+  local port through the server to `host:port`; `-R` the same shape asks
+  the server to listen, its connections carried here to `host:port`
+  (`-g` on every interface, `-N` runs no command).  `-v` traces the
+  connection, with CPU milliseconds a step.
 - `dropbear`: the server: `-r` its host key (default
   `/etc/dropbear/dropbear_ed25519_host_key`), made there under `-R` when
   the file is missing; `-p` where it listens, `-D` the directory of the
@@ -40,9 +41,10 @@ command a connection.
   `/var/run/dropbear.pid`); it logs to standard error, so in the
   background its log goes nowhere.  Each connection is served by a forked
   child; the command runs under the user's shell, with its standard
-  input, output and error on the channel, and a client's `-L` forwards
-  are served as `direct-tcpip` channels unless `-j` refuses them.  `git
-  clone` over it works.
+  input, output and error on the channel; a client's `-L` forwards are
+  served as `direct-tcpip` channels unless `-j` refuses them, and its
+  `-R` forwards listened for, on localhost unless `-a` allows the address
+  asked, unless `-k` refuses them.  `git clone` over it works.
 - `dropbearkey`: `-t ed25519 -f FILE` makes a key in Dropbear's format;
   `-y` prints a key's public line and fingerprint.
 - `dropbearconvert`: `openssh|dropbear openssh|dropbear IN OUT` writes an

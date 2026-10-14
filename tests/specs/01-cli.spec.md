@@ -56,6 +56,7 @@ Usage: dbclient [options] [user@]host[/port] [command]
 	-l user		The user to log in as
 	-y		Accept and record the key of a host not in known_hosts
 	-L forward	Local port forwarding: [listenaddress:]listenport:remotehost:remoteport
+	-R forward	Remote port forwarding: [listenaddress:]listenport:remotehost:remoteport
 	-N		Don't run a remote command
 	-g		Allow remote hosts to connect to forwarded ports
 	-v		Trace the connection on standard error
@@ -70,7 +71,7 @@ Usage: dbclient [options] [user@]host[/port] [command]
              (List take 2 (ssh-plan (list "dbclient" "-i" "k" "-L" "2222:h" "host" "true")))))
 ```
 ---
-    (('exec "host" 22 "me" "k" () #f #f (("localhost" 2222 "h" 22) ("127.0.0.1" 3333 "h" 80))) ((() 2222 "h" 22)) ('client "Bad TCP forward '2222:h'\n"))
+    (('exec "host" 22 "me" "k" () #f #f (("localhost" 2222 "h" 22) ("127.0.0.1" 3333 "h" 80)) ()) ((() 2222 "h" 22)) ('client "Bad TCP forward '2222:h'\n"))
 
 ### -V names the version, status 0
 
@@ -116,6 +117,14 @@ Usage: dbclient [options] [user@]host[/port] [command]
 ---
     (('convert ('convert "openssh" "dropbear" "a" "b") 0) ('convert "Invalid output key type\nUsage: dropbearconvert <inputtype> <outputtype> <inputfile> <outputfile>\n") 1)
 
+### -R forwards ride in the plan after the -L ones, with the same shape
+
+```ssh
+(write (List ref 9 (first (rest (ssh-plan (list "dbclient" "-i" "k" "-N" "-R" "8080:localhost:80" "-R" "0.0.0.0:2222:h:22" "me@host"))))))
+```
+---
+    (("localhost" 8080 "localhost" 80) ("0.0.0.0" 2222 "h" 22))
+
 ## main
 
 ### what main writes and exits through is bound in its module
@@ -128,3 +137,4 @@ reaches for, from inside the module, as main sees them.
 ```
 ---
     (#t #t)
+

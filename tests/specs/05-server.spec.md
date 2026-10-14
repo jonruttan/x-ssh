@@ -3,10 +3,10 @@
 
 The server's line as what to do.  Serving -- the key exchange from the
 server's end, publickey authentication against authorized_keys, a
-command on three pipes, direct-tcpip channels for a client's forwards,
-the host key made under -R and the background -- is proven live by
-tests/oracle/server.sh, with Dropbear's client, OpenSSH's and git as the
-oracles.
+command on three pipes, direct-tcpip channels for a client's forwards
+and listeners for its remote forwards, the host key made under -R and
+the background -- is proven live by tests/oracle/server.sh, with
+Dropbear's client, OpenSSH's and git as the oracles.
 
 ## the line
 
@@ -16,7 +16,7 @@ oracles.
 (write (first (rest (ssh-plan (list "dropbear" "-F" "-E" "-r" "hk" "-p" "127.0.0.1:2222" "-D" "/keys")))))
 ```
 ---
-    ('serve "hk" "127.0.0.1" 2222 "/keys" #f #f "/var/run/dropbear.pid" #t)
+    ('serve "hk" "127.0.0.1" 2222 "/keys" #f #f "/var/run/dropbear.pid" #t #t #f)
 
 ### a bare port listens on every address
 
@@ -26,13 +26,13 @@ oracles.
 ---
     ()
 
-### Dropbear's defaults: the key's path, the background, the pidfile; -R makes the key, -j refuses forwards
+### Dropbear's defaults: the key's path, the background, the pidfile; -R makes the key; -j, -k and -a rule the forwards
 
 ```ssh
-(write (first (rest (ssh-plan (list "dropbear" "-R" "-j" "-P" "/run/x.pid" "-D" "/keys")))))
+(write (first (rest (ssh-plan (list "dropbear" "-R" "-j" "-k" "-a" "-P" "/run/x.pid" "-D" "/keys")))))
 ```
 ---
-    ('serve "/etc/dropbear/dropbear_ed25519_host_key" () 22 "/keys" #t #t "/run/x.pid" #f)
+    ('serve "/etc/dropbear/dropbear_ed25519_host_key" () 22 "/keys" #t #t "/run/x.pid" #f #f #t)
 
 ### a port that is no number is refused
 

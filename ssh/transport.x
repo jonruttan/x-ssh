@@ -88,8 +88,21 @@
 
 ; Whether received bytes are waiting to be read as a packet: a caller
 ; that waits on the socket must not, while they are.
+; Whether a whole packet is buffered, so a read of it cannot block: its
+; length field unveiled as the receive unveils it (under the keys, a
+; pure function of the same bytes and sequence number, nothing
+; consumed) and the bytes counted against it, the tag included.  A loop
+; that waits on other descriptors beside the socket asks this before it
+; reads a packet; "any bytes" would have it block in the socket for the
+; rest of a packet while a forward's connection waits.
 (def ssh-pending?
-  (fn (_ c) (> (rest (%slot c 2)) 0)))
+  (fn (_ c)
+    (def run (%slot c 2))
+    (if (< (rest run) 4) #f
+      (do (def key (%slot c 6))
+          (def lenb (if (null? key) (first run) (ChaCha20 xor (%k1 key) (%iv 0 (%slot c 4)) (first run) 0 4)))
+          (def len (| (<< (%byte lenb 0) 24) (| (<< (%byte lenb 1) 16) (| (<< (%byte lenb 2) 8) (%byte lenb 3)))))
+          (>= (rest run) (+ 4 len (if (null? key) 0 16)))))))
 
 (def ssh-trace
   (fn (_ c text) (unless (null? (%slot c 10)) ((%slot c 10) text))))
@@ -258,8 +271,9 @@
     (pair (ssh-copy body 1 (- len 1 pad)) (- len 1 pad))))
 
 ; The next packet that is the transport's business handled here, any
-; other handed back: IGNORE and DEBUG dropped, a GLOBAL_REQUEST refused,
-; a DISCONNECT raised with its message.
+; other handed back: IGNORE, DEBUG and EXT_INFO dropped, a DISCONNECT
+; raised with its message; a GLOBAL_REQUEST is the channel layer's to
+; answer.
 (def ssh-next-packet!
   (fn (self c)
     (def p (ssh-recv-packet! c))
@@ -268,17 +282,6 @@
       ((= t ssh-msg-ignore) (self c))
       ((= t ssh-msg-debug) (self c))
       ((= t ssh-msg-ext-info) (self c))
-      ((= t ssh-msg-global-request)
-        (do (def in (ssh-in (first p) 1 (- (rest p) 1)))
-            (def name (ssh-get-text in))
-            (def want-reply (ssh-get-bool in))
-            (ssh-trace c (Str8 append "global request " name))
-            (when want-reply
-              (do (def out (ssh-out))
-                  (ssh-put-byte out ssh-msg-request-failure)
-                  (def r (ssh-out-run out))
-                  (ssh-send-packet! c (first r) (rest r))))
-            (self c)))
       ((= t ssh-msg-disconnect)
         (do (def in (ssh-in (first p) 1 (- (rest p) 1)))
             (def code (ssh-get-uint32 in))
@@ -563,5 +566,5 @@
 
 (provide ssh/transport ssh-version-string ssh-open ssh-fd ssh-session-id ssh-host-key ssh-pending? ssh-random ssh-engines!
   ssh-exchange-versions! ssh-send-packet! ssh-recv-packet! ssh-next-packet! ssh-expect! ssh-kex! ssh-kex-server! ssh-auth-publickey!
-  ssh-msg-disconnect ssh-msg-global-request ssh-msg-request-failure ssh-msg-service-request ssh-msg-service-accept
+  ssh-msg-disconnect ssh-msg-global-request ssh-msg-request-success ssh-msg-request-failure ssh-msg-service-request ssh-msg-service-accept
   ssh-msg-userauth-request ssh-msg-userauth-failure ssh-msg-userauth-success ssh-trace)

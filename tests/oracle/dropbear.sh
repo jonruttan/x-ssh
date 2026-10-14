@@ -24,6 +24,8 @@
 #           Dropbear file x-ssh wrote from ssh-keygen's user key
 #   forward -N -L: a local port carried through the Dropbear to its own
 #           ssh port, two connections in turn reading its version line
+#   remote  -N -R: the Dropbear listens, its connections come here and
+#           reach its own ssh port, two in turn reading its version line
 #   git     `git clone` of a repository behind the Dropbear, with x-ssh
 #           as git's ssh: the clone's HEAD and its fsck
 #
@@ -167,6 +169,24 @@ if [ "$one" = "SSH-2.0-dropbear" ] && [ "$two" = "SSH-2.0-dropbear" ]; then
 	echo "ok: forward -- -L carries two connections in turn through the Dropbear"
 else
 	fail "forward: read '$one' then '$two' through the forwarded port"
+	cat "$fx/fwd.err" >&2
+fi
+
+# remote: -N -R, the Dropbear listening for a port whose connections come
+# here and go to its own ssh port, two in turn reading its version line
+rport=$((port + 20))
+HOME="$home" "$X" -l ssh -- dbclient -p "$port" -i "$fx/userkey" -l "$user" -N -R "$rport:127.0.0.1:$port" 127.0.0.1 < /dev/null 2> "$fx/fwd.err" &
+fwdpid=$!
+i=0
+while ! nc -z 127.0.0.1 "$rport" 2>/dev/null && [ $i -lt 60 ]; do i=$((i + 1)); sleep 1; done
+one=$(nc -w 3 127.0.0.1 "$rport" < /dev/null 2>/dev/null | head -c 16)
+two=$(nc -w 3 127.0.0.1 "$rport" < /dev/null 2>/dev/null | head -c 16)
+kill_tree $fwdpid
+fwdpid=
+if [ "$one" = "SSH-2.0-dropbear" ] && [ "$two" = "SSH-2.0-dropbear" ]; then
+	echo "ok: remote -- -R's connections come from the Dropbear and reach the host here, two in turn"
+else
+	fail "remote: read '$one' then '$two' through the remote port"
 	cat "$fx/fwd.err" >&2
 fi
 

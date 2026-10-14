@@ -44,6 +44,7 @@
             (Opts flag "-F" "Don't fork into background")
             (Opts flag "-E" "Log to stderr rather than syslog (x-ssh has no syslog: in the background its log goes nowhere)")
             (Opts arg "-P" "pidfile" "Create pid file PidFile, default /var/run/dropbear.pid")
+            (Opts flag "-j" "Disable local port forwarding")
             (Opts flag "-s" "Disable password logins (x-ssh has none)")
             %version-row))
     (%row (lit client) (list "dbclient" "ssh") "the client"
@@ -170,7 +171,7 @@
     (match
       ((null? port) (list (lit server) (Str8 append "Bad port '" p "'\n") 1))
       (#t (list (lit server)
-                (list (lit serve) key addr port dir (Opts on? o "-R") (not (Opts on? o "-F")) pidfile)
+                (list (lit serve) key addr port dir (Opts on? o "-R") (not (Opts on? o "-F")) pidfile (not (Opts on? o "-j")))
                 0)))))
 
 ; The key generator's line as what to do, in dropbearkey's order of
@@ -274,7 +275,7 @@
                             (List ref 5 what) (List ref 6 what)))
           ((eq? (first what) (lit serve))
             (ssh-serve (List ref 1 what) (List ref 2 what) (List ref 3 what) (List ref 4 what)
-                       (List ref 5 what) (List ref 6 what) (List ref 7 what)))
+                       (List ref 5 what) (List ref 6 what) (List ref 7 what) (List ref 8 what)))
           ((eq? (first what) (lit convert))
             (ssh-convert (List ref 1 what) (List ref 2 what) (List ref 3 what) (List ref 4 what)))
           (#t (ssh-keygen-print (List ref 1 what) (List ref 2 what)))))

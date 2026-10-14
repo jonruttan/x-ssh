@@ -40,7 +40,9 @@ command a connection.
   `/var/run/dropbear.pid`); it logs to standard error, so in the
   background its log goes nowhere.  Each connection is served by a forked
   child; the command runs under the user's shell, with its standard
-  input, output and error on the channel.  `git clone` over it works.
+  input, output and error on the channel, and a client's `-L` forwards
+  are served as `direct-tcpip` channels unless `-j` refuses them.  `git
+  clone` over it works.
 - `dropbearkey`: `-t ed25519 -f FILE` makes a key in Dropbear's format;
   `-y` prints a key's public line and fingerprint.
 - `dropbearconvert`: `openssh|dropbear openssh|dropbear IN OUT` writes an

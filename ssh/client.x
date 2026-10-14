@@ -20,7 +20,7 @@
 (import x/sys/posix)
 (import ssh/bytes ssh-copy)
 (import ssh/transport ssh-open ssh-host-key ssh-engines! ssh-exchange-versions! ssh-kex! ssh-auth-publickey!)
-(import ssh/session ssh-exec! ssh-disconnect!)
+(import ssh/session ssh-session-run! ssh-disconnect!)
 (import ssh/keys ssh-seed-of-key-file)
 (import ssh/known ssh-known-name ssh-known-check ssh-known-add!)
 
@@ -66,7 +66,7 @@
       (#t (Str8 append "x-ssh: host '" name "' is not in known_hosts; -y accepts and records its key\n")))))
 
 (def ssh-client-run
-  (fn (_ host port user keyfile command trace accept)
+  (fn (_ host port user keyfile command trace accept forwards)
     (def tr (if trace (fn (_ t) (%say 2 (Str8 append "x-ssh: " (%ms) " ms " t "\n"))) ()))
     (def seed (ssh-seed-of-key-file keyfile))
     (def fd (Socket tcp-connect (%address host) port))
@@ -77,10 +77,16 @@
     (def known (%host-key-ok c host port accept tr))
     (if (not (eq? known #t))
       (do (%say 2 known) (Socket close fd) 255)
-      (%authenticated-run c fd user seed command tr))))
+      (%authenticated-run c fd user seed command tr forwards))))
+
+; The forwards' listen addresses resolved: "localhost" and any name to
+; the dotted address the listener binds, () left as every interface.
+(def %forwards-resolved
+  (fn (_ forwards)
+    (List map (fn (_ f) (pair (if (null? (first f)) () (%address (first f))) (rest f))) forwards)))
 
 (def %authenticated-run
-  (fn (_ c fd user seed command tr)
+  (fn (_ c fd user seed command tr forwards)
     (def ok (ssh-auth-publickey! c user seed))
     (if (not (eq? ok #t))
       (do (%say 2 (Str8 append "x-ssh: authentication failed; the server offers " (Str8 join "," ok) "\n"))
@@ -88,9 +94,10 @@
           255)
       (do (unless (null? tr) (tr (Str8 append "authenticated as " user)))
           (def status
-            (ssh-exec! c command %stdin
+            (ssh-session-run! c command (if (null? command) () %stdin)
               (fn (_ buf start len) (File write 1 (ssh-copy buf start len) len))
-              (fn (_ buf start len) (File write 2 (ssh-copy buf start len) len))))
+              (fn (_ buf start len) (File write 2 (ssh-copy buf start len) len))
+              (%forwards-resolved forwards)))
           (ssh-disconnect! c)
           (Socket close fd)
           (def code (if (null? status) 0 status))

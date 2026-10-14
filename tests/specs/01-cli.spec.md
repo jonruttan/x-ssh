@@ -55,9 +55,22 @@ Usage: dbclient [options] [user@]host[/port] [command]
 	-i keyfile	The ssh-ed25519 key to authenticate with (OpenSSH format)
 	-l user		The user to log in as
 	-y		Accept and record the key of a host not in known_hosts
+	-L forward	Local port forwarding: [listenaddress:]listenport:remotehost:remoteport
+	-N		Don't run a remote command
+	-g		Allow remote hosts to connect to forwarded ports
 	-v		Trace the connection on standard error
 	-V		Print the version
 ```
+
+### -L forwards ride in the plan, -N drops the command; a bad forward is refused, status 1
+
+```ssh
+(write (list (first (rest (ssh-plan (list "dbclient" "-i" "k" "-N" "-L" "2222:h:22" "-L" "127.0.0.1:3333:h:80" "me@host"))))
+             (List ref 8 (first (rest (ssh-plan (list "dbclient" "-i" "k" "-g" "-L" "2222:h:22" "me@host" "true")))))
+             (List take 2 (ssh-plan (list "dbclient" "-i" "k" "-L" "2222:h" "host" "true")))))
+```
+---
+    (('exec "host" 22 "me" "k" () #f #f (("localhost" 2222 "h" 22) ("127.0.0.1" 3333 "h" 80))) ((() 2222 "h" 22)) ('client "Bad TCP forward '2222:h'\n"))
 
 ### -V names the version, status 0
 

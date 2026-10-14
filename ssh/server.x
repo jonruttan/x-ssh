@@ -30,7 +30,6 @@
   ssh-send-packet! ssh-next-packet! ssh-expect! ssh-msg-service-request ssh-msg-service-accept
   ssh-msg-userauth-request ssh-msg-userauth-failure ssh-msg-userauth-success)
 (import ssh/keys ssh-key-of-file)
-(import ssh/keygen ssh-key-fingerprint)
 (import x/codec/ed25519)
 (import ssh/keygen ssh-keygen-make ssh-key-fingerprint)
 
@@ -179,150 +178,249 @@
     (Sys close (first i)) (Sys close (rest o)) (Sys close (rest e))
     (list pid (rest i) (first o) (first e))))
 
-; --- the session channel (RFC 4254) ------------------------------------------
+; --- the channels (RFC 4254) ---------------------------------------------------
 ;
-; A channel's state, in a vector: 1 the client's channel number, 2 its
-; window, 3 its largest packet, 4 the command's (PID IN OUT ERR) or (),
-; 5 whether OUT and 6 whether ERR are still open, 7 whether the client
-; has closed the channel, 8 whether we have, 9 bytes moved since the
-; last collect.
-(def %PEER 1) (def %WINDOW 2) (def %MAX 3) (def %CHILD 4) (def %OUT 5) (def %ERR 6)
-(def %PEER-CLOSED 7) (def %CLOSED 8) (def %MOVED 9)
-(def %st (fn (_ st i) (%oref st i)))
-(def %st! (fn (_ st i v) (%oset! st i v)))
+; A channel's state, in a vector: 1 the client's channel number, 2 ours,
+; 3 its window, 4 its largest packet, 5 its kind, session or forward, 6 a
+; session's command as (PID IN OUT ERR) or (), 7 whether OUT and 8
+; whether ERR are still open, 9 a forward's connection, 10 whether the
+; client has closed the channel, 11 whether we have.
+(def %PEER 1) (def %OURS 2) (def %WINDOW 3) (def %MAX 4) (def %KIND 5) (def %CHILD 6)
+(def %OUT 7) (def %ERR 8) (def %FD 9) (def %PEER-CLOSED 10) (def %CLOSED 11)
+(def %ch (fn (_ ch i) (%oref ch i)))
+(def %ch! (fn (_ ch i v) (%oset! ch i v)))
+
+; The connection's state: 1 the channels, 2 the next channel number, 3
+; the bytes moved since the last collect, 4 whether forwarding is
+; allowed, 5 the session channel or ().
+(def %CHANNELS 1) (def %NEXT 2) (def %MOVED 3) (def %FORWARDING 4) (def %SESSION 5)
+(def %rn (fn (_ run i) (%oref run i)))
+(def %rn! (fn (_ run i v) (%oset! run i v)))
 (def %min (fn (_ a b) (if (< a b) a b)))
 
-(def %moved!
-  (fn (_ st n) (%st! st %MOVED (+ (%st st %MOVED) n))))
+(def %moved! (fn (_ run n) (%rn! run %MOVED (+ (%rn run %MOVED) n))))
+
+; A channel added to the table, numbered next.
+(def %channel!
+  (fn (_ run kind peer window max)
+    (def ch (Vector make 11 ()))
+    (%ch! ch %PEER peer) (%ch! ch %OURS (%rn run %NEXT))
+    (%rn! run %NEXT (+ (%rn run %NEXT) 1))
+    (%ch! ch %WINDOW window) (%ch! ch %MAX max) (%ch! ch %KIND kind)
+    (%ch! ch %OUT #f) (%ch! ch %ERR #f) (%ch! ch %PEER-CLOSED #f) (%ch! ch %CLOSED #f)
+    (%rn! run %CHANNELS (List append (%rn run %CHANNELS) (list ch)))
+    ch))
+
+(def %find
+  (fn (_ run ours)
+    (List find (fn (_ ch) (= (%ch ch %OURS) ours)) (%rn run %CHANNELS))))
+
+(def %drop!
+  (fn (_ run ch)
+    (%rn! run %CHANNELS (List filter (fn (_ x) (not (eq? x ch))) (%rn run %CHANNELS)))))
+
+(def %forwards
+  (fn (_ run) (List filter (fn (_ ch) (eq? (%ch ch %KIND) (lit forward))) (%rn run %CHANNELS))))
 
 (def %reply
-  (fn (_ c st want-reply ok)
+  (fn (_ c ch want-reply ok)
     (when want-reply
       (do (def r (%packet-of (if ok %msg-channel-success %msg-channel-failure)))
-          (ssh-put-uint32 r (%st st %PEER))
+          (ssh-put-uint32 r (%ch ch %PEER))
           (%send c r)))))
 
-; One read of the command's output or error sent on the channel; a read
-; of nothing is its end.
+; An open answered: confirmation with our number, or a failure with
+; RFC 4254's reason code and a text.
+(def %confirm!
+  (fn (_ c ch)
+    (def ok (%packet-of %msg-channel-open-confirmation))
+    (ssh-put-uint32 ok (%ch ch %PEER))
+    (ssh-put-uint32 ok (%ch ch %OURS))
+    (ssh-put-uint32 ok %window)
+    (ssh-put-uint32 ok %max-packet)
+    (%send c ok)))
+
+(def %refuse!
+  (fn (_ c sender code text)
+    (def no (%packet-of %msg-channel-open-failure))
+    (ssh-put-uint32 no sender)
+    (ssh-put-uint32 no code)
+    (ssh-put-text no text)
+    (ssh-put-text no "")
+    (%send c no)))
+
+; A dotted address for a name: what the resolver says, or the name when
+; it already is one.
+(def %address
+  (fn (_ host)
+    (def r (Socket resolve host))
+    (if (null? r) host (if (pair? r) (first r) r))))
+
+; A channel opened: one session a connection, its command to come by
+; request; or, forwarding allowed, a direct-tcpip channel whose host and
+; port are connected, the connection the channel's two ways.
+(def %open!
+  (fn (_ c run in)
+    (def type (ssh-get-text in))
+    (def sender (ssh-get-uint32 in))
+    (def window (ssh-get-uint32 in))
+    (def max (ssh-get-uint32 in))
+    (match
+      ((str=? type "session")
+        (if (null? (%rn run %SESSION))
+          (do (def ch (%channel! run (lit session) sender window max))
+              (%rn! run %SESSION ch)
+              (%confirm! c ch))
+          (%refuse! c sender 1 "only one session channel is served")))
+      ((str=? type "direct-tcpip")
+        (do (def host (ssh-get-text in))
+            (def port (ssh-get-uint32 in))
+            (def fd (if (%rn run %FORWARDING) (guard (e ()) (Socket tcp-connect (%address host) port)) ()))
+            (match
+              ((not (%rn run %FORWARDING)) (%refuse! c sender 1 "port forwarding is disabled"))
+              ((null? fd) (%refuse! c sender 2 (Str8 append "connect to " host ":" (%num port) " failed")))
+              (#t (do (def ch (%channel! run (lit forward) sender window max))
+                      (%ch! ch %FD fd)
+                      (%log (Str8 append "forward to " host ":" (%num port)))
+                      (%confirm! c ch))))))
+      (#t (%refuse! c sender 3 (Str8 append "channel type not served: " type))))))
+
+; One read of a session's output or error, or of a forward's connection,
+; sent as the channel's data; a read of nothing is its end: a session's
+; pipe closes, a forward's far end has no more, so EOF and CLOSE go.
 (def %pump!
-  (fn (_ c st fd slot extended)
-    (def n (%min %chunk (%min (%st st %WINDOW) (- (%st st %MAX) 64))))
+  (fn (_ c run ch fd slot extended)
+    (def n (%min %chunk (%min (%ch ch %WINDOW) (- (%ch ch %MAX) 64))))
     (def buf (%make-str n))
     (def got (File read fd buf n))
     (if (< got 1)
-      (do (Sys close fd) (%st! st slot #f))
+      (if (eq? (%ch ch %KIND) (lit session))
+        (do (Sys close fd) (%ch! ch slot #f))
+        (do (def eof (%packet-of %msg-channel-eof))
+            (ssh-put-uint32 eof (%ch ch %PEER))
+            (%send c eof)
+            (%close! c ch)))
       (do (def d (%packet-of (if extended %msg-channel-extended-data %msg-channel-data)))
-          (ssh-put-uint32 d (%st st %PEER))
+          (ssh-put-uint32 d (%ch ch %PEER))
           (when extended (ssh-put-uint32 d 1))
           (ssh-put-string d buf 0 got)
           (%send c d)
-          (%st! st %WINDOW (- (%st st %WINDOW) got))
-          (%moved! st got)))))
+          (%ch! ch %WINDOW (- (%ch ch %WINDOW) got))
+          (%moved! run got)))))
+
+; Our CLOSE of a channel, once.
+(def %close!
+  (fn (_ c ch)
+    (unless (%ch ch %CLOSED)
+      (do (def cl (%packet-of %msg-channel-close))
+          (ssh-put-uint32 cl (%ch ch %PEER))
+          (%send c cl)
+          (%ch! ch %CLOSED #t)))))
 
 ; The command finished: its status sent, then EOF and CLOSE.
 (def %finish!
-  (fn (_ c st)
-    (def status (Sys wait (first (%st st %CHILD))))
+  (fn (_ c ch)
+    (def status (Sys wait (first (%ch ch %CHILD))))
     (def r (%packet-of %msg-channel-request))
-    (ssh-put-uint32 r (%st st %PEER))
+    (ssh-put-uint32 r (%ch ch %PEER))
     (ssh-put-text r "exit-status")
     (ssh-put-bool r #f)
     (ssh-put-uint32 r status)
     (%send c r)
     (def eof (%packet-of %msg-channel-eof))
-    (ssh-put-uint32 eof (%st st %PEER))
+    (ssh-put-uint32 eof (%ch ch %PEER))
     (%send c eof)
-    (def cl (%packet-of %msg-channel-close))
-    (ssh-put-uint32 cl (%st st %PEER))
-    (%send c cl)
-    (%st! st %CLOSED #t)
+    (%close! c ch)
     status))
 
-; One packet from the client handled.
+; One packet from the client handled: a channel message is for the
+; channel it names, ours.
 (def %handle!
-  (fn (_ c st sock)
+  (fn (_ c run sock)
     (def p (ssh-next-packet! c))
     (def t (%byte (first p) 0))
     (def in (ssh-in (first p) 1 (- (rest p) 1)))
+    (def ch (if (if (>= t %msg-channel-window-adjust) (<= t %msg-channel-failure) #f)
+              (%find run (ssh-get-uint32 in))
+              ()))
     (match
-      ((= t %msg-channel-open)
-        (do (def type (ssh-get-text in))
-            (def sender (ssh-get-uint32 in))
-            (if (if (str=? type "session") (null? (%st st %PEER)) #f)
-              (do (%st! st %PEER sender)
-                  (%st! st %WINDOW (ssh-get-uint32 in))
-                  (%st! st %MAX (ssh-get-uint32 in))
-                  (def ok (%packet-of %msg-channel-open-confirmation))
-                  (ssh-put-uint32 ok sender)
-                  (ssh-put-uint32 ok 0)
-                  (ssh-put-uint32 ok %window)
-                  (ssh-put-uint32 ok %max-packet)
-                  (%send c ok))
-              (do (def no (%packet-of %msg-channel-open-failure))
-                  (ssh-put-uint32 no sender)
-                  (ssh-put-uint32 no 3)
-                  (ssh-put-text no "only one session channel is served")
-                  (ssh-put-text no "")
-                  (%send c no)))))
+      ((= t %msg-channel-open) (%open! c run in))
+      ((null? ch) ())
       ((= t %msg-channel-request)
-        (do (ssh-get-uint32 in)
-            (def name (ssh-get-text in))
+        (do (def name (ssh-get-text in))
             (def want-reply (ssh-get-bool in))
-            (if (if (str=? name "exec") (null? (%st st %CHILD)) #f)
+            (if (if (str=? name "exec") (if (eq? (%ch ch %KIND) (lit session)) (null? (%ch ch %CHILD)) #f) #f)
               (do (def command (ssh-get-text in))
                   (%log (Str8 append "exec: " command))
-                  (%st! st %CHILD (%spawn command sock))
-                  (%st! st %OUT #t) (%st! st %ERR #t)
-                  (%reply c st want-reply #t))
-              (%reply c st want-reply #f))))
+                  (%ch! ch %CHILD (%spawn command sock))
+                  (%ch! ch %OUT #t) (%ch! ch %ERR #t)
+                  (%reply c ch want-reply #t))
+              (%reply c ch want-reply #f))))
       ((= t %msg-channel-window-adjust)
-        (do (ssh-get-uint32 in)
-            (%st! st %WINDOW (+ (%st st %WINDOW) (ssh-get-uint32 in)))))
+        (%ch! ch %WINDOW (+ (%ch ch %WINDOW) (ssh-get-uint32 in))))
       ((= t %msg-channel-data)
-        (do (ssh-get-uint32 in)
-            (def r (ssh-get-string in))
-            (unless (null? (%st st %CHILD))
-              (File write (List ref 1 (%st st %CHILD)) (ssh-copy (ssh-in-buf in) (first r) (rest r)) (rest r)))
+        (do (def r (ssh-get-string in))
+            (def bytes (ssh-copy (ssh-in-buf in) (first r) (rest r)))
+            (if (eq? (%ch ch %KIND) (lit session))
+              (unless (null? (%ch ch %CHILD)) (File write (List ref 1 (%ch ch %CHILD)) bytes (rest r)))
+              (guard (e ()) (Socket send-run (%ch ch %FD) bytes (rest r))))
             (def adj (%packet-of %msg-channel-window-adjust))
-            (ssh-put-uint32 adj (%st st %PEER))
+            (ssh-put-uint32 adj (%ch ch %PEER))
             (ssh-put-uint32 adj (rest r))
             (%send c adj)
-            (%moved! st (rest r))))
+            (%moved! run (rest r))))
       ((= t %msg-channel-eof)
-        (unless (null? (%st st %CHILD)) (Sys close (List ref 1 (%st st %CHILD)))))
-      ((= t %msg-channel-close) (%st! st %PEER-CLOSED #t))
+        (if (eq? (%ch ch %KIND) (lit session))
+          (unless (null? (%ch ch %CHILD)) (Sys close (List ref 1 (%ch ch %CHILD))))
+          (guard (e ()) (Socket shutdown (%ch ch %FD) (lit write)))))
+      ((= t %msg-channel-close)
+        (do (%ch! ch %PEER-CLOSED #t)
+            (when (eq? (%ch ch %KIND) (lit forward))
+              (do (%close! c ch)
+                  (guard (e ()) (Socket close (%ch ch %FD)))
+                  (%drop! run ch)))))
       (#t ()))))
 
 (def %ready?
   (fn (_ ready fd)
     (List any? (fn (_ r) (if (= (first r) fd) (not (null? (rest r))) #f)) ready)))
 
-; The session served until both ends have closed the channel.
+; The connection's channels served: until the session channel has
+; closed both ways and no forward remains, or, with no session opened,
+; until the connection ends.
 (def %serve-session
-  (fn (_ c sock)
-    (def st (Vector make 9 ()))
-    (%st! st %OUT #f) (%st! st %ERR #f)
-    (%st! st %PEER-CLOSED #f) (%st! st %CLOSED #f) (%st! st %MOVED 0)
+  (fn (_ c sock forwarding)
+    (def run (Vector make 5 ()))
+    (%rn! run %CHANNELS ()) (%rn! run %NEXT 0) (%rn! run %MOVED 0)
+    (%rn! run %FORWARDING forwarding) (%rn! run %SESSION ())
     ((fn (self)
-       (unless (if (%st st %PEER-CLOSED) (%st st %CLOSED) #f)
-         (do (def child (%st st %CHILD))
-             (def room (if (null? (%st st %WINDOW)) #f (> (%st st %WINDOW) 0)))
-             (def out (if (if room (%st st %OUT) #f) (List ref 2 child) ()))
-             (def err (if (if room (%st st %ERR) #f) (List ref 3 child) ()))
+       (def session (%rn run %SESSION))
+       (unless (if (null? session) #f
+                 (if (%ch session %PEER-CLOSED) (if (%ch session %CLOSED) (null? (%forwards run)) #f) #f))
+         (do (def child (if (null? session) () (%ch session %CHILD)))
+             (def room (if (null? session) #f (> (%ch session %WINDOW) 0)))
+             (def out (if (if room (%ch session %OUT) #f) (List ref 2 child) ()))
+             (def err (if (if room (%ch session %ERR) #f) (List ref 3 child) ()))
+             (def open-forwards
+               (List filter (fn (_ ch) (if (%ch ch %CLOSED) #f (> (%ch ch %WINDOW) 0))) (%forwards run)))
              (if (ssh-pending? c)
-               (%handle! c st sock)
+               (%handle! c run sock)
                (do (def ready
                      (Sys poll (List append (list (pair sock (list (lit in))))
                                             (if (null? out) () (list (pair out (list (lit in)))))
-                                            (if (null? err) () (list (pair err (list (lit in))))))
+                                            (if (null? err) () (list (pair err (list (lit in)))))
+                                            (List map (fn (_ ch) (pair (%ch ch %FD) (list (lit in)))) open-forwards))
                                -1))
-                   (when (if (null? out) #f (%ready? ready out)) (%pump! c st out %OUT #f))
-                   (when (if (null? err) #f (%ready? ready err)) (%pump! c st err %ERR #t))
-                   (when (%ready? ready sock) (%handle! c st sock))))
+                   (when (if (null? out) #f (%ready? ready out)) (%pump! c run session out %OUT #f))
+                   (when (if (null? err) #f (%ready? ready err)) (%pump! c run session err %ERR #t))
+                   (List for-each
+                     (fn (_ ch) (when (%ready? ready (%ch ch %FD)) (%pump! c run ch (%ch ch %FD) %FD #f)))
+                     open-forwards)
+                   (when (%ready? ready sock) (%handle! c run sock))))
              (when (if (null? child) #f
-                     (if (%st st %CLOSED) #f (if (%st st %OUT) #f (not (%st st %ERR)))))
-               (%log (Str8 append "exit status " (%num (%finish! c st)))))
-             (when (> (%st st %MOVED) %chunk) (do (Heap collect) (%st! st %MOVED 0)))
+                     (if (%ch session %CLOSED) #f (if (%ch session %OUT) #f (not (%ch session %ERR)))))
+               (%log (Str8 append "exit status " (%num (%finish! c session)))))
+             (when (> (%rn run %MOVED) %chunk) (do (Heap collect) (%rn! run %MOVED 0)))
              (self)))))))
 
 ; --- the listener ----------------------------------------------------------
@@ -387,7 +485,7 @@
 
 ; One connection served, in its own process.
 (def %serve-connection
-  (fn (_ fd seed pub dir)
+  (fn (_ fd seed pub dir forwarding)
     (def peer ((fn (_ p) (Str8 append (first p) ":" (%num (rest p)))) (Socket peer fd)))
     (%log (Str8 append "Child connection from " peer))
     (def c (ssh-open fd ()))
@@ -396,7 +494,7 @@
         (ssh-exchange-versions! c)
         (ssh-kex-server! c seed pub)
         (def user (%authenticate c dir peer))
-        (%serve-session c fd)
+        (%serve-session c fd forwarding)
         (Str8 append "Exit (" user ") from <" peer ">: Exited normally")))
     (%log outcome)
     (Socket close fd)))
@@ -405,7 +503,7 @@
 ; process of its own while this one goes back to listening.  The host key
 ; is read once; a dead connection's process is reaped by the kernel.
 (def ssh-serve
-  (fn (_ keyfile addr port dir make background pidfile)
+  (fn (_ keyfile addr port dir make background pidfile forwarding)
     (def key (%host-key keyfile make))
     (def lfd
       (guard (e (do (%log (Str8 append "Failed listening on '" (if (null? addr) "" addr) ":" (%num port)
@@ -426,7 +524,7 @@
        (if (= pid 0)
          (do (Socket close lfd)
              (unless (null? chld) (Sys signal chld (Sys sig-dfl)))
-             (%serve-connection fd (first key) (rest key) dir)
+             (%serve-connection fd (first key) (rest key) dir forwarding)
              (Sys exit 0))
          (do (Socket close fd)
              (self)))))))

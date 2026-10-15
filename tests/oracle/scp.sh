@@ -12,7 +12,8 @@
 #   many       two files into a directory, the remote end told -d
 #   times      -p carries the modification time
 #   ends       OpenSSH's `scp -O` to and from x-ssh's server, whose PATH
-#              finds x-ssh's scp: x-ssh's remote ends, -t and -f
+#              finds x-ssh's scp: x-ssh's remote ends, -t and -f, -p keeping
+#              the time at the sink
 set -u
 db=${1:?a built Dropbear directory}
 port=${2:-22422}
@@ -121,6 +122,12 @@ if $oscp "$fx/b" "$user@127.0.0.1:$fx/remote/b-x" 2> "$fx/err" && cmp -s "$fx/b"
 	echo "ok: ends -- OpenSSH's scp to x-ssh's scp -t"
 else
 	fail "ends: to x-ssh's scp -t"; tail -5 "$fx/xserver.log" >&2
+fi
+if $oscp -p "$fx/a" "$user@127.0.0.1:$fx/remote/a-timed" 2> "$fx/err" \
+	&& [ "$(stat -f %m "$fx/a" 2>/dev/null || stat -c %Y "$fx/a")" = "$(stat -f %m "$fx/remote/a-timed" 2>/dev/null || stat -c %Y "$fx/remote/a-timed")" ]; then
+	echo "ok: ends -- OpenSSH's scp -p to x-ssh's scp -t keeps the modification time"
+else
+	fail "ends: -p to x-ssh's scp -t"; tail -5 "$fx/xserver.log" >&2
 fi
 if $oscp "$user@127.0.0.1:$fx/b" "$fx/local/b-x" 2> "$fx/err" && cmp -s "$fx/b" "$fx/local/b-x"; then
 	echo "ok: ends -- OpenSSH's scp from x-ssh's scp -f"

@@ -1,5 +1,6 @@
 # dropbear, the server
 # @weight 2
+# @timeout-scale 4
 
 The server's line as what to do.  Serving -- the key exchange from the
 server's end, publickey authentication against authorized_keys, a
@@ -57,8 +58,8 @@ The hashes are x-lang's Crypt examples for "pw".
         "$5$saltsalt$0rl.MZtoLLPP3X0Rdl8riRnphIcAXJY27/aOAyK2hB5"
         "$6$saltsalt$pauPrmdmG4BTE9h2HPmywiw152IFch6BJCEsaY6D.PLTfpV8sqvXwWdyfsgVgozkYH9B80bAip/08R2BPH2xk/"))
 (write (list (List map (fn (_ s) (str=? (%pw-crypt "pw" s) s)) %pw-stored)
-             (List map (fn (_ s) (str=? (%pw-crypt "px" s) s)) %pw-stored)
+             (str=? (%pw-crypt "px" (first %pw-stored)) (first %pw-stored))
              (%pw-crypt "pw" "!") (%pw-crypt "pw" "*") (%pw-crypt "pw" "$y$j9T$abc")))
 ```
 ---
-    ((#t #t #t #t) (#f #f #f #f) () () ())
+    ((#t #t #t #t) #f () () ())

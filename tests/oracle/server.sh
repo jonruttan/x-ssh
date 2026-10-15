@@ -24,6 +24,7 @@
 #   remote    a client's -R listened for by the server, its connections opened
 #             to the client and carried to the server's own ssh port: x-ssh's
 #             client (two connections) and OpenSSH's
+#   netcat    x-ssh's client's -B through the server to its own ssh port
 #   background  a server started without -F returns at once, makes its
 #             host key under -R, writes -P's pidfile, and serves dbclient
 #
@@ -193,6 +194,15 @@ if [ "$one" = "SSH-2.0-x-ssh" ]; then
 	echo "ok: remote -- OpenSSH's -R is listened for by the x-ssh server"
 else
 	fail "remote: OpenSSH's client read '$one'"; cat "$fx/fwd.err" >&2; tail -5 "$fx/server.log" >&2
+fi
+
+# netcat: x-ssh's client's -B through the x-ssh server to its own ssh port
+out=$(HOME="$fx/home" "$X" -l ssh -- dbclient -p "$port" -i "$fx/dbkey" -l "$user" -B "127.0.0.1:$port" 127.0.0.1 < /dev/null 2> "$fx/fwd.err" | head -c 13)
+if [ "$out" = "SSH-2.0-x-ssh" ]; then
+	echo "ok: netcat -- -B through the x-ssh server carries its own version line"
+else
+	fail "netcat: read '$out'"
+	cat "$fx/fwd.err" >&2; tail -5 "$fx/server.log" >&2
 fi
 
 # background: no -F, -R making the host key at -r's path, -P the pidfile;

@@ -26,6 +26,7 @@
 #           ssh port, two connections in turn reading its version line
 #   remote  -N -R: the Dropbear listens, its connections come here and
 #           reach its own ssh port, two in turn reading its version line
+#   netcat  -B: the Dropbear's own version line carried to standard output
 #   git     `git clone` of a repository behind the Dropbear, with x-ssh
 #           as git's ssh: the clone's HEAD and its fsck
 #
@@ -187,6 +188,16 @@ if [ "$one" = "SSH-2.0-dropbear" ] && [ "$two" = "SSH-2.0-dropbear" ]; then
 	echo "ok: remote -- -R's connections come from the Dropbear and reach the host here, two in turn"
 else
 	fail "remote: read '$one' then '$two' through the remote port"
+	cat "$fx/fwd.err" >&2
+fi
+
+# netcat: -B, the client's own output carried from the Dropbear's own ssh
+# port through it: its version line
+out=$(HOME="$home" "$X" -l ssh -- dbclient -p "$port" -i "$fx/userkey" -l "$user" -B "127.0.0.1:$port" 127.0.0.1 < /dev/null 2> "$fx/fwd.err" | head -c 16)
+if [ "$out" = "SSH-2.0-dropbear" ]; then
+	echo "ok: netcat -- -B carries the Dropbear's own version line to standard output"
+else
+	fail "netcat: read '$out'"
 	cat "$fx/fwd.err" >&2
 fi
 

@@ -66,7 +66,7 @@
       (#t (Str8 append "x-ssh: host '" name "' is not in known_hosts; -y accepts and records its key\n")))))
 
 (def ssh-client-run
-  (fn (_ host port user keyfile command trace accept forwards remotes)
+  (fn (_ host port user keyfile command trace accept forwards remotes netcat)
     (def tr (if trace (fn (_ t) (%say 2 (Str8 append "x-ssh: " (%ms) " ms " t "\n"))) ()))
     (def seed (ssh-seed-of-key-file keyfile))
     (def fd (Socket tcp-connect (%address host) port))
@@ -77,7 +77,7 @@
     (def known (%host-key-ok c host port accept tr))
     (if (not (eq? known #t))
       (do (%say 2 known) (Socket close fd) 255)
-      (%authenticated-run c fd user seed command tr forwards remotes))))
+      (%authenticated-run c fd user seed command tr forwards remotes netcat))))
 
 ; The forwards' listen addresses resolved: "localhost" and any name to
 ; the dotted address the listener binds, () left as every interface.
@@ -86,7 +86,7 @@
     (List map (fn (_ f) (pair (if (null? (first f)) () (%address (first f))) (rest f))) forwards)))
 
 (def %authenticated-run
-  (fn (_ c fd user seed command tr forwards remotes)
+  (fn (_ c fd user seed command tr forwards remotes netcat)
     (def ok (ssh-auth-publickey! c user seed))
     (if (not (eq? ok #t))
       (do (%say 2 (Str8 append "x-ssh: authentication failed; the server offers " (Str8 join "," ok) "\n"))
@@ -94,10 +94,11 @@
           255)
       (do (unless (null? tr) (tr (Str8 append "authenticated as " user)))
           (def status
-            (ssh-session-run! c command (if (null? command) () %stdin)
+            (ssh-session-run! c command (if (if (null? command) (null? netcat) #f) () %stdin)
               (fn (_ buf start len) (File write 1 (ssh-copy buf start len) len))
               (fn (_ buf start len) (File write 2 (ssh-copy buf start len) len))
-              (%forwards-resolved forwards) remotes))
+              (%forwards-resolved forwards) remotes
+              (if (null? netcat) () (pair (%address (first netcat)) (rest netcat)))))
           (ssh-disconnect! c)
           (Socket close fd)
           (def code (if (null? status) 0 status))

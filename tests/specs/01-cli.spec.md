@@ -57,6 +57,7 @@ Usage: dbclient [options] [user@]host[/port] [command]
 	-y		Accept and record the key of a host not in known_hosts
 	-L forward	Local port forwarding: [listenaddress:]listenport:remotehost:remoteport
 	-R forward	Remote port forwarding: [listenaddress:]listenport:remotehost:remoteport
+	-B endpoint	Netcat-alike forwarding to endhost:endport
 	-N		Don't run a remote command
 	-g		Allow remote hosts to connect to forwarded ports
 	-v		Trace the connection on standard error
@@ -71,7 +72,7 @@ Usage: dbclient [options] [user@]host[/port] [command]
              (List take 2 (ssh-plan (list "dbclient" "-i" "k" "-L" "2222:h" "host" "true")))))
 ```
 ---
-    (('exec "host" 22 "me" "k" () #f #f (("localhost" 2222 "h" 22) ("127.0.0.1" 3333 "h" 80)) ()) ((() 2222 "h" 22)) ('client "Bad TCP forward '2222:h'\n"))
+    (('exec "host" 22 "me" "k" () #f #f (("localhost" 2222 "h" 22) ("127.0.0.1" 3333 "h" 80)) () ()) ((() 2222 "h" 22)) ('client "Bad TCP forward '2222:h'\n"))
 
 ### -V names the version, status 0
 
@@ -124,6 +125,16 @@ Usage: dbclient [options] [user@]host[/port] [command]
 ```
 ---
     (("localhost" 8080 "localhost" 80) ("0.0.0.0" 2222 "h" 22))
+
+### -B plans a netcat channel in a command's place; a bad endpoint is refused, status 1
+
+```ssh
+(write (list (List ref 5 (first (rest (ssh-plan (list "dbclient" "-i" "k" "-B" "git.example:9418" "me@host" "ignored")))))
+             (List ref 10 (first (rest (ssh-plan (list "dbclient" "-i" "k" "-B" "git.example:9418" "me@host")))))
+             (List take 2 (ssh-plan (list "dbclient" "-i" "k" "-B" "nowhere" "host")))))
+```
+---
+    (() ("git.example" . 9418) ('client "Bad -B endpoint 'nowhere'\n"))
 
 ## main
 

@@ -19,7 +19,8 @@
 (import x/sys/file)
 (import x/sys/posix)
 (import ssh/bytes ssh-copy)
-(import ssh/transport ssh-open ssh-host-key ssh-engines! ssh-exchange-versions! ssh-kex! ssh-auth-publickey!)
+(import ssh/transport ssh-open ssh-host-key ssh-engines! ssh-exchange-versions! ssh-kex!
+  ssh-auth-service! ssh-auth-publickey! ssh-auth-password!)
 (import ssh/session ssh-session-run! ssh-disconnect!)
 (import ssh/keys ssh-seed-of-key-file)
 (import ssh/known ssh-known-name ssh-known-check ssh-known-add!)
@@ -68,7 +69,7 @@
 (def ssh-client-run
   (fn (_ host port user keyfile command trace accept forwards remotes netcat limits)
     (def tr (if trace (fn (_ t) (%say 2 (Str8 append "x-ssh: " (%ms) " ms " t "\n"))) ()))
-    (def seed (ssh-seed-of-key-file keyfile))
+    (def seed (if (null? keyfile) () (ssh-seed-of-key-file keyfile)))
     (def fd (Socket tcp-connect (%address host) port))
     (def c (ssh-open fd tr))
     (ssh-engines! c)
@@ -85,9 +86,26 @@
   (fn (_ forwards)
     (List map (fn (_ f) (pair (if (null? (first f)) () (%address (first f))) (rest f))) forwards)))
 
+; The password Dropbear's client takes from its environment, or ().
+(def %password
+  (fn (_) ((fn (_ p) (if (if (null? p) #t (= (Str8 length p) 0)) () p)) (Sys getenv "DROPBEAR_PASSWORD"))))
+
+; Authentication as Dropbear's client tries it: the key when there is one,
+; then DROPBEAR_PASSWORD when the server offers password.  #t, or the
+; server's remaining methods.
+(def %authenticate
+  (fn (_ c user seed tr)
+    (ssh-auth-service! c)
+    (def by-key (if (null? seed) (list "password") (ssh-auth-publickey! c user seed)))
+    (def password (%password))
+    (if (if (eq? by-key #t) #t (if (null? password) #t (not (List any? (fn (_ m) (str=? m "password")) by-key))))
+      by-key
+      (do (unless (null? tr) (tr "trying password"))
+          (ssh-auth-password! c user password)))))
+
 (def %authenticated-run
   (fn (_ c fd user seed command tr forwards remotes netcat limits)
-    (def ok (ssh-auth-publickey! c user seed))
+    (def ok (%authenticate c user seed tr))
     (if (not (eq? ok #t))
       (do (%say 2 (Str8 append "x-ssh: authentication failed; the server offers " (Str8 join "," ok) "\n"))
           (Socket close fd)

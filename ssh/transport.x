@@ -514,16 +514,52 @@
     (ssh-put-string out pub 0 32)
     (ssh-out-run out)))
 
-; The service asked for, the request signed with the user's key, and
-; the answer: #t on success, the server's remaining methods otherwise.
-(def ssh-auth-publickey!
-  (fn (_ c user seed)
+; The ssh-userauth service asked for, before any method is tried.
+(def ssh-auth-service!
+  (fn (_ c)
     (def sr (ssh-out))
     (ssh-put-byte sr ssh-msg-service-request)
     (ssh-put-text sr "ssh-userauth")
     (def srr (ssh-out-run sr))
     (ssh-send-packet! c (first srr) (rest srr))
     (ssh-expect! c ssh-msg-service-accept "SERVICE_ACCEPT")
+    #t))
+
+; The answer to an authentication request: #t on success, the server's
+; remaining methods otherwise; a banner traced on the way.
+(def %auth-answer
+  (fn (self c)
+    (def p (ssh-next-packet! c))
+    (def t (%byte (first p) 0))
+    (match
+      ((= t ssh-msg-userauth-success) #t)
+      ((= t ssh-msg-userauth-banner)
+        (do (def in (ssh-in (first p) 1 (- (rest p) 1)))
+            (ssh-trace c (Str8 append "banner: " (ssh-get-text in)))
+            (self c)))
+      ((= t ssh-msg-userauth-failure)
+        (do (def in (ssh-in (first p) 1 (- (rest p) 1)))
+            (ssh-get-names in)))
+      (#t (Err raise 'value "ssh: an unexpected answer to authentication" ())))))
+
+; A password request for the user, and its answer as %auth-answer has it.
+(def ssh-auth-password!
+  (fn (_ c user password)
+    (def req (ssh-out))
+    (ssh-put-byte req ssh-msg-userauth-request)
+    (ssh-put-text req user)
+    (ssh-put-text req "ssh-connection")
+    (ssh-put-text req "password")
+    (ssh-put-bool req #f)
+    (ssh-put-text req password)
+    (def rr (ssh-out-run req))
+    (ssh-send-packet! c (first rr) (rest rr))
+    (%auth-answer c)))
+
+; The request signed with the user's key, and its answer as
+; %auth-answer has it.
+(def ssh-auth-publickey!
+  (fn (_ c user seed)
     (def pub (Ed25519 public seed))
     (def blob (%pk-blob pub))
     ; what is signed: the session id as a string, then the request itself
@@ -550,21 +586,9 @@
     (ssh-put-string req (first sbr) 0 (rest sbr))
     (def rr (ssh-out-run req))
     (ssh-send-packet! c (first rr) (rest rr))
-    ((fn (self)
-       (def p (ssh-next-packet! c))
-       (def t (%byte (first p) 0))
-       (match
-         ((= t ssh-msg-userauth-success) #t)
-         ((= t ssh-msg-userauth-banner)
-           (do (def in (ssh-in (first p) 1 (- (rest p) 1)))
-               (ssh-trace c (Str8 append "banner: " (ssh-get-text in)))
-               (self)))
-         ((= t ssh-msg-userauth-failure)
-           (do (def in (ssh-in (first p) 1 (- (rest p) 1)))
-               (ssh-get-names in)))
-         (#t (Err raise 'value "ssh: an unexpected answer to authentication" ())))))))
+    (%auth-answer c)))
 
 (provide ssh/transport ssh-version-string ssh-open ssh-fd ssh-session-id ssh-host-key ssh-pending? ssh-random ssh-engines!
-  ssh-exchange-versions! ssh-send-packet! ssh-recv-packet! ssh-next-packet! ssh-expect! ssh-kex! ssh-kex-server! ssh-auth-publickey!
+  ssh-exchange-versions! ssh-send-packet! ssh-recv-packet! ssh-next-packet! ssh-expect! ssh-kex! ssh-kex-server! ssh-auth-service! ssh-auth-publickey! ssh-auth-password!
   ssh-msg-disconnect ssh-msg-global-request ssh-msg-request-success ssh-msg-request-failure ssh-msg-service-request ssh-msg-service-accept
   ssh-msg-userauth-request ssh-msg-userauth-failure ssh-msg-userauth-success ssh-trace)

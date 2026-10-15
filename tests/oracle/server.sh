@@ -25,6 +25,8 @@
 #             to the client and carried to the server's own ssh port: x-ssh's
 #             client (two connections) and OpenSSH's
 #   netcat    x-ssh's client's -B through the server to its own ssh port
+#   clocks    a -K 1 client the server keeps alive, a -I 2 client ending on its
+#             own clock, and a server started with -I closing an idle client
 #   background  a server started without -F returns at once, makes its
 #             host key under -R, writes -P's pidfile, and serves dbclient
 #
@@ -203,6 +205,43 @@ if [ "$out" = "SSH-2.0-x-ssh" ]; then
 else
 	fail "netcat: read '$out'"
 	cat "$fx/fwd.err" >&2; tail -5 "$fx/server.log" >&2
+fi
+
+# clocks: x-ssh's client kept alive by keepalives the x-ssh server answers,
+# then ending on its own idle clock; and a server started with -I closing
+# an idle Dropbear client
+HOME="$fx/home" "$X" -l ssh -- dbclient -p "$port" -i "$fx/dbkey" -l "$user" -N -K 1 127.0.0.1 < /dev/null > /dev/null 2> "$fx/fwd.err" &
+fwdpid=$!
+sleep 12
+if kill -0 $fwdpid 2>/dev/null; then
+	echo "ok: clocks -- a client asking a keepalive each second is still up after 12s"
+else
+	fail "clocks: the -K 1 client is gone"; cat "$fx/fwd.err" >&2
+fi
+kill_tree $fwdpid
+fwdpid=
+start=$(date +%s)
+HOME="$fx/home" "$X" -l ssh -- dbclient -p "$port" -i "$fx/dbkey" -l "$user" -N -I 2 127.0.0.1 < /dev/null > /dev/null 2> "$fx/fwd.err"
+status=$?
+took=$(( $(date +%s) - start ))
+if [ "$status" != 0 ] && [ $took -lt 40 ] && grep -q 'Idle timeout' "$fx/fwd.err"; then
+	echo "ok: clocks -- -I ends the connection on the client's clock (${took}s)"
+else
+	fail "clocks: -I client status $status after ${took}s"; cat "$fx/fwd.err" >&2
+fi
+iport=$((port + 30))
+"$X" -l ssh -- dropbear -F -E -I 2 -r "$fx/hostkey" -p "127.0.0.1:$iport" -D "$fx" > "$fx/idle.log" 2>&1 &
+idlepid=$!
+i=0
+while ! grep -q 'Not backgrounding' "$fx/idle.log" 2>/dev/null; do i=$((i + 1)); [ $i -lt 600 ] || break; sleep 1; done
+start=$(date +%s)
+"$db/dbclient" -y -y -p "$iport" -i "$fx/dbkey" -N "$user@127.0.0.1" < /dev/null > /dev/null 2> "$fx/client.err"
+took=$(( $(date +%s) - start ))
+kill_tree $idlepid
+if [ $took -lt 40 ] && grep -q 'Idle timeout' "$fx/idle.log"; then
+	echo "ok: clocks -- a server started with -I closes an idle client (${took}s)"
+else
+	fail "clocks: the -I server kept the client ${took}s"; cat "$fx/idle.log" >&2
 fi
 
 # background: no -F, -R making the host key at -r's path, -P the pidfile;

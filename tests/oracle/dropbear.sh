@@ -27,6 +27,7 @@
 #   remote  -N -R: the Dropbear listens, its connections come here and
 #           reach its own ssh port, two in turn reading its version line
 #   netcat  -B: the Dropbear's own version line carried to standard output
+#   idle    -N -I 2 ends on the client's own clock
 #   git     `git clone` of a repository behind the Dropbear, with x-ssh
 #           as git's ssh: the clone's HEAD and its fsck
 #
@@ -198,6 +199,18 @@ if [ "$out" = "SSH-2.0-dropbear" ]; then
 	echo "ok: netcat -- -B carries the Dropbear's own version line to standard output"
 else
 	fail "netcat: read '$out'"
+	cat "$fx/fwd.err" >&2
+fi
+
+# idle: -N -I 2 with nothing to carry ends on the client's own clock
+start=$(date +%s)
+HOME="$home" "$X" -l ssh -- dbclient -p "$port" -i "$fx/userkey" -l "$user" -N -I 2 127.0.0.1 < /dev/null > /dev/null 2> "$fx/fwd.err"
+status=$?
+took=$(( $(date +%s) - start ))
+if [ "$status" != 0 ] && [ $took -lt 40 ] && grep -q 'Idle timeout' "$fx/fwd.err"; then
+	echo "ok: idle -- -I ends the connection on the client's clock (status $status after ${took}s)"
+else
+	fail "idle: status $status after ${took}s"
 	cat "$fx/fwd.err" >&2
 fi
 

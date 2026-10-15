@@ -64,7 +64,8 @@
 (def %send
   (fn (_ c out)
     (def r (ssh-out-run out))
-    (ssh-send-packet! c (first r) (rest r))))
+    (ssh-send-packet! c (first r) (rest r))
+    (%oset! %clock %SENT (Sys now))))
 
 (def %packet-of
   (fn (_ type)
@@ -178,6 +179,61 @@
       (Sys exit 127))
     (Sys close (first i)) (Sys close (rest o)) (Sys close (rest e))
     (list pid (rest i) (first o) (first e))))
+
+; --- the clocks Dropbear's -K and -I read ------------------------------------
+;
+; Seconds since the epoch: 1 the last packet sent, 2 the last received,
+; 3 the last carrying data either way, 4 the last keepalive asked.  A
+; keepalive is asked after -K seconds without sending or receiving; the
+; connection is given up after three times that without receiving
+; anything; -I seconds without data either way is the idle timeout.  One
+; connection a process.
+(def %SENT 1) (def %RECV 2) (def %DATA 3) (def %ASKED 4)
+(def %clock (Vector make 4 0))
+(def %KEEPALIVE-LIMIT 3)
+
+(def %clocks-start! (fn (_) (def now (Sys now)) (%oset! %clock %SENT now) (%oset! %clock %RECV now) (%oset! %clock %DATA now) (%oset! %clock %ASKED now)))
+
+; A keepalive asked: Dropbear's global request, wanting the answer that
+; counts as the other end alive.
+(def %keepalive!
+  (fn (_ c)
+    (def req (%packet-of ssh-msg-global-request))
+    (ssh-put-text req "keepalive@openssh.com")
+    (ssh-put-bool req #t)
+    (%send c req)
+    (%oset! %clock %ASKED (Sys now))))
+
+; How long a wait may last before a clock wants looking at, in
+; milliseconds, or -1 for no limit: limits is (KEEPALIVE . IDLE), 0 for
+; never.
+(def %wait-ms
+  (fn (_ limits)
+    (def now (Sys now))
+    (def k (first limits)) (def i (rest limits))
+    (def dues
+      (List append
+        (if (> k 0) (list (- (+ (%oref %clock %SENT) k) now) (- (+ (%oref %clock %RECV) k) now)
+                          (- (+ (%oref %clock %RECV) (* k %KEEPALIVE-LIMIT)) now)) ())
+        (if (> i 0) (list (- (+ (%oref %clock %DATA) i) now)) ())))
+    (if (null? dues) -1
+      (do (def least (List fold (fn (_ a b) (if (< a b) a b)) (first dues) (rest dues)))
+          (if (< least 0) 0 (* 1000 least))))))
+
+; The clocks read: a keepalive asked when due, the connection given up
+; or closed when a limit has passed, as Dropbear says it.
+(def %clocks!
+  (fn (_ c limits)
+    (def now (Sys now))
+    (def k (first limits)) (def i (rest limits))
+    (when (> k 0)
+      (do (when (>= (- now (%oref %clock %RECV)) (* k %KEEPALIVE-LIMIT))
+            (do (%log "Keepalive timeout") (Err raise 'io "Keepalive timeout" ())))
+          (when (if (>= (- now (%oref %clock %SENT)) k) #t
+                  (if (>= (- now (%oref %clock %RECV)) k) (>= (- now (%oref %clock %ASKED)) k) #f))
+            (%keepalive! c))))
+    (when (if (> i 0) (>= (- now (%oref %clock %DATA)) i) #f)
+      (do (%log "Idle timeout") (Err raise 'io "Idle timeout" ())))))
 
 ; --- the channels (RFC 4254) ---------------------------------------------------
 ;
@@ -367,6 +423,7 @@
           (when extended (ssh-put-uint32 d 1))
           (ssh-put-string d buf 0 got)
           (%send c d)
+          (%oset! %clock %DATA (Sys now))
           (%ch! ch %WINDOW (- (%ch ch %WINDOW) got))
           (%moved! run got)))))
 
@@ -400,7 +457,9 @@
 (def %handle!
   (fn (_ c run sock)
     (def p (ssh-next-packet! c))
+    (%oset! %clock %RECV (Sys now))
     (def t (%byte (first p) 0))
+    (when (if (= t %msg-channel-data) #t (= t %msg-channel-extended-data)) (%oset! %clock %DATA (Sys now)))
     (def in (ssh-in (first p) 1 (- (rest p) 1)))
     (def ch (if (if (>= t %msg-channel-open-confirmation) (<= t %msg-channel-failure) #f)
               (%find run (ssh-get-uint32 in))
@@ -465,8 +524,9 @@
 ; server allows: a client's forwards, its remote forwards, and those on
 ; an address other than localhost.
 (def %serve-session
-  (fn (_ c sock local remote any-host)
+  (fn (_ c sock local remote any-host limits)
     (def run (Vector make 8 ()))
+    (%clocks-start!)
     (%rn! run %CHANNELS ()) (%rn! run %NEXT 0) (%rn! run %MOVED 0)
     (%rn! run %FORWARDING local) (%rn! run %SESSION ())
     (%rn! run %REMOTE remote) (%rn! run %ANY-HOST any-host) (%rn! run %LISTENERS ())
@@ -489,7 +549,7 @@
                                             (if (null? err) () (list (pair err (list (lit in)))))
                                             (List map (fn (_ l) (pair (first l) (list (lit in)))) (%rn run %LISTENERS))
                                             (List map (fn (_ ch) (pair (%ch ch %FD) (list (lit in)))) open-forwards))
-                               -1))
+                               (%wait-ms limits)))
                    (when (if (null? out) #f (%ready? ready out)) (%pump! c run session out %OUT #f))
                    (when (if (null? err) #f (%ready? ready err)) (%pump! c run session err %ERR #t))
                    (List for-each
@@ -499,7 +559,8 @@
                    (List for-each
                      (fn (_ ch) (when (%ready? ready (%ch ch %FD)) (%pump! c run ch (%ch ch %FD) %FD #f)))
                      open-forwards)
-                   (when (%ready? ready sock) (%handle! c run sock))))
+                   (when (%ready? ready sock) (%handle! c run sock))
+                   (%clocks! c limits)))
              (when (if (null? child) #f
                      (if (%ch session %CLOSED) #f (if (%ch session %OUT) #f (not (%ch session %ERR)))))
                (%log (Str8 append "exit status " (%num (%finish! c session)))))
@@ -568,7 +629,7 @@
 
 ; One connection served, in its own process.
 (def %serve-connection
-  (fn (_ fd seed pub dir local remote any-host)
+  (fn (_ fd seed pub dir local remote any-host limits)
     (def peer ((fn (_ p) (Str8 append (first p) ":" (%num (rest p)))) (Socket peer fd)))
     (%log (Str8 append "Child connection from " peer))
     (def c (ssh-open fd ()))
@@ -577,7 +638,7 @@
         (ssh-exchange-versions! c)
         (ssh-kex-server! c seed pub)
         (def user (%authenticate c dir peer))
-        (%serve-session c fd local remote any-host)
+        (%serve-session c fd local remote any-host limits)
         (Str8 append "Exit (" user ") from <" peer ">: Exited normally")))
     (%log outcome)
     (Socket close fd)))
@@ -586,7 +647,7 @@
 ; process of its own while this one goes back to listening.  The host key
 ; is read once; a dead connection's process is reaped by the kernel.
 (def ssh-serve
-  (fn (_ keyfile addr port dir make background pidfile local remote any-host)
+  (fn (_ keyfile addr port dir make background pidfile local remote any-host limits)
     (def key (%host-key keyfile make))
     (def lfd
       (guard (e (do (%log (Str8 append "Failed listening on '" (if (null? addr) "" addr) ":" (%num port)
@@ -607,7 +668,7 @@
        (if (= pid 0)
          (do (Socket close lfd)
              (unless (null? chld) (Sys signal chld (Sys sig-dfl)))
-             (%serve-connection fd (first key) (rest key) dir local remote any-host)
+             (%serve-connection fd (first key) (rest key) dir local remote any-host limits)
              (Sys exit 0))
          (do (Socket close fd)
              (self)))))))

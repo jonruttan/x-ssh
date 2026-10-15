@@ -58,6 +58,8 @@ Usage: dbclient [options] [user@]host[/port] [command]
 	-L forward	Local port forwarding: [listenaddress:]listenport:remotehost:remoteport
 	-R forward	Remote port forwarding: [listenaddress:]listenport:remotehost:remoteport
 	-B endpoint	Netcat-alike forwarding to endhost:endport
+	-K secs		Seconds without traffic before a keepalive is asked; 0 is never, the default
+	-I secs		Seconds without data before the connection closes; 0 is never, the default
 	-N		Don't run a remote command
 	-g		Allow remote hosts to connect to forwarded ports
 	-v		Trace the connection on standard error
@@ -72,7 +74,7 @@ Usage: dbclient [options] [user@]host[/port] [command]
              (List take 2 (ssh-plan (list "dbclient" "-i" "k" "-L" "2222:h" "host" "true")))))
 ```
 ---
-    (('exec "host" 22 "me" "k" () #f #f (("localhost" 2222 "h" 22) ("127.0.0.1" 3333 "h" 80)) () ()) ((() 2222 "h" 22)) ('client "Bad TCP forward '2222:h'\n"))
+    (('exec "host" 22 "me" "k" () #f #f (("localhost" 2222 "h" 22) ("127.0.0.1" 3333 "h" 80)) () () (0 . 0)) ((() 2222 "h" 22)) ('client "Bad TCP forward '2222:h'\n"))
 
 ### -V names the version, status 0
 
@@ -135,6 +137,15 @@ Usage: dbclient [options] [user@]host[/port] [command]
 ```
 ---
     (() ("git.example" . 9418) ('client "Bad -B endpoint 'nowhere'\n"))
+
+### -K and -I ride as seconds, 0 for never
+
+```ssh
+(write (list (List ref 11 (first (rest (ssh-plan (list "dbclient" "-i" "k" "-K" "30" "-I" "600" "me@host" "true")))))
+             (List ref 11 (first (rest (ssh-plan (list "dbclient" "-i" "k" "me@host" "true")))))))
+```
+---
+    ((30 . 600) (0 . 0))
 
 ## main
 

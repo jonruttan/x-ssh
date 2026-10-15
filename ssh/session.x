@@ -51,7 +51,8 @@
 (def %send
   (fn (_ c out)
     (def r (ssh-out-run out))
-    (ssh-send-packet! c (first r) (rest r))))
+    (ssh-send-packet! c (first r) (rest r))
+    (%oset! %clock %SENT (Sys now))))
 
 (def %packet-of
   (fn (_ type)
@@ -62,6 +63,59 @@
 (def %oref (prim-ref (lit obj) (lit ref)))
 (def %oset! (prim-ref (lit obj) (lit set!)))
 (def %make-str (prim-ref (lit str) (lit make)))
+
+; The clocks Dropbear's -K and -I read, seconds since the epoch: 1 the
+; last packet sent, 2 the last received, 3 the last carrying data
+; either way, 4 the last keepalive asked.  A keepalive is asked after
+; -K seconds without sending or receiving; the connection is given up
+; after three times that without receiving anything; -I seconds without
+; data either way is the idle timeout.  One connection a process.
+(def %SENT 1) (def %RECV 2) (def %DATA 3) (def %ASKED 4)
+(def %clock (Vector make 4 0))
+(def %KEEPALIVE-LIMIT 3)
+
+(def %clocks-start! (fn (_) (def now (Sys now)) (%oset! %clock %SENT now) (%oset! %clock %RECV now) (%oset! %clock %DATA now) (%oset! %clock %ASKED now)))
+
+; A keepalive asked: Dropbear's global request, wanting the answer that
+; counts as the other end alive.
+(def %keepalive!
+  (fn (_ c)
+    (def req (%packet-of ssh-msg-global-request))
+    (ssh-put-text req "keepalive@openssh.com")
+    (ssh-put-bool req #t)
+    (%send c req)
+    (%oset! %clock %ASKED (Sys now))))
+
+; How long a wait may last before a clock wants looking at, in
+; milliseconds, or -1 for no limit: limits is (KEEPALIVE . IDLE), 0 for
+; never.
+(def %wait-ms
+  (fn (_ limits)
+    (def now (Sys now))
+    (def k (first limits)) (def i (rest limits))
+    (def dues
+      (List append
+        (if (> k 0) (list (- (+ (%oref %clock %SENT) k) now) (- (+ (%oref %clock %RECV) k) now)
+                          (- (+ (%oref %clock %RECV) (* k %KEEPALIVE-LIMIT)) now)) ())
+        (if (> i 0) (list (- (+ (%oref %clock %DATA) i) now)) ())))
+    (if (null? dues) -1
+      (do (def least (List fold (fn (_ a b) (if (< a b) a b)) (first dues) (rest dues)))
+          (if (< least 0) 0 (* 1000 least))))))
+
+; The clocks read: a keepalive asked when due, the connection given up
+; or closed when a limit has passed, as Dropbear says it.
+(def %clocks!
+  (fn (_ c limits)
+    (def now (Sys now))
+    (def k (first limits)) (def i (rest limits))
+    (when (> k 0)
+      (do (when (>= (- now (%oref %clock %RECV)) (* k %KEEPALIVE-LIMIT))
+            (Err raise 'io "ssh: Keepalive timeout" ()))
+          (when (if (>= (- now (%oref %clock %SENT)) k) #t
+                  (if (>= (- now (%oref %clock %RECV)) k) (>= (- now (%oref %clock %ASKED)) k) #f))
+            (%keepalive! c))))
+    (when (if (> i 0) (>= (- now (%oref %clock %DATA)) i) #f)
+      (Err raise 'io "ssh: Idle timeout" ()))))
 
 ; A channel's state, in a vector: 1 our channel number, 2 the server's,
 ; 3 how many bytes it will take from us (its window), 4 the most a packet
@@ -250,6 +304,7 @@
           (ssh-put-uint32 data (%ch ch %SERVER))
           (ssh-put-string data buf 0 got)
           (%send c data)
+          (%oset! %clock %DATA (Sys now))
           (%ch! ch %WINDOW (- (%ch ch %WINDOW) got))
           (%moved! run got)))))
 
@@ -277,7 +332,9 @@
 (def %handle!
   (fn (_ c run)
     (def p (ssh-next-packet! c))
+    (%oset! %clock %RECV (Sys now))
     (def t (%byte (first p) 0))
+    (when (if (= t %msg-channel-data) #t (= t %msg-channel-extended-data)) (%oset! %clock %DATA (Sys now)))
     (def in (ssh-in (first p) 1 (- (rest p) 1)))
     (def ch (if (if (>= t %msg-channel-open-confirmation) (<= t %msg-channel-failure) #f)
               (%find run (ssh-get-uint32 in))
@@ -364,8 +421,9 @@
 ; connection ends.  Answers the exit status, or () when the server gave
 ; none.
 (def ssh-session-run!
-  (fn (_ c command input on-out on-err forwards remotes netcat)
+  (fn (_ c command input on-out on-err forwards remotes netcat limits)
     (def run (Vector make 7 ()))
+    (%clocks-start!)
     (%rn! run %CHANNELS ()) (%rn! run %NEXT 0) (%rn! run %MOVED 0)
     (%rn! run %REMOTES remotes) (%rn! run %ASKED ())
     (%rn! run %LISTENERS
@@ -386,7 +444,7 @@
                      (Sys poll (List append (list (pair sock (list (lit in))))
                                             (List map (fn (_ l) (pair (first l) (list (lit in)))) (%rn run %LISTENERS))
                                             (List map (fn (_ ch) (pair (%ch ch %INPUT) (list (lit in)))) inputs))
-                               -1))
+                               (%wait-ms limits)))
                    (List for-each
                      (fn (_ l) (when (%ready? ready (first l))
                                  (%open-forward! c run (Socket accept (first l)) (List ref 1 l) (List ref 2 l))))
@@ -394,7 +452,8 @@
                    (List for-each
                      (fn (_ ch) (when (%ready? ready (%ch ch %INPUT)) (%pump! c run ch)))
                      inputs)
-                   (when (%ready? ready sock) (%handle! c run))))
+                   (when (%ready? ready sock) (%handle! c run))
+                   (%clocks! c limits)))
              (when (> (%rn run %MOVED) %collect-every)
                (do (Heap collect) (%rn! run %MOVED 0)))
              (self)))))

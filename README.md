@@ -34,7 +34,10 @@ command a connection.
   (`-g` on every interface, `-N` runs no command); `-B host:port` is
   Dropbear's netcat mode, the client's own input and output carried
   through the server to `host:port`, as git's or ssh's ProxyCommand
-  wants.  `-v` traces the connection, with CPU milliseconds a step.
+  wants.  `-K secs` asks a keepalive after that long without traffic and
+  gives the connection up after three times that without an answer;
+  `-I secs` closes it after that long without data.  `-v` traces the
+  connection, with CPU milliseconds a step.
 - `dropbear`: the server: `-r` its host key (default
   `/etc/dropbear/dropbear_ed25519_host_key`), made there under `-R` when
   the file is missing; `-p` where it listens, `-D` the directory of the
@@ -46,7 +49,8 @@ command a connection.
   input, output and error on the channel; a client's `-L` forwards are
   served as `direct-tcpip` channels unless `-j` refuses them, and its
   `-R` forwards listened for, on localhost unless `-a` allows the address
-  asked, unless `-k` refuses them.  `git clone` over it works.
+  asked, unless `-k` refuses them; `-K` and `-I` are the client's
+  keepalive and idle timeout from this end.  `git clone` over it works.
 - `dropbearkey`: `-t ed25519 -f FILE` makes a key in Dropbear's format;
   `-y` prints a key's public line and fingerprint.
 - `dropbearconvert`: `openssh|dropbear openssh|dropbear IN OUT` writes an

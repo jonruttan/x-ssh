@@ -47,6 +47,8 @@
             (Opts flag "-j" "Disable local port forwarding")
             (Opts flag "-k" "Disable remote port forwarding")
             (Opts flag "-a" "Allow connections to forwarded ports from any host")
+            (Opts arg "-K" "secs" "Seconds without traffic before a keepalive is asked; 0 is never, the default")
+            (Opts arg "-I" "secs" "Seconds without data before the connection closes; 0 is never, the default")
             (Opts flag "-s" "Disable password logins (x-ssh has none)")
             %version-row))
     (%row (lit client) (list "dbclient" "ssh") "the client"
@@ -58,6 +60,8 @@
             (Opts arg "-L" "forward" "Local port forwarding: [listenaddress:]listenport:remotehost:remoteport")
             (Opts arg "-R" "forward" "Remote port forwarding: [listenaddress:]listenport:remotehost:remoteport")
             (Opts arg "-B" "endpoint" "Netcat-alike forwarding to endhost:endport")
+            (Opts arg "-K" "secs" "Seconds without traffic before a keepalive is asked; 0 is never, the default")
+            (Opts arg "-I" "secs" "Seconds without data before the connection closes; 0 is never, the default")
             (Opts flag "-N" "Don't run a remote command")
             (Opts flag "-g" "Allow remote hosts to connect to forwarded ports")
             (Opts flag "-v" "Trace the connection on standard error")
@@ -175,7 +179,7 @@
     (match
       ((null? port) (list (lit server) (Str8 append "Bad port '" p "'\n") 1))
       (#t (list (lit server)
-                (list (lit serve) key addr port dir (Opts on? o "-R") (not (Opts on? o "-F")) pidfile (not (Opts on? o "-j")) (not (Opts on? o "-k")) (Opts on? o "-a"))
+                (list (lit serve) key addr port dir (Opts on? o "-R") (not (Opts on? o "-F")) pidfile (not (Opts on? o "-j")) (not (Opts on? o "-k")) (Opts on? o "-a") (%limits o))
                 0)))))
 
 ; The key generator's line as what to do, in dropbearkey's order of
@@ -243,8 +247,14 @@
       (#t (list (lit client)
                 (list (lit exec) host port user key (if (if (Opts on? o "-N") #t netcat) () command)
                       (Opts on? o "-v") (Opts on? o "-y") (List map rest forwards) (List map rest remotes)
-                      (if netcat netcat ()))
+                      (if netcat netcat ()) (%limits o))
                 0)))))
+
+; -K and -I as (KEEPALIVE . IDLE) seconds, 0 for never or when not given.
+(def %limits
+  (fn (_ o)
+    (def %secs (fn (_ flag) (if (Opts on? o flag) ((fn (_ n) (if (null? n) 0 n)) (%int-or-nil (Opts value o flag))) 0)))
+    (pair (%secs "-K") (%secs "-I"))))
 
 ; A -B endpoint host:port as (HOST . PORT), or () for a bad one; #f for none.
 (def %endpoint
@@ -281,7 +291,8 @@
         (match
           ((eq? (first what) (lit exec))
             (ssh-client-run (List ref 1 what) (List ref 2 what) (List ref 3 what) (List ref 4 what)
-                            (List ref 5 what) (List ref 6 what) (List ref 7 what) (List ref 8 what) (List ref 9 what) (List ref 10 what)))
+                            (List ref 5 what) (List ref 6 what) (List ref 7 what) (List ref 8 what) (List ref 9 what) (List ref 10 what)
+                            (List ref 11 what)))
           ((eq? (first what) (lit generate)) (ssh-keygen-generate (List ref 1 what) (List ref 2 what)))
           ((eq? (first what) (lit to)) (ssh-scp-remote #t (List ref 1 what) (List ref 2 what) (List ref 3 what)))
           ((eq? (first what) (lit from)) (ssh-scp-remote #f (List ref 1 what) (List ref 2 what) (List ref 3 what)))
@@ -290,7 +301,8 @@
                             (List ref 5 what) (List ref 6 what)))
           ((eq? (first what) (lit serve))
             (ssh-serve (List ref 1 what) (List ref 2 what) (List ref 3 what) (List ref 4 what)
-                       (List ref 5 what) (List ref 6 what) (List ref 7 what) (List ref 8 what) (List ref 9 what) (List ref 10 what)))
+                       (List ref 5 what) (List ref 6 what) (List ref 7 what) (List ref 8 what) (List ref 9 what) (List ref 10 what)
+                       (List ref 11 what)))
           ((eq? (first what) (lit convert))
             (ssh-convert (List ref 1 what) (List ref 2 what) (List ref 3 what) (List ref 4 what)))
           (#t (ssh-keygen-print (List ref 1 what) (List ref 2 what)))))

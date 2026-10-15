@@ -15,11 +15,10 @@
 ; the bytes and a zero, the sink answers zero.  A one byte and a line is
 ; an error the other end carries on after, a two byte and a line one it
 ; stops at.  `T<mtime> 0 <atime> 0\n` before a file carries its times
-; under -p, and is acknowledged.  Under -r a directory is `D<mode> 0
-; <name>\n`, its entries, then `E\n`, each acknowledged; without -r a
-; directory is refused at either end, as Dropbear refuses it.  This sink
-; acknowledges T and leaves a file's times as written: the platform's
-; File has no door that sets a given time yet.
+; under -p, acknowledged, and set on what follows it once that is
+; written.  Under -r a directory is `D<mode> 0 <name>\n`, its entries,
+; then `E\n`, each acknowledged; without -r a directory is refused at
+; either end, as Dropbear refuses it.
 ;
 ; As the remote end (-t, -f) the protocol is on this process's standard
 ; input, which the platform keeps on fd 3, and its standard output.
@@ -205,27 +204,42 @@
 ; files written, directories made and entered.  Answers how many failed.
 (def %level
   (fn (_ in out target into-dir recursive)
-    ((fn (self errs)
+    ((fn (self errs times)
        (def b (%read-byte in))
        (match
          ((null? b) errs)
          ((if (= b 1) #t (= b 2))
            (do (def m (%read-line in ()))
                (%say (Str8 append (if (null? m) "" m) "\n"))
-               (if (= b 2) (+ errs 1) (self (+ errs 1)))))
-         ((= b (%char->int #\T)) (do (%read-line in b) (%send-byte out 0) (self errs)))
+               (if (= b 2) (+ errs 1) (self (+ errs 1) ()))))
+         ((= b (%char->int #\T)) (do (def t (%times (%read-line in ()))) (%send-byte out 0) (self errs t)))
          ((= b (%char->int #\E)) (do (%read-line in ()) (%send-byte out 0) errs))
-         ((= b (%char->int #\C)) (self (+ errs (%file-in in out (%read-line in ()) target into-dir))))
+         ((= b (%char->int #\C)) (self (+ errs (%file-in in out (%read-line in ()) target into-dir times)) ()))
          ((= b (%char->int #\D))
            (if recursive
-             (self (+ errs (%dir-in in out (%read-line in ()) target into-dir)))
+             (self (+ errs (%dir-in in out (%read-line in ()) target into-dir times)) ())
              (%fatal-to out "received directory without -r")))
          (#t (%fatal-to out "expected a control record"))))
-     0)))
+     0 ())))
 
-; The C record's file written, its bytes taken; answers 0 or 1 failed.
+; A T record's times, (MTIME . ATIME), or () for a line that is not one.
+(def %times
+  (fn (_ line)
+    (def ws (Str8 split " " line))
+    (if (< (List length ws) 3) ()
+      (do (def m (guard (e ()) (%int (first ws) 10)))
+          (def a (guard (e ()) (%int (List ref 2 ws) 10)))
+          (if (if (null? m) #t (null? a)) () (pair m a))))))
+
+; Times set on a path as a T record had them; a path the door refuses is let be.
+(def %set-times!
+  (fn (_ path times)
+    (unless (null? times) (guard (e ()) (File set-times path (rest times) (first times))))))
+
+; The C record's file written, its bytes taken, its times set when a T
+; record came before it; answers 0 or 1 failed.
 (def %file-in
-  (fn (_ in out line target into-dir)
+  (fn (_ in out line target into-dir times)
     (def ws (Str8 split " " line))
     (def mode (%int (first ws) 8))
     (def size (%int (List ref 1 ws) 10))
@@ -238,13 +252,15 @@
           (def ok (%copy in fd size))
           (File close fd)
           (def end (%read-byte in))
+          (%set-times! path times)
           (%send-byte out 0)
           (if (if ok (eq? end 0) #f) 0 1)))))
 
 ; The D record's directory, made when it is not there, its records taken
-; until E, then its mode set as sent; answers how many failed.
+; until E, then its mode set as sent and its times as a T record before it
+; had them; answers how many failed.
 (def %dir-in
-  (fn (_ in out line target into-dir)
+  (fn (_ in out line target into-dir times)
     (def ws (Str8 split " " line))
     (def mode (%int (first ws) 8))
     (def name (Str8 join " " (rest (rest ws))))
@@ -259,6 +275,7 @@
         (do (%send-byte out 0)
             (def errs (%level in out path #t #t))
             (when (null? there) (guard (e ()) (File chmod path mode)))
+            (%set-times! path times)
             errs)))))
 
 ; --- the client: the ssh program spawned on two pipes -------------------------

@@ -56,8 +56,8 @@ command a connection.
   the ssh program (`-S`, default `ssh`; `-P` and `-i` are passed on) and
   speaks the protocol over its pipes, `-r` walking directories and `-p`
   sending times.  As the remote end (`-t`, `-f`, `-d`) it is what an
-  OpenSSH `scp -O` reaches.  A received time is acknowledged and not set:
-  the platform's File has no door that sets a given time yet.
+  OpenSSH `scp -O` reaches; a received time is set on the file or
+  directory it precedes.
 - `-V` on each, and `--help` from its option declaration.
 
 Not served yet: other ciphers and key types, encrypted key files, port

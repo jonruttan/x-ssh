@@ -1,0 +1,20 @@
+#!/bin/sh
+# shasum, for a builder that has sha1sum and sha256sum: `-a N` picks the
+# digest, everything else passes through.
+algorithm=1
+while [ $# -gt 0 ]; do
+	case "$1" in
+		-a)
+			algorithm="$2"
+			shift 2
+			;;
+		-a*)
+			algorithm="${1#-a}"
+			shift
+			;;
+		*)
+			break
+			;;
+	esac
+done
+exec "sha${algorithm}sum" "$@"

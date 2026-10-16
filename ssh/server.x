@@ -32,6 +32,7 @@
   ssh-msg-global-request ssh-msg-request-success ssh-msg-request-failure)
 (import ssh/keys ssh-key-of-file)
 (import x/codec/ed25519)
+(import x/codec/crypt)
 (import ssh/keygen ssh-keygen-make ssh-key-fingerprint)
 
 (def %oref (prim-ref (lit obj) (lit ref)))
@@ -95,21 +96,84 @@
                  (if (if (null? at) #t (null? (rest at))) acc (pair (first (rest at)) acc))))))
        (Str8 split "\n" (File read-all path)) ()))))
 
-; --- authentication (RFC 4252), publickey with ssh-ed25519 ---------------
+; --- authentication (RFC 4252): publickey with ssh-ed25519, and password ----
 
+; The methods a failure offers: publickey, and password unless -s.
 (def %failure
-  (fn (_ c)
+  (fn (_ c passwords)
     (def f (%packet-of ssh-msg-userauth-failure))
-    (ssh-put-names f (list "publickey"))
+    (ssh-put-names f (if passwords (list "publickey" "password") (list "publickey")))
     (ssh-put-bool f #f)
     (%send c f)))
 
-; Requests answered until one succeeds: the user this server runs as, by
+; A colon-separated file's line for name, as its fields, or ().
+(def %entry
+  (fn (_ path name)
+    (def text (guard (e ()) (File read-all path)))
+    (if (null? text) ()
+      (List find (fn (_ fs) (if (null? fs) #f (str=? (first fs) name)))
+        (List map (fn (_ l) (Str8 split ":" l)) (Str8 split "\n" text))))))
+
+; The user this server runs as: USER, or the passwd entry of its uid.
+(def %me
+  (fn (_)
+    (def u (Sys getenv "USER"))
+    (if (if (null? u) #f (> (Str8 length u) 0)) u
+      ((fn (_ e) (if (null? e) "" (first e)))
+        (List find (fn (_ fs) (if (> (List length fs) 2) (str=? (List ref 2 fs) (%num (Sys getuid))) #f))
+          (List map (fn (_ l) (Str8 split ":" l))
+            (Str8 split "\n" (guard (e "") (File read-all "/etc/passwd")))))))))
+
+; A user's password hash, as Dropbear finds it: the passwd entry's, or
+; the shadow entry's when that is "x"; () when there is none.
+(def %hash-of
+  (fn (_ user)
+    (def pw (%entry "/etc/passwd" user))
+    (def h (if (< (List length pw) 2) () (List ref 1 pw)))
+    (if (if (null? h) #f (str=? h "x"))
+      ((fn (_ sh) (if (< (List length sh) 2) () (List ref 1 sh))) (%entry "/etc/shadow" user))
+      h)))
+
+(def %prefix?
+  (fn (_ p s) (if (< (Str8 length s) (Str8 length p)) #f (str=? (Str8 sub 0 (Str8 length p) s) p))))
+
+; crypt(3) of a password with a stored hash as its salt, through x-lang's
+; Crypt: $1$, $5$, $6$ or traditional DES; () for a hash crypt refuses,
+; a locked account's "!" or "*".
+(def %crypt
+  (fn (_ password stored)
+    (def after (fn (_ n) (Str8 sub n (- (Str8 length stored) n) stored)))
+    (match
+      ((%prefix? "$1$" stored) (Crypt md5 password (after 3)))
+      ((%prefix? "$5$" stored) (Crypt sha256 password (after 3)))
+      ((%prefix? "$6$" stored) (Crypt sha512 password (after 3)))
+      ((if (= (Str8 length stored) 13) (not (%prefix? "$" stored)) #f)
+        (guard (e ()) (Crypt des password stored)))
+      (#t ()))))
+
+; A password request checked as Dropbear checks it: no change, a hash
+; there, not locked, not blank, and the crypt equal; logged as Dropbear
+; logs each outcome.
+(def %password-ok
+  (fn (_ in user peer)
+    (def change (ssh-get-bool in))
+    (def password (ssh-get-text in))
+    (def stored (if change () (%hash-of user)))
+    (def test (if (null? stored) () (%crypt password stored)))
+    (match
+      ((null? stored) #f)
+      ((null? test) (do (%log (Str8 append "User account '" user "' is locked")) #f))
+      ((= (Str8 length stored) 0) (do (%log (Str8 append "User '" user "' has blank password, rejected")) #f))
+      ((str=? test stored) (do (%log (Str8 append "Password auth succeeded for '" user "' from " peer)) #t))
+      (#t (do (%log (Str8 append "Bad password attempt for '" user "' from " peer)) #f)))))
+
+; Requests answered until one succeeds, for the user this server runs as:
 ; a key in authorized_keys whose signature over the session id and the
-; request checks.  A request with no signature asks whether the key
-; would do, and is answered PK_OK when it would.  Answers the user.
+; request checks, or, unless passwords are disabled, the user's password.
+; A key request with no signature asks whether the key would do, and is
+; answered PK_OK when it would.  Answers the user.
 (def %authenticate
-  (fn (_ c dir peer)
+  (fn (_ c dir peer passwords)
     (def sr (ssh-expect! c ssh-msg-service-request "SERVICE_REQUEST"))
     (def sin (ssh-in (first sr) 1 (- (rest sr) 1)))
     (unless (str=? (ssh-get-text sin) "ssh-userauth")
@@ -117,7 +181,7 @@
     (def sa (%packet-of ssh-msg-service-accept))
     (ssh-put-text sa "ssh-userauth")
     (%send c sa)
-    (def me (Sys getenv "USER"))
+    (def me (%me))
     (def keys (%authorized dir))
     ((fn (self)
        (def p (ssh-expect! c ssh-msg-userauth-request "USERAUTH_REQUEST"))
@@ -125,41 +189,47 @@
        (def user (ssh-get-text in))
        (def service (ssh-get-text in))
        (def method (ssh-get-text in))
-       (if (if (str=? method "publickey") (str=? user me) #f)
-         (do (def signed? (ssh-get-bool in))
-             (def alg (ssh-get-text in))
-             (def blob (ssh-get-string in))
-             (def b64 (Base64 encode-bytes (%bytes (ssh-in-buf in) (first blob) (rest blob))))
-             (def kin (ssh-in (ssh-in-buf in) (first blob) (rest blob)))
-             (def known (if (str=? alg "ssh-ed25519") (List any? (fn (_ k) (str=? k b64)) keys) #f))
-             (match
-               ((not known) (do (%failure c) (self)))
-               ((not signed?)
-                 (do (def ok (%packet-of %msg-userauth-pk-ok))
-                     (ssh-put-text ok alg)
-                     (ssh-put-string ok (ssh-in-buf in) (first blob) (rest blob))
-                     (%send c ok)
-                     (self)))
-               (#t
-                 (do (ssh-get-text kin)
-                     (def pub (ssh-get-bytes kin))
-                     (def sig (ssh-get-string in))
-                     (def sin2 (ssh-in (ssh-in-buf in) (first sig) (rest sig)))
-                     (ssh-get-text sin2)
-                     (def sig64 (ssh-get-bytes sin2))
-                     ; what was signed: the session id as a string, then the
-                     ; request up to the signature's own length field
-                     (def data (ssh-out))
-                     (ssh-put-string data (ssh-session-id c) 0 32)
-                     (ssh-put-bytes data (first p) 0 (- (first sig) 4))
-                     (def msg (ssh-out-run data))
-                     (if (Ed25519 verify pub sig64 (first msg) 0 (rest msg))
-                       (do (%send c (%packet-of ssh-msg-userauth-success))
-                           (%log (Str8 append "Pubkey auth succeeded for '" user "' with ssh-ed25519 key "
-                                              (ssh-key-fingerprint pub) " from " peer))
-                           user)
-                       (do (%failure c) (self)))))))
-         (do (%failure c) (self)))))))
+       (match
+         ((not (str=? user me)) (do (%failure c passwords) (self)))
+         ((if passwords (str=? method "password") #f)
+           (if (%password-ok in user peer)
+             (do (%send c (%packet-of ssh-msg-userauth-success)) user)
+             (do (%failure c passwords) (self))))
+         ((str=? method "publickey")
+           (do (def signed? (ssh-get-bool in))
+               (def alg (ssh-get-text in))
+               (def blob (ssh-get-string in))
+               (def b64 (Base64 encode-bytes (%bytes (ssh-in-buf in) (first blob) (rest blob))))
+               (def kin (ssh-in (ssh-in-buf in) (first blob) (rest blob)))
+               (def known (if (str=? alg "ssh-ed25519") (List any? (fn (_ k) (str=? k b64)) keys) #f))
+               (match
+                 ((not known) (do (%failure c passwords) (self)))
+                 ((not signed?)
+                   (do (def ok (%packet-of %msg-userauth-pk-ok))
+                       (ssh-put-text ok alg)
+                       (ssh-put-string ok (ssh-in-buf in) (first blob) (rest blob))
+                       (%send c ok)
+                       (self)))
+                 (#t
+                   (do (ssh-get-text kin)
+                       (def pub (ssh-get-bytes kin))
+                       (def sig (ssh-get-string in))
+                       (def sin2 (ssh-in (ssh-in-buf in) (first sig) (rest sig)))
+                       (ssh-get-text sin2)
+                       (def sig64 (ssh-get-bytes sin2))
+                       ; what was signed: the session id as a string, then the
+                       ; request up to the signature's own length field
+                       (def data (ssh-out))
+                       (ssh-put-string data (ssh-session-id c) 0 32)
+                       (ssh-put-bytes data (first p) 0 (- (first sig) 4))
+                       (def msg (ssh-out-run data))
+                       (if (Ed25519 verify pub sig64 (first msg) 0 (rest msg))
+                         (do (%send c (%packet-of ssh-msg-userauth-success))
+                             (%log (Str8 append "Pubkey auth succeeded for '" user "' with ssh-ed25519 key "
+                                                (ssh-key-fingerprint pub) " from " peer))
+                             user)
+                         (do (%failure c passwords) (self))))))))
+         (#t (do (%failure c passwords) (self))))))))
 
 ; --- the command, on three pipes ------------------------------------------
 
@@ -629,7 +699,7 @@
 
 ; One connection served, in its own process.
 (def %serve-connection
-  (fn (_ fd seed pub dir local remote any-host limits)
+  (fn (_ fd seed pub dir local remote any-host limits passwords)
     (def peer ((fn (_ p) (Str8 append (first p) ":" (%num (rest p)))) (Socket peer fd)))
     (%log (Str8 append "Child connection from " peer))
     (def c (ssh-open fd ()))
@@ -637,7 +707,7 @@
       (guard (e (Str8 append "Exit from <" peer ">: the connection ended"))
         (ssh-exchange-versions! c)
         (ssh-kex-server! c seed pub)
-        (def user (%authenticate c dir peer))
+        (def user (%authenticate c dir peer passwords))
         (%serve-session c fd local remote any-host limits)
         (Str8 append "Exit (" user ") from <" peer ">: Exited normally")))
     (%log outcome)
@@ -647,7 +717,7 @@
 ; process of its own while this one goes back to listening.  The host key
 ; is read once; a dead connection's process is reaped by the kernel.
 (def ssh-serve
-  (fn (_ keyfile addr port dir make background pidfile local remote any-host limits)
+  (fn (_ keyfile addr port dir make background pidfile local remote any-host limits passwords)
     (def key (%host-key keyfile make))
     (def lfd
       (guard (e (do (%log (Str8 append "Failed listening on '" (if (null? addr) "" addr) ":" (%num port)
@@ -668,7 +738,7 @@
        (if (= pid 0)
          (do (Socket close lfd)
              (unless (null? chld) (Sys signal chld (Sys sig-dfl)))
-             (%serve-connection fd (first key) (rest key) dir local remote any-host limits)
+             (%serve-connection fd (first key) (rest key) dir local remote any-host limits passwords)
              (Sys exit 0))
          (do (Socket close fd)
              (self)))))))

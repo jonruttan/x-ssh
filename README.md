@@ -21,12 +21,14 @@ but the kernel and x are installed (x-os).
 ## Served
 
 Every end speaks curve25519-sha256, ssh-ed25519 and
-chacha20-poly1305@openssh.com, with publickey authentication and one
-command a connection.
+chacha20-poly1305@openssh.com, with publickey and password authentication
+and one command a connection.
 
 - `dbclient`: a command run on a host, its output and exit status, with
   the client's standard input carried to it.  `-i` names an OpenSSH or
-  Dropbear ssh-ed25519 key, `-l` the user, `-p` the port; hosts are
+  Dropbear ssh-ed25519 key, tried first; `DROPBEAR_PASSWORD`, as
+  Dropbear's client takes it, is the password tried next or alone.  `-l`
+  the user, `-p` the port; hosts are
   checked against `~/.ssh/known_hosts`, `-y` accepting and recording a
   new one.  `-L [address:]port:host:port` carries each connection to a
   local port through the server to `host:port`; `-R` the same shape asks
@@ -41,7 +43,9 @@ command a connection.
 - `dropbear`: the server: `-r` its host key (default
   `/etc/dropbear/dropbear_ed25519_host_key`), made there under `-R` when
   the file is missing; `-p` where it listens, `-D` the directory of the
-  `authorized_keys` it admits.  Without `-F` it forks into the background
+  `authorized_keys` it admits; the user's password is checked against
+  `/etc/shadow` with crypt(3)'s DES, `$1$`, `$5$` or `$6$`, unless `-s`
+  refuses passwords.  Without `-F` it forks into the background
   as daemon(3) has it, writing `-P`'s pidfile (default
   `/var/run/dropbear.pid`); it logs to standard error, so in the
   background its log goes nowhere.  Each connection is served by a forked
@@ -64,13 +68,18 @@ command a connection.
   directory it precedes.
 - `-V` on each, and `--help` from its option declaration.
 
-Not served yet: other ciphers and key types, encrypted key files, port
-forwarding, agents, passwords, syslog.
+Not served yet: other ciphers and key types, encrypted key files,
+agents, a password typed at a prompt, syslog.
 
 The oracles in `tests/oracle/` are the live tests: `dropbear.sh` drives
 the client against a built Dropbear, `server.sh` drives the server with
 Dropbear's and OpenSSH's clients, and `scp.sh` runs scp from either end.
 Each takes a built Dropbear's directory.
+
+`tests/linux/run.sh` is the Linux leg: password logins, which want a
+shadow file and a known password, run as root in a container built from
+`tests/linux/Containerfile` at the declared release, with Dropbear's and
+OpenSSH's clients as the oracles.
 
 ## Install and test
 

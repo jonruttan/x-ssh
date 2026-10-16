@@ -1,0 +1,21 @@
+# The Linux leg: x built at the release lang.xon declares, with Dropbear's
+# and OpenSSH's clients, in a container the server runs in as root.  That
+# is what password logins need: a shadow file the server can read and a
+# user whose password is known.
+#
+# Alpine, so the engine links against musl, as x-os's does.
+FROM alpine:3.20
+RUN apk add --no-cache build-base git curl dropbear-dbclient openssh-client
+# The platform's tools call `shasum`; Alpine has the digests under their own
+# names.
+COPY shasum /usr/local/bin/shasum
+ARG X_LANG_REF
+RUN test -n "$X_LANG_REF" \
+ && git clone --depth 1 --branch "$X_LANG_REF" https://github.com/jonruttan/x-lang.git /x-lang
+WORKDIR /x-lang
+# The engine is built from source: the published linux artifact is glibc, and
+# there is none for arm64.  Installed, because a bundle's dialect is found
+# where an install tree keeps it.
+RUN make engine-source && make && make boot && make install
+ENV X=/usr/local/bin/x
+WORKDIR /x-ssh

@@ -49,7 +49,7 @@
             (Opts flag "-a" "Allow connections to forwarded ports from any host")
             (Opts arg "-K" "secs" "Seconds without traffic before a keepalive is asked; 0 is never, the default")
             (Opts arg "-I" "secs" "Seconds without data before the connection closes; 0 is never, the default")
-            (Opts flag "-s" "Disable password logins (x-ssh has none)")
+            (Opts flag "-s" "Disable password logins")
             %version-row))
     (%row (lit client) (list "dbclient" "ssh") "the client"
       "[options] [user@]host[/port] [command]"
@@ -179,7 +179,8 @@
     (match
       ((null? port) (list (lit server) (Str8 append "Bad port '" p "'\n") 1))
       (#t (list (lit server)
-                (list (lit serve) key addr port dir (Opts on? o "-R") (not (Opts on? o "-F")) pidfile (not (Opts on? o "-j")) (not (Opts on? o "-k")) (Opts on? o "-a") (%limits o))
+                (list (lit serve) key addr port dir (Opts on? o "-R") (not (Opts on? o "-F")) pidfile (not (Opts on? o "-j")) (not (Opts on? o "-k")) (Opts on? o "-a") (%limits o)
+                      (not (Opts on? o "-s")))
                 0)))))
 
 ; The key generator's line as what to do, in dropbearkey's order of
@@ -239,7 +240,8 @@
     (def bad (List find (fn (_ f) (null? (rest f))) (List append forwards remotes)))
     (def netcat (if (Opts on? o "-B") (%endpoint (Opts value o "-B")) #f))
     (match
-      ((null? key) (list (lit client) "x-ssh: -i keyfile is required; no agent or password yet\n" 1))
+      ((if (null? key) (null? (Sys getenv "DROPBEAR_PASSWORD")) #f)
+        (list (lit client) "x-ssh: -i keyfile or DROPBEAR_PASSWORD is required; no agent yet\n" 1))
       ((not (null? bad)) (list (lit client) (Str8 append "Bad TCP forward '" (first bad) "'\n") 1))
       ((null? netcat) (list (lit client) (Str8 append "Bad -B endpoint '" (Opts value o "-B") "'\n") 1))
       ((if (if (Opts on? o "-N") #t netcat) #f (= (Str8 length command) 0))
@@ -302,7 +304,7 @@
           ((eq? (first what) (lit serve))
             (ssh-serve (List ref 1 what) (List ref 2 what) (List ref 3 what) (List ref 4 what)
                        (List ref 5 what) (List ref 6 what) (List ref 7 what) (List ref 8 what) (List ref 9 what) (List ref 10 what)
-                       (List ref 11 what)))
+                       (List ref 11 what) (List ref 12 what)))
           ((eq? (first what) (lit convert))
             (ssh-convert (List ref 1 what) (List ref 2 what) (List ref 3 what) (List ref 4 what)))
           (#t (ssh-keygen-print (List ref 1 what) (List ref 2 what)))))

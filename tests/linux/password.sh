@@ -14,6 +14,8 @@
 #   wrong      a wrong password is refused, status 255, and logged
 #   prompt     x-ssh's client asks at the terminal (expect), again after a
 #              wrong password, echoing neither
+#   syslog     a server without -E logs to busybox's syslogd, as dropbear
+#              in the authpriv facility
 #   -s         a server started with -s offers no password
 #
 # The clients are the oracles.
@@ -92,6 +94,21 @@ if expect tests/linux/prompt.exp "$port" > "$fx/prompt.out" 2>&1 && grep -qx ok 
 	echo "ok: prompt -- x-ssh asks at the terminal, again after a wrong password, echoing neither"
 else
 	fail "prompt: $(cat "$fx/prompt.out")"
+fi
+
+# syslog: a server without -E logs to busybox's syslogd, as Dropbear does
+syslogd -O "$fx/messages"
+USER=root "$X" -l ssh -- dropbear -F -r "$fx/hostkey" -p 127.0.0.1:2224 -D "$fx" > "$fx/quiet.log" 2>&1 &
+i=0
+while ! grep -q 'dropbear\[[0-9]*\]: Not backgrounding' "$fx/messages" 2>/dev/null; do
+	i=$((i + 1)); [ $i -lt 600 ] || break; sleep 1
+done
+out=$(DROPBEAR_PASSWORD=pw dbclient -y -y -p 2224 root@127.0.0.1 'echo by syslog' < /dev/null 2> "$fx/client.err")
+if [ "$out" = "by syslog" ] && grep -q "authpriv.notice dropbear\\[[0-9]*\\]: Password auth succeeded for 'root'" "$fx/messages" \
+	&& ! grep -q 'Password auth' "$fx/quiet.log"; then
+	echo "ok: syslog -- without -E the server logs to syslogd as dropbear, authpriv"
+else
+	fail "syslog: output '$out'"; cat "$fx/messages" >&2; cat "$fx/quiet.log" >&2
 fi
 
 # -s

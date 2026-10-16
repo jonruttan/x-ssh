@@ -19,7 +19,7 @@ oracles.
 (write (first (rest (ssh-plan (list "dropbear" "-F" "-E" "-r" "hk" "-p" "127.0.0.1:2222" "-D" "/keys")))))
 ```
 ---
-    ('serve "hk" "127.0.0.1" 2222 "/keys" #f #f "/var/run/dropbear.pid" #t #t #f (0 . 0) #t)
+    ('serve "hk" "127.0.0.1" 2222 "/keys" #f #f "/var/run/dropbear.pid" #t #t #f (0 . 0) #t #f)
 
 ### a bare port listens on every address
 
@@ -29,13 +29,13 @@ oracles.
 ---
     ()
 
-### Dropbear's defaults: the key's path, the background, the pidfile; -R makes the key; -j, -k and -a rule the forwards; -K and -I the clocks; -s refuses passwords
+### Dropbear's defaults: the key's path, the background, the pidfile; -R makes the key; -j, -k and -a rule the forwards; -K and -I the clocks; -s refuses passwords; without -E the log goes to syslog
 
 ```ssh
 (write (first (rest (ssh-plan (list "dropbear" "-R" "-j" "-k" "-a" "-s" "-K" "15" "-I" "300" "-P" "/run/x.pid" "-D" "/keys")))))
 ```
 ---
-    ('serve "/etc/dropbear/dropbear_ed25519_host_key" () 22 "/keys" #t #t "/run/x.pid" #f #f #t (15 . 300) #f)
+    ('serve "/etc/dropbear/dropbear_ed25519_host_key" () 22 "/keys" #t #t "/run/x.pid" #f #f #t (15 . 300) #f #t)
 
 ### a port that is no number is refused
 

@@ -12,6 +12,8 @@
 #   ssh        OpenSSH's client, the password by SSH_ASKPASS
 #   x-ssh      x-ssh's own client, DROPBEAR_PASSWORD and no key
 #   wrong      a wrong password is refused, status 255, and logged
+#   prompt     x-ssh's client asks at the terminal (expect), again after a
+#              wrong password, echoing neither
 #   -s         a server started with -s offers no password
 #
 # The clients are the oracles.
@@ -82,6 +84,14 @@ if [ "$status" = 255 ] && grep -q "Bad password attempt for 'root'" "$fx/server.
 	echo "ok: wrong -- a wrong password is refused and logged"
 else
 	fail "wrong: status $status"
+fi
+
+# prompt
+mkdir -p /tmp/prompt-home
+if expect tests/linux/prompt.exp "$port" > "$fx/prompt.out" 2>&1 && grep -qx ok "$fx/prompt.out"; then
+	echo "ok: prompt -- x-ssh asks at the terminal, again after a wrong password, echoing neither"
+else
+	fail "prompt: $(cat "$fx/prompt.out")"
 fi
 
 # -s

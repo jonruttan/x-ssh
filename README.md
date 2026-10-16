@@ -26,8 +26,9 @@ and one command a connection.
 
 - `dbclient`: a command run on a host, its output and exit status, with
   the client's standard input carried to it.  `-i` names an OpenSSH or
-  Dropbear ssh-ed25519 key, tried first; `DROPBEAR_PASSWORD`, as
-  Dropbear's client takes it, is the password tried next or alone.  `-l`
+  Dropbear ssh-ed25519 key, tried first; then a password, from
+  `DROPBEAR_PASSWORD` as Dropbear's client takes it, or asked for at the
+  terminal with echo off, three times.  `-l`
   the user, `-p` the port; hosts are
   checked against `~/.ssh/known_hosts`, `-y` accepting and recording a
   new one.  `-L [address:]port:host:port` carries each connection to a
@@ -69,7 +70,7 @@ and one command a connection.
 - `-V` on each, and `--help` from its option declaration.
 
 Not served yet: other ciphers and key types, encrypted key files,
-agents, a password typed at a prompt, syslog.
+agents, syslog.
 
 The oracles in `tests/oracle/` are the live tests: `dropbear.sh` drives
 the client against a built Dropbear, `server.sh` drives the server with

@@ -1,0 +1,31 @@
+#!/usr/bin/expect -f
+# prompt.exp PORT -- x-ssh's client asking for a password at the terminal:
+# a wrong one, asked again, then the right one; neither echoed; the
+# command's output and exit status.
+set port [lindex $argv 0]
+set timeout 120
+log_user 0
+spawn env HOME=/tmp/prompt-home $env(X) -l ssh -- dbclient -y -p $port -l root 127.0.0.1 "echo typed-ok; exit 5"
+expect {
+	"root@127.0.0.1's password: " {}
+	timeout { puts "FAIL: no first prompt"; exit 1 }
+}
+send "px\r"
+expect {
+	"root@127.0.0.1's password: " {}
+	timeout { puts "FAIL: no second prompt after a wrong password"; exit 1 }
+}
+send "pw\r"
+expect {
+	-re {typed-ok} {}
+	timeout { puts "FAIL: no output after the right password"; exit 1 }
+}
+set seen $expect_out(buffer)
+if {[string first "pw" $seen] >= 0 || [string first "px" $seen] >= 0} {
+	puts "FAIL: a password was echoed: $seen"
+	exit 1
+}
+expect eof
+set status [lindex [wait] 3]
+if {$status != 5} { puts "FAIL: status $status"; exit 1 }
+puts "ok"

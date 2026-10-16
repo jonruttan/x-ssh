@@ -18,6 +18,7 @@
 (import x/sys/socket)
 (import x/sys/file)
 (import x/sys/posix)
+(import x/repl/term)
 (import ssh/bytes ssh-copy)
 (import ssh/transport ssh-open ssh-host-key ssh-engines! ssh-exchange-versions! ssh-kex!
   ssh-auth-service! ssh-auth-publickey! ssh-auth-password!)
@@ -78,7 +79,7 @@
     (def known (%host-key-ok c host port accept tr))
     (if (not (eq? known #t))
       (do (%say 2 known) (Socket close fd) 255)
-      (%authenticated-run c fd user seed command tr forwards remotes netcat limits))))
+      (%authenticated-run c fd user host seed command tr forwards remotes netcat limits))))
 
 ; The forwards' listen addresses resolved: "localhost" and any name to
 ; the dotted address the listener binds, () left as every interface.
@@ -90,22 +91,66 @@
 (def %password
   (fn (_) ((fn (_ p) (if (if (null? p) #t (= (Str8 length p) 0)) () p)) (Sys getenv "DROPBEAR_PASSWORD"))))
 
-; Authentication as Dropbear's client tries it: the key when there is one,
-; then DROPBEAR_PASSWORD when the server offers password.  #t, or the
-; server's remaining methods.
+(def %make-str (prim-ref (lit str) (lit make)))
+(def %byte-ref (prim-ref (lit str) (lit byte-ref)))
+(def %char->int (prim-ref (lit char) (lit ->int)))
+
+; A line typed at the terminal with echo off, as getpass reads it: the
+; terminal made raw with its signal keys still signalling, then the prompt
+; written to /dev/tty -- in that order, or a password typed at once is
+; echoed -- bytes read to a carriage return or newline, a backspace
+; or delete taking back a byte, and the terminal put back as it was.  ()
+; when there is no terminal, or at end of input.
+(def %prompt
+  (fn (_ text)
+    (def fd (guard (e -1) (File open "/dev/tty" (lit rdwr))))
+    (if (< fd 0) ()
+      (do (def saved (Term raw-with-signals! fd))
+          (File write fd text (%byte-len text))
+          (def one (%make-str 1))
+          (def line
+            (guard (e ())
+              ((fn (self acc)
+                 (if (< (File read fd one 1) 1) ()
+                   (do (def b (%char->int (%byte-ref one 0)))
+                       (match
+                         ((if (= b 13) #t (= b 10)) (Str8 join "" (List reverse acc)))
+                         ((if (= b 127) #t (= b 8)) (self (if (null? acc) () (rest acc))))
+                         (#t (self (pair (Str8 sub 0 1 one) acc)))))))
+               ())))
+          (Term restore! fd saved)
+          (File write fd "\r\n" 2)
+          (File close fd)
+          line))))
+
+(def %offers-password?
+  (fn (_ methods) (if (eq? methods #t) #f (List any? (fn (_ m) (str=? m "password")) methods))))
+
+; Authentication as Dropbear's client tries it: the key when there is one;
+; then, while the server offers password, DROPBEAR_PASSWORD once, or a
+; password typed at the terminal, three times.  #t, or the server's
+; remaining methods.
 (def %authenticate
-  (fn (_ c user seed tr)
+  (fn (_ c user host seed tr)
     (ssh-auth-service! c)
     (def by-key (if (null? seed) (list "password") (ssh-auth-publickey! c user seed)))
     (def password (%password))
-    (if (if (eq? by-key #t) #t (if (null? password) #t (not (List any? (fn (_ m) (str=? m "password")) by-key))))
-      by-key
-      (do (unless (null? tr) (tr "trying password"))
-          (ssh-auth-password! c user password)))))
+    (match
+      ((not (%offers-password? by-key)) by-key)
+      ((not (null? password))
+        (do (unless (null? tr) (tr "trying password"))
+            (ssh-auth-password! c user password)))
+      (#t
+        ((fn (self left answer)
+           (if (if (= left 0) #t (not (%offers-password? answer))) answer
+             (do (def typed (%prompt (Str8 append user "@" host "'s password: ")))
+                 (if (null? typed) answer
+                   (self (- left 1) (ssh-auth-password! c user typed))))))
+         3 by-key)))))
 
 (def %authenticated-run
-  (fn (_ c fd user seed command tr forwards remotes netcat limits)
-    (def ok (%authenticate c user seed tr))
+  (fn (_ c fd user host seed command tr forwards remotes netcat limits)
+    (def ok (%authenticate c user host seed tr))
     (if (not (eq? ok #t))
       (do (%say 2 (Str8 append "x-ssh: authentication failed; the server offers " (Str8 join "," ok) "\n"))
           (Socket close fd)

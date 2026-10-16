@@ -240,8 +240,6 @@
     (def bad (List find (fn (_ f) (null? (rest f))) (List append forwards remotes)))
     (def netcat (if (Opts on? o "-B") (%endpoint (Opts value o "-B")) #f))
     (match
-      ((if (null? key) (null? (Sys getenv "DROPBEAR_PASSWORD")) #f)
-        (list (lit client) "x-ssh: -i keyfile or DROPBEAR_PASSWORD is required; no agent yet\n" 1))
       ((not (null? bad)) (list (lit client) (Str8 append "Bad TCP forward '" (first bad) "'\n") 1))
       ((null? netcat) (list (lit client) (Str8 append "Bad -B endpoint '" (Opts value o "-B") "'\n") 1))
       ((if (if (Opts on? o "-N") #t netcat) #f (= (Str8 length command) 0))

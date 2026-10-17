@@ -22,6 +22,10 @@
 #            fingerprint and randomart x-ssh printed and the public line
 #            it wrote; x-ssh's -l and -y say what OpenSSH's do of a key
 #            OpenSSH made; the made key authenticates the client
+#   sealed   a key x-ssh seals under a passphrase opens in OpenSSH's
+#            ssh-keygen; x-ssh's -y, -l and -p say what OpenSSH's do of
+#            a key OpenSSH sealed; a sealed key authenticates the client,
+#            its passphrase by SSH_ASKPASS once the server would take it
 #   rewrite  ssh-keygen -p turns Dropbear's host key into a file
 #            OpenSSH's ssh-keygen reads as the key dropbearkey shows
 #   known    ssh-keygen -F and -R on a known_hosts, as OpenSSH's do them
@@ -152,6 +156,69 @@ if [ "$out" = "made here" ]; then
 	echo "ok: keys -- the key x-ssh made authenticates it"
 else
 	fail "keys: a client with the key x-ssh made said '$out'"
+fi
+
+# sealed: a key x-ssh seals under a passphrase is one OpenSSH's
+# ssh-keygen opens under it alone
+"$X" -l ssh -- ssh-keygen -q -t ed25519 -N 'sealed here' -C sealed-x -f "$fx/xsealed" > /dev/null 2> "$fx/client.err"
+status=$?
+theirpub=$(ssh-keygen -y -P 'sealed here' -f "$fx/xsealed" 2>> "$fx/client.err")
+wrong=$(ssh-keygen -y -P 'sealed hear' -f "$fx/xsealed" 2>&1)
+if [ "$status" = 0 ] && [ -n "$theirpub" ] && [ "$theirpub" = "$(cat "$fx/xsealed.pub")" ] \
+	&& [ "$wrong" = "$(printf 'Load key "%s": incorrect passphrase supplied to decrypt private key\r' "$fx/xsealed")" ]; then
+	echo "ok: sealed -- OpenSSH's ssh-keygen opens the key x-ssh sealed, under its passphrase alone"
+else
+	fail "sealed: status $status, ssh-keygen -y '$theirpub', a wrong passphrase '$wrong'"
+fi
+# x-ssh's -y, -l (no passphrase, with FILE.pub and without) and -p say
+# what OpenSSH's do of a key OpenSSH sealed
+ssh-keygen -q -t ed25519 -N 'theirs sealed' -C sealed-o -f "$fx/osealed"
+keygen_says() {
+	k=$1
+	shift
+	"$@" -y -P 'theirs sealed' -f "$fx/osealed" 2>&1; echo "status $?"
+	"$@" -y -P 'theirs seal' -f "$fx/osealed" 2>&1; echo "status $?"
+	"$@" -l -f "$fx/osealed" 2>&1; echo "status $?"
+	mv "$fx/osealed.pub" "$fx/osealed.pubx"
+	"$@" -l -f "$fx/osealed" 2>&1; echo "status $?"
+	mv "$fx/osealed.pubx" "$fx/osealed.pub"
+	cp "$fx/osealed" "$fx/changed.$k"
+	o=$("$@" -p -P 'theirs seal' -N 'changed' -f "$fx/changed.$k" 2>&1); s=$?
+	echo "$o" | sed "s|$fx/changed.$k|K|"; echo "status $s"
+	"$@" -p -P 'theirs sealed' -N 'changed' -f "$fx/changed.$k" 2>&1; echo "status $?"
+	ssh-keygen -y -P changed -f "$fx/changed.$k" 2>&1; echo "status $?"
+	"$@" -p -P 'changed' -N '' -f "$fx/changed.$k" 2>&1; echo "status $?"
+	ssh-keygen -y -P '' -f "$fx/changed.$k" 2>&1; echo "status $?"
+}
+ours=$(keygen_says ours "$X" -l ssh -- ssh-keygen < /dev/null)
+theirs=$(keygen_says theirs ssh-keygen < /dev/null)
+if [ -n "$ours" ] && [ "$ours" = "$theirs" ]; then
+	echo "ok: sealed -- x-ssh's -y, -l and -p say what OpenSSH's do of a key OpenSSH sealed"
+else
+	fail "sealed: x-ssh said
+$ours
+OpenSSH said
+$theirs"
+fi
+# a sealed key authenticates the client, its passphrase asked of
+# SSH_ASKPASS only once the server would take it: the sealed key not in
+# authorized_keys is offered first and asks nothing; in batch mode
+# nothing is asked and the key is passed over
+cat "$fx/xsealed.pub" >> "$fx/authorized_keys"
+printf '#!/bin/sh\necho "$1" >> "%s/asked"\necho "sealed here"\n' "$fx" > "$fx/askpass"
+chmod +x "$fx/askpass"
+out=$(SSH_ASKPASS="$fx/askpass" SSH_ASKPASS_REQUIRE=force HOME="$home" "$X" -l ssh -- ssh -F none -p "$port" \
+	-i "$fx/osealed" -i "$fx/xsealed" -l "$user" 127.0.0.1 'echo sealed key' < /dev/null 2> "$fx/client.err")
+asked=$(cat "$fx/asked" 2>/dev/null)
+rm -f "$fx/asked"
+SSH_ASKPASS="$fx/askpass" SSH_ASKPASS_REQUIRE=force HOME="$home" "$X" -l ssh -- ssh -F none -o BatchMode=yes -p "$port" \
+	-i "$fx/xsealed" -l "$user" 127.0.0.1 true < /dev/null 2>> "$fx/client.err"
+bstatus=$?
+if [ "$out" = "sealed key" ] && [ "$asked" = "Enter passphrase for key '$fx/xsealed': " ] && [ "$bstatus" = 255 ] \
+	&& [ ! -f "$fx/asked" ]; then
+	echo "ok: sealed -- a sealed key authenticates the client, asked for once the server would take it, never in batch mode"
+else
+	fail "sealed: the client said '$out', asked '$asked', batch status $bstatus"
 fi
 
 # rewrite: -p turns Dropbear's key file into OpenSSH's

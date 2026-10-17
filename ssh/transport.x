@@ -60,7 +60,7 @@
 (def ssh-msg-kexinit 20) (def ssh-msg-newkeys 21)
 (def ssh-msg-kex-ecdh-init 30) (def ssh-msg-kex-ecdh-reply 31)
 (def ssh-msg-userauth-request 50) (def ssh-msg-userauth-failure 51)
-(def ssh-msg-userauth-success 52) (def ssh-msg-userauth-banner 53)
+(def ssh-msg-userauth-success 52) (def ssh-msg-userauth-banner 53) (def ssh-msg-userauth-pk-ok 60)
 (def ssh-msg-global-request 80) (def ssh-msg-request-success 81) (def ssh-msg-request-failure 82)
 
 ; --- the connection record ------------------------------------------------
@@ -525,14 +525,16 @@
     (ssh-expect! c ssh-msg-service-accept "SERVICE_ACCEPT")
     #t))
 
-; The answer to an authentication request: #t on success, the server's
-; remaining methods otherwise; a banner traced on the way.
+; The answer to an authentication request: #t on success, pk-ok when a
+; key asked about would do, the server's remaining methods otherwise; a
+; banner traced on the way.
 (def %auth-answer
   (fn (self c)
     (def p (ssh-next-packet! c))
     (def t (%byte (first p) 0))
     (match
       ((= t ssh-msg-userauth-success) #t)
+      ((= t ssh-msg-userauth-pk-ok) (lit pk-ok))
       ((= t ssh-msg-userauth-banner)
         (do (def in (ssh-in (first p) 1 (- (rest p) 1)))
             (ssh-trace c (Str8 append "banner: " (ssh-get-text in)))
@@ -552,6 +554,25 @@
     (ssh-put-text req "password")
     (ssh-put-bool req #f)
     (ssh-put-text req password)
+    (def rr (ssh-out-run req))
+    (ssh-send-packet! c (first rr) (rest rr))
+    (%auth-answer c)))
+
+; Whether the server would take a key, asked before it is signed with:
+; the request without its signature, answered as %auth-answer has it.
+; What a key sealed under a passphrase is offered with, so the
+; passphrase is asked for only when the server takes the key.
+(def ssh-auth-publickey-query!
+  (fn (_ c user pub)
+    (def blob (%pk-blob pub))
+    (def req (ssh-out))
+    (ssh-put-byte req ssh-msg-userauth-request)
+    (ssh-put-text req user)
+    (ssh-put-text req "ssh-connection")
+    (ssh-put-text req "publickey")
+    (ssh-put-bool req #f)
+    (ssh-put-text req "ssh-ed25519")
+    (ssh-put-string req (first blob) 0 (rest blob))
     (def rr (ssh-out-run req))
     (ssh-send-packet! c (first rr) (rest rr))
     (%auth-answer c)))
@@ -589,6 +610,6 @@
     (%auth-answer c)))
 
 (provide ssh/transport ssh-version-string ssh-open ssh-fd ssh-session-id ssh-host-key ssh-pending? ssh-random ssh-engines!
-  ssh-exchange-versions! ssh-send-packet! ssh-recv-packet! ssh-next-packet! ssh-expect! ssh-kex! ssh-kex-server! ssh-auth-service! ssh-auth-publickey! ssh-auth-password!
+  ssh-exchange-versions! ssh-send-packet! ssh-recv-packet! ssh-next-packet! ssh-expect! ssh-kex! ssh-kex-server! ssh-auth-service! ssh-auth-publickey-query! ssh-auth-publickey! ssh-auth-password!
   ssh-msg-disconnect ssh-msg-global-request ssh-msg-request-success ssh-msg-request-failure ssh-msg-service-request ssh-msg-service-accept
   ssh-msg-userauth-request ssh-msg-userauth-failure ssh-msg-userauth-success ssh-trace)

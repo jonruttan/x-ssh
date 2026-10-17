@@ -20,12 +20,12 @@
 (import x/sys/socket)
 (import x/sys/file)
 (import x/sys/posix)
-(import x/repl/term)
+(import ssh/ask ssh-ask-tty ssh-ask-secret)
 (import ssh/bytes ssh-copy)
 (import ssh/transport ssh-open ssh-host-key ssh-engines! ssh-exchange-versions! ssh-kex!
-  ssh-auth-service! ssh-auth-publickey! ssh-auth-password!)
+  ssh-auth-service! ssh-auth-publickey-query! ssh-auth-publickey! ssh-auth-password!)
 (import ssh/session ssh-session-run! ssh-disconnect!)
-(import ssh/keys ssh-seed-of-key-file)
+(import ssh/keys ssh-key-of-file ssh-seed-of-key-file ssh-key-file-sealed? ssh-public-of-key-file ssh-key-wrong-passphrase)
 (import ssh/known ssh-known-name ssh-known-check ssh-known-add!)
 (import ssh/keygen ssh-key-fingerprint)
 (import ssh/config ssh-config-read ssh-config-options ssh-config-first ssh-config-all ssh-config-faults
@@ -246,79 +246,11 @@
 
 ; --- the terminal ----------------------------------------------------------
 
-; A line typed at the terminal, or () when there is no terminal or at end
-; of input.  A secret is read as getpass reads it: the terminal made raw
-; with its signal keys still signalling, then the prompt written -- in
-; that order, or a password typed at once is echoed -- bytes read to a
-; carriage return or newline, a backspace or delete taking back a byte,
-; and the terminal put back as it was.
-(def %prompt
-  (fn (_ text secret)
-    (def fd (guard (e -1) (File open "/dev/tty" (lit rdwr))))
-    (if (< fd 0) ()
-      (do (def saved (if secret (Term raw-with-signals! fd) ()))
-          (File write fd text (%byte-len text))
-          (def one (%make-str 1))
-          (def line
-            (guard (e ())
-              ((fn (self acc)
-                 (if (< (File read fd one 1) 1) ()
-                   (do (def b (%char->int (%byte-ref one 0)))
-                       (match
-                         ((if (= b 13) #t (= b 10)) (Str8 join "" (List reverse acc)))
-                         ((if (= b 127) #t (= b 8)) (self (if (null? acc) () (rest acc))))
-                         (#t (self (pair (Str8 sub 0 1 one) acc)))))))
-               ())))
-          (when secret
-            (do (Term restore! fd saved)
-                (File write fd "\r\n" 2)))
-          (File close fd)
-          line))))
+; A secret asked for as OpenSSH's client asks, by ssh/ask's
+; read_passphrase with the terminal required: () for none, and always
+; in batch mode.
+(def %ask-secret (fn (_ s text) (if (%get s (lit batch)) () (ssh-ask-secret text #f))))
 
-(def %tty? (fn (_) (def fd (guard (e -1) (File open "/dev/tty" (lit rdwr)))) (if (< fd 0) #f (do (File close fd) #t))))
-
-(def %set? (fn (_ name) ((fn (_ v) (if (null? v) #f (> (Str8 length v) 0))) (Sys getenv name))))
-
-; A secret asked of SSH_ASKPASS: the program run with the prompt, its
-; output's first line the answer; () when it fails.
-(def %askpass
-  (fn (_ text)
-    (def program (if (%set? "SSH_ASKPASS") (Sys getenv "SSH_ASKPASS") "/usr/X11R6/bin/ssh-askpass"))
-    (def p (Sys pipe))
-    (def pid (Sys fork))
-    (when (= pid 0)
-      (Sys dup2 (rest p) 1)
-      (Sys close (first p)) (Sys close (rest p))
-      (Sys exec program (list text))
-      (Sys exit 127))
-    (Sys close (rest p))
-    (def buf (%make-str 1024))
-    (def out
-      ((fn (self acc)
-         (def n (File read (first p) buf 1024))
-         (if (< n 1) (Str8 join "" (List reverse acc)) (self (pair (Str8 sub 0 n buf) acc))))
-       ()))
-    (Sys close (first p))
-    (if (= (Sys wait pid) 0) (first (Str8 split "\n" (first (Str8 split "\r" out)))) ())))
-
-; A password asked for as OpenSSH asks: SSH_ASKPASS_REQUIRE force uses
-; the askpass program, never the terminal alone, prefer the program when
-; there is one; otherwise the terminal, or the program when there is no
-; terminal and a display.  () for none, and always in batch mode.
-(def %ask-password
-  (fn (_ s text)
-    (def req (Sys getenv "SSH_ASKPASS_REQUIRE"))
-    (def is (fn (_ v) (if (null? req) #f (str=? req v))))
-    (match
-      ((%get s (lit batch)) ())
-      ((is "force") (%askpass text))
-      ((is "never") (%prompt text #t))
-      ((if (is "prefer") (%set? "SSH_ASKPASS") #f) (%askpass text))
-      ((%tty?) (%prompt text #t))
-      ((if (%set? "DISPLAY") (%set? "SSH_ASKPASS") #f) (%askpass text))
-      (#t ()))))
-
-; --- the host key ----------------------------------------------------------
 
 (def %verification-failed (fn (_) (%say 2 "Host key verification failed.\n") #f))
 
@@ -368,7 +300,7 @@
       ((%get s (lit batch)) (%verification-failed))
       (#t
         ((fn (self text)
-           (def a (%prompt text #f))
+           (def a (ssh-ask-tty text #f))
            (match
              ((null? a) (%verification-failed))
              ((if (str=? a "yes") #t (str=? a fp)) (record!))
@@ -383,9 +315,11 @@
 
 (def %offers? (fn (_ methods m) (if (eq? methods #t) #f (List any? (fn (_ x) (str=? x m)) methods))))
 
-; The identity files' seeds, those that read: a file named but missing
-; is warned of, the default one passed over quietly.
-(def %seeds
+; The identity files that read, as (PATH PUB SEED): a file named but
+; missing is warned of, the default one passed over quietly.  A key
+; sealed under a passphrase is read for its public half alone, its SEED
+; (), and opened only when the server would take it.
+(def %identities
   (fn (_ s quiet tr)
     (if (not (%get s (lit pubkey))) ()
       (List flat-map
@@ -396,30 +330,63 @@
                     (%say 2 (Str8 append "Warning: Identity file " (first i) " not accessible: No such file or directory.\n")))
                   ()))
             (#t (guard (e (do (%say 2 (Str8 append "Load key \"" (first i) "\": " (%message e) "\n")) ()))
-                  (def seed (ssh-seed-of-key-file (first i)))
-                  (unless (null? tr) (tr (Str8 append "Will attempt key: " (first i) " ED25519")))
-                  (list seed)))))
+                  (def id (if (ssh-key-file-sealed? (first i))
+                            (list (first i) (ssh-public-of-key-file (first i)) ())
+                            ((fn (_ k) (list (first i) (rest k) (first k))) (ssh-key-of-file (first i)))))
+                  (unless (null? tr) (tr (Str8 append "Will attempt key: " (first i) " ED25519 " (ssh-key-fingerprint (List ref 1 id)))))
+                  (list id)))))
         (%get s (lit identities))))))
+
+; A sealed key's seed, its passphrase asked for up to
+; NumberOfPasswordPrompts times as OpenSSH's load_identity_file asks; ()
+; when an answer is empty, there is none, or none opens it.  Batch mode
+; asks nothing.
+(def %open-identity
+  (fn (_ s path tr)
+    (def prompt (Str8 append "Enter passphrase for key '" path "': "))
+    ((fn (self left)
+       (if (if (= left 0) #t (%get s (lit batch))) ()
+         (do (def typed (ssh-ask-secret prompt #f))
+             (if (if (null? typed) #t (= (Str8 length typed) 0))
+               (do (unless (null? tr) (tr "no passphrase given, try next key")) ())
+               (guard (e (if (str=? (%message e) ssh-key-wrong-passphrase)
+                           (do (unless (null? tr) (tr "bad passphrase given, try again...")) (self (- left 1)))
+                           (do (%say 2 (Str8 append "Load key \"" path "\": " (%message e) "\n")) ())))
+                 (ssh-seed-of-key-file path typed))))))
+     (%get s (lit prompts)))))
+
+; One identity offered: an open key signed with; a sealed one asked
+; about first, then opened and signed with when the server would take
+; it.  The answer as ssh-auth-publickey! has it, or the one before when
+; the key is passed over.
+(def %offer-identity
+  (fn (_ c s user id answer tr)
+    (if (not (null? (List ref 2 id))) (ssh-auth-publickey! c user (List ref 2 id))
+      (do (def q (ssh-auth-publickey-query! c user (List ref 1 id)))
+          (if (not (eq? q (lit pk-ok))) q
+            (do (unless (null? tr) (tr (Str8 append "Server accepts key: " (first id) " ED25519 " (ssh-key-fingerprint (List ref 1 id)))))
+                (def seed (%open-identity s (first id) tr))
+                (if (null? seed) answer (ssh-auth-publickey! c user seed))))))))
 
 ; Authentication as OpenSSH's client tries it: each key while the server
 ; offers publickey, then, while it offers password, a password asked for
 ; up to NumberOfPasswordPrompts times.  #t, or the server's remaining
 ; methods.
 (def %authenticate
-  (fn (_ c s seeds tr)
+  (fn (_ c s ids tr)
     (def user (%get s (lit user)))
     (ssh-auth-service! c)
     (def by-key
       ((fn (self ks answer)
          (if (if (null? ks) #t (not (%offers? answer "publickey"))) answer
-           (self (rest ks) (ssh-auth-publickey! c user (first ks)))))
-       seeds (list "publickey" "password")))
+           (self (rest ks) (%offer-identity c s user (first ks) answer tr))))
+       ids (list "publickey" "password")))
     (def prompt (Str8 append user "@" (%get s (lit hostname)) "'s password: "))
     (if (not (%get s (lit password))) by-key
       ((fn (self left answer first-try)
          (if (if (= left 0) #t (not (%offers? answer "password"))) answer
            (do (unless first-try (%say 2 "Permission denied, please try again.\n"))
-               (def typed (%ask-password s prompt))
+               (def typed (%ask-secret s prompt))
                (if (null? typed) answer
                  (do (unless (null? tr) (tr "Next authentication method: password"))
                      (self (- left 1) (ssh-auth-password! c user typed) #f))))))
@@ -464,8 +431,8 @@
         (ssh-kex! c)
         (if (not (%host-key-ok c s addr quiet tr))
           (do (Socket close fd) 255)
-          (do (def seeds (%seeds s quiet tr))
-              (def ok (%authenticate c s seeds tr))
+          (do (def ids (%identities s quiet tr))
+              (def ok (%authenticate c s ids tr))
               (if (not (eq? ok #t))
                 (do (%say 2 (Str8 append (%get s (lit user)) "@" host ": Permission denied (" (Str8 join "," ok) ").\n"))
                     (Socket close fd)

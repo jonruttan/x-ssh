@@ -5,7 +5,7 @@
 #
 # Alpine, so the engine links against musl, as x-os's does.
 FROM alpine:3.20
-RUN apk add --no-cache build-base git curl dropbear-dbclient openssh-client expect
+RUN apk add --no-cache build-base git curl dropbear-dbclient openssh-client openssh-keygen expect
 # The platform's tools call `shasum`; Alpine has the digests under their own
 # names.
 COPY shasum /usr/local/bin/shasum

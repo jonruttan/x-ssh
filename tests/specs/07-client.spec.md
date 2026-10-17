@@ -68,3 +68,33 @@ tests/oracle/client.sh and tests/oracle/server.sh.
 ```
 ---
     ((("/k/git@h" . #t)) #f)
+
+## terminals
+
+### -t stands for RequestTTY yes, -T for no; auto is the default
+
+```ssh
+(import ssh/client ssh-client-settings)
+(import ssh/config ssh-config-options)
+(def %ct (fn (_ opts) (rest (List find (fn (_ p) (eq? (first p) (lit tty))) (ssh-client-settings (ssh-config-options opts) "h" "u")))))
+(write (list (List ref 3 (first (rest (ssh-plan (list "ssh" "-t" "h"))))) (%ct ()) (%ct (list "RequestTTY force"))))
+```
+---
+    (("RequestTTY yes") "auto" "force")
+
+### typed bytes through the escapes: ~~ is a tilde, a tilde mid-line is itself, ~. ends it
+
+```ssh
+(import x/type/vector)
+(def %ce-escape (eval (lit %escape) (module ssh/session)))
+(def %ce-run (Vector make 11 ()))
+(def %ce-pass
+  (fn (_ text)
+    ((prim-ref (lit obj) (lit set!)) %ce-run 11 1)
+    (def r (%ce-escape %ce-run text (Str8 length text)))
+    (Str8 sub 0 (rest r) (first r))))
+(write (list (%ce-pass "~~x") (%ce-pass "a~b") (%ce-pass "~x") (%ce-pass "ab\n~~")
+             (guard (e (e msg)) (%ce-pass "ls\n~."))))
+```
+---
+    ("~x" "a~b" "~x" "ab\n~" "escape")

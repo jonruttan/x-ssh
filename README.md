@@ -48,8 +48,9 @@ and one command a connection.
   `/etc/shadow` with crypt(3)'s DES, `$1$`, `$5$` or `$6$`, unless `-s`
   refuses passwords.  Without `-F` it forks into the background
   as daemon(3) has it, writing `-P`'s pidfile (default
-  `/var/run/dropbear.pid`); it logs to standard error, so in the
-  background its log goes nowhere.  Each connection is served by a forked
+  `/var/run/dropbear.pid`).  It logs to syslog, as `dropbear` in the
+  authpriv facility, or to standard error under `-E` or where no log
+  daemon listens.  Each connection is served by a forked
   child; the command runs under the user's shell, with its standard
   input, output and error on the channel; a client's `-L` forwards are
   served as `direct-tcpip` channels unless `-j` refuses them, and its
@@ -70,7 +71,7 @@ and one command a connection.
 - `-V` on each, and `--help` from its option declaration.
 
 Not served yet: other ciphers and key types, encrypted key files,
-agents, syslog.
+agents.
 
 The oracles in `tests/oracle/` are the live tests: `dropbear.sh` drives
 the client against a built Dropbear, `server.sh` drives the server with

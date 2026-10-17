@@ -33,6 +33,7 @@
 (import ssh/keys ssh-key-of-file)
 (import x/codec/ed25519)
 (import x/codec/crypt)
+(import x/sys/syslog)
 (import ssh/keygen ssh-keygen-make ssh-key-fingerprint)
 
 (def %oref (prim-ref (lit obj) (lit ref)))
@@ -46,10 +47,20 @@
 (def %byte (fn (_ s i) (%char->int (%byte-ref s i))))
 (def %num (fn (_ n) (%cvt n (Type named STRING) 10)))
 
-(def %log
-  (fn (_ text)
-    (def line (Str8 append "[" (%num (Sys getpid)) "] " text "\n"))
-    (File write 2 line (%byte-len line))))
+; Where the log goes: syslog, as Dropbear logs without -E, or standard
+; error; set once by ssh-serve, inherited by each connection's process.
+(def %log-syslog (list #f))
+
+; A line logged at a severity, as Dropbear logs it: to syslog under the
+; ident dropbear in the authpriv facility, or, under -E or where no
+; daemon listens, to standard error with the process id before it.
+(def %log-at
+  (fn (_ severity text)
+    (unless (if (first %log-syslog) (Syslog send "dropbear" (lit authpriv) severity text) #f)
+      (do (def line (Str8 append "[" (%num (Sys getpid)) "] " text "\n"))
+          (File write 2 line (%byte-len line))))))
+
+(def %log (fn (_ text) (%log-at (lit info) text)))
 
 (def %msg-userauth-pk-ok 60)
 (def %msg-channel-open 90) (def %msg-channel-open-confirmation 91)
@@ -162,10 +173,10 @@
     (def test (if (null? stored) () (%crypt password stored)))
     (match
       ((null? stored) #f)
-      ((null? test) (do (%log (Str8 append "User account '" user "' is locked")) #f))
-      ((= (Str8 length stored) 0) (do (%log (Str8 append "User '" user "' has blank password, rejected")) #f))
-      ((str=? test stored) (do (%log (Str8 append "Password auth succeeded for '" user "' from " peer)) #t))
-      (#t (do (%log (Str8 append "Bad password attempt for '" user "' from " peer)) #f)))))
+      ((null? test) (do (%log-at (lit warning) (Str8 append "User account '" user "' is locked")) #f))
+      ((= (Str8 length stored) 0) (do (%log-at (lit warning) (Str8 append "User '" user "' has blank password, rejected")) #f))
+      ((str=? test stored) (do (%log-at (lit notice) (Str8 append "Password auth succeeded for '" user "' from " peer)) #t))
+      (#t (do (%log-at (lit warning) (Str8 append "Bad password attempt for '" user "' from " peer)) #f)))))
 
 ; Requests answered until one succeeds, for the user this server runs as:
 ; a key in authorized_keys whose signature over the session id and the
@@ -225,7 +236,7 @@
                        (def msg (ssh-out-run data))
                        (if (Ed25519 verify pub sig64 (first msg) 0 (rest msg))
                          (do (%send c (%packet-of ssh-msg-userauth-success))
-                             (%log (Str8 append "Pubkey auth succeeded for '" user "' with ssh-ed25519 key "
+                             (%log-at (lit notice) (Str8 append "Pubkey auth succeeded for '" user "' with ssh-ed25519 key "
                                                 (ssh-key-fingerprint pub) " from " peer))
                              user)
                          (do (%failure c passwords) (self))))))))
@@ -717,10 +728,11 @@
 ; process of its own while this one goes back to listening.  The host key
 ; is read once; a dead connection's process is reaped by the kernel.
 (def ssh-serve
-  (fn (_ keyfile addr port dir make background pidfile local remote any-host limits passwords)
+  (fn (_ keyfile addr port dir make background pidfile local remote any-host limits passwords syslog)
+    (%set-first! %log-syslog syslog)
     (def key (%host-key keyfile make))
     (def lfd
-      (guard (e (do (%log (Str8 append "Failed listening on '" (if (null? addr) "" addr) ":" (%num port)
+      (guard (e (do (%log-at (lit warning) (Str8 append "Failed listening on '" (if (null? addr) "" addr) ":" (%num port)
                                        "': the address could not be bound"))
                     (Sys exit 1)))
         (if (null? addr) (Socket tcp-listen port) (Socket tcp-listen-on addr port))))

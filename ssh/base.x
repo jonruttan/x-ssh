@@ -1,4 +1,4 @@
-; # x-ssh -- SSH on x-lang, after Dropbear
+; # x-ssh -- SSH on x-lang
 ;
 ; ## ssh/base.x -- the parts, assembled
 ;

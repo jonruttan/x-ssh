@@ -1,20 +1,24 @@
-; # x-ssh -- SSH on x-lang, after Dropbear
+; # x-ssh -- SSH on x-lang
 ;
-; ## ssh/server.x -- the server: commands run for authenticated keys
+; ## ssh/server.x -- the server: commands run for authenticated users
 ;
 ; @author [Jon Ruttan](jonruttan@gmail.com)
 ; @copyright 2026 Jon Ruttan
 ; @license MIT No Attribution (MIT-0)
 ;
-; What dropbear does as a user's own server: listen, take each connection
-; in a process of its own, exchange keys under the host key, let in the
-; user it runs as by an ssh-ed25519 key in authorized_keys, and run the
+; What OpenSSH's sshd does, for the user it runs as: settle the
+; configuration -- the command line's options, then sshd_config, the
+; first value holding -- listen, take each connection in a process of its
+; own, exchange keys under the host key, let the user in by an
+; ssh-ed25519 key in an authorized_keys file or by the password in the
+; shadow file, as PermitRootLogin and the rest allow, and run the
 ; command an "exec" asks for in the user's shell, its standard input the
 ; channel's data and its output the channel's, its exit status sent back.
-; One suite, the client's: curve25519-sha256, ssh-ed25519,
-; chacha20-poly1305@openssh.com.  Not served yet: passwords, other users
-; (that is a root server's business), terminals and shells, forwarding.
-; Like Dropbear's, the log is on standard error, a line an event.
+; Forwarding is served both ways.  One suite: curve25519-sha256,
+; ssh-ed25519, chacha20-poly1305@openssh.com.  Not served yet: other
+; users than the one the server runs as (that is a root server's
+; business, dropping privileges), terminals and shells.  The log goes to
+; syslog in OpenSSH's words, or to standard error.
 
 (module ssh/server)
 
@@ -28,13 +32,15 @@
   ssh-in ssh-in-buf ssh-get-byte ssh-get-bool ssh-get-uint32 ssh-get-string ssh-get-bytes ssh-get-text ssh-copy)
 (import ssh/transport ssh-open ssh-fd ssh-session-id ssh-pending? ssh-engines! ssh-exchange-versions! ssh-kex-server!
   ssh-send-packet! ssh-next-packet! ssh-expect! ssh-msg-service-request ssh-msg-service-accept
-  ssh-msg-userauth-request ssh-msg-userauth-failure ssh-msg-userauth-success
+  ssh-msg-userauth-request ssh-msg-userauth-failure ssh-msg-userauth-success ssh-msg-disconnect
   ssh-msg-global-request ssh-msg-request-success ssh-msg-request-failure)
 (import ssh/keys ssh-key-of-file)
 (import x/codec/ed25519)
 (import x/codec/crypt)
 (import x/sys/syslog)
-(import ssh/keygen ssh-keygen-make ssh-key-fingerprint)
+(import ssh/keygen ssh-key-fingerprint)
+(import ssh/config ssh-config-read ssh-config-options ssh-config-first ssh-config-all ssh-config-faults
+  ssh-config-time ssh-config-patterns? ssh-config-sshd-keywords)
 
 (def %oref (prim-ref (lit obj) (lit ref)))
 (def %oset! (prim-ref (lit obj) (lit set!)))
@@ -46,21 +52,43 @@
 
 (def %byte (fn (_ s i) (%char->int (%byte-ref s i))))
 (def %num (fn (_ n) (%cvt n (Type named STRING) 10)))
+(def %get (fn (_ s k) (rest (List find (fn (_ p) (eq? (first p) k)) s))))
 
-; Where the log goes: syslog, as Dropbear logs without -E, or standard
-; error; set once by ssh-serve, inherited by each connection's process.
-(def %log-syslog (list #f))
+; An error's message: an Err's own, or a word for what the engine raised.
+(def %message (fn (_ e) (guard (e2 "an internal error") (e msg))))
 
-; A line logged at a severity, as Dropbear logs it: to syslog under the
-; ident dropbear in the authpriv facility, or, under -E or where no
-; daemon listens, to standard error with the process id before it.
+; --- the log ---------------------------------------------------------------
+
+; The levels, quietest first, and the syslog severity each is sent at.
+(def %levels
+  (list (list "quiet" () ) (list "fatal" (lit crit)) (list "error" (lit err)) (list "info" (lit info))
+        (list "verbose" (lit info)) (list "debug1" (lit debug)) (list "debug2" (lit debug)) (list "debug3" (lit debug))))
+
+(def %rank
+  (fn (_ level)
+    (def l (if (str=? level "debug") "debug1" level))
+    ((fn (self ls i) (if (null? ls) 3 (if (str=? (first (first ls)) l) i (self (rest ls) (+ i 1))))) %levels 0)))
+
+; Where the log goes, set once by the server, inherited by each
+; connection's process: 1 syslog, or #f for the descriptor in 2; 3 the
+; facility; 4 the rank of the most verbose level written.
+(def %log-to (Vector make 4 ()))
+(%oset! %log-to 1 #f) (%oset! %log-to 2 2) (%oset! %log-to 3 (lit auth)) (%oset! %log-to 4 3)
+
+; A line logged at a level, when the log level takes it: to syslog under
+; the ident sshd in the facility, or, under -e, -E or where no daemon
+; listens, to the descriptor, a debug line led by its level.
 (def %log-at
-  (fn (_ severity text)
-    (unless (if (first %log-syslog) (Syslog send "dropbear" (lit authpriv) severity text) #f)
-      (do (def line (Str8 append "[" (%num (Sys getpid)) "] " text "\n"))
-          (File write 2 line (%byte-len line))))))
+  (fn (_ level text)
+    (def rank (%rank level))
+    (when (<= rank (%oref %log-to 4))
+      (do (def severity (first (rest (List ref rank %levels))))
+          (unless (if (%oref %log-to 1) (Syslog send "sshd" (%oref %log-to 3) severity text) #f)
+            (do (def line (Str8 append (if (>= rank 5) (Str8 append level ": ") "") text "\n"))
+                (File write (%oref %log-to 2) line (%byte-len line))))))))
 
-(def %log (fn (_ text) (%log-at (lit info) text)))
+(def %log (fn (_ text) (%log-at "info" text)))
+(def %debug (fn (_ text) (%log-at "debug1" text)))
 
 (def %msg-userauth-pk-ok 60)
 (def %msg-channel-open 90) (def %msg-channel-open-confirmation 91)
@@ -90,30 +118,208 @@
     ((fn (self i acc) (if (< i start) acc (self (- i 1) (pair (%byte s i) acc))))
      (- (+ start n) 1) ())))
 
+; --- the settings ----------------------------------------------------------
+
+; What sshd_config may say that this server does not do: refused unless
+; given the value that leaves it off, since each would let in someone the
+; configuration means to keep out.
+(def %refused
+  (list (pair "allowusers" "") (pair "denyusers" "") (pair "allowgroups" "") (pair "denygroups" "")
+        (pair "match" "") (pair "forcecommand" "none") (pair "chrootdirectory" "none")
+        (pair "authenticationmethods" "any") (pair "permitopen" "any") (pair "permitlisten" "any")
+        (pair "authorizedkeyscommand" "none") (pair "authorizedprincipalsfile" "none")
+        (pair "authorizedprincipalscommand" "none") (pair "trustedusercakeys" "none") (pair "revokedkeys" "none")
+        (pair "refuseconnection" "no") (pair "setenv" "none")))
+
+(def %line (fn (_ lines kw) (List find (fn (_ l) (str=? (first l) kw)) lines)))
+(def %bad (fn (_ l what) (Err raise 'value (Str8 append (List ref 2 l) ": " what) ())))
+(def %arg (fn (_ l) (if (null? (first (rest l))) "" (first (first (rest l))))))
+(def %one (fn (_ lines kw default) (def l (%line lines kw)) (if (null? l) default (%arg l))))
+
+(def %choice
+  (fn (_ lines kw choices default)
+    (def l (%line lines kw))
+    (if (null? l) default
+      (do (def v (Str8 downcase (%arg l)))
+          (if (List any? (fn (_ c) (str=? c v)) choices) v
+            (%bad l (Str8 append "unsupported option \"" v "\".")))))))
+
+(def %yes? (fn (_ lines kw default) (str=? (%choice lines kw (list "yes" "no") (if default "yes" "no")) "yes")))
+
+; A decimal's value, or () when the text is not all digits.
+(def %int-or-nil
+  (fn (_ t)
+    (def n (Str8 length t))
+    (if (if (> n 0) ((fn (self i) (if (= i n) #t (if (if (>= (%byte-ref t i) #\0) (<= (%byte-ref t i) #\9) #f) (self (+ i 1)) #f))) 0) #f)
+      (%cvt t (Type named INTEGER) 10)
+      ())))
+
+(def %port
+  (fn (_ l text)
+    ((fn (_ n) (if (if (null? n) #t (if (< n 1) #t (> n 65535))) (%bad l "Badly formatted port number.") n)) (%int-or-nil text))))
+
+(def %count
+  (fn (_ lines kw default)
+    (def l (%line lines kw))
+    (if (null? l) default ((fn (_ n) (if (null? n) (%bad l "invalid number.") n)) (%int-or-nil (%arg l))))))
+
+(def %seconds
+  (fn (_ lines kw default)
+    (def l (%line lines kw))
+    (if (null? l) default ((fn (_ n) (if (null? n) (%bad l "invalid time value.") n)) (ssh-config-time (%arg l))))))
+
+; ChannelTimeout's global time, in seconds, 0 for none.
+(def %channel-timeout
+  (fn (_ lines)
+    (def l (%line lines "channeltimeout"))
+    (if (if (null? l) #t (str=? (Str8 downcase (%arg l)) "none")) 0
+      (List fold
+        (fn (_ acc a)
+          (def eq (Str8 index-of "=" a))
+          (def t (if (null? eq) () (ssh-config-time (Str8 sub (+ eq 1) (- (Str8 length a) eq 1) a))))
+          (match
+            ((null? t) (%bad l (Str8 append "invalid channel timeout " a)))
+            ((str=? (Str8 sub 0 eq a) "global") t)
+            (#t (%bad l (Str8 append "the channel timeout " a " is not served; global= is")))))
+        0 (first (rest l))))))
+
+; An algorithm list that would leave out the one served is refused: a
+; plain list must name it, a `-` list must not; `+` and `^` lists only add.
+(def %algorithms
+  (fn (_ lines kw ours)
+    (def l (%line lines kw))
+    (unless (null? l)
+      (do (def v (%arg l))
+          (def c (if (> (Str8 length v) 0) (Str8 sub 0 1 v) ""))
+          (def names (Str8 split "," (if (List any? (fn (_ p) (str=? p c)) (list "+" "-" "^")) (Str8 sub 1 (- (Str8 length v) 1) v) v)))
+          (def named (List any? (fn (_ n) (ssh-config-patterns? (list n) ours)) names))
+          (when (if (str=? c "-") named (if (if (str=? c "+") #f (not (str=? c "^"))) (not named) #f))
+            (%bad l (Str8 append kw " leaves out " ours ", the one served")))))))
+
+; A ListenAddress as (ADDRESS . PORT), PORT () when it names none:
+; host, host:port, [host]:port; 0.0.0.0 or :: is every address, ().
+(def %listen
+  (fn (_ l)
+    (def a (%arg l))
+    (def n (Str8 length a))
+    (def close (Str8 index-of "]" a))
+    (def colons (List length (List filter (fn (_ i) (= (%byte-ref a i) #\:)) (List range 0 n))))
+    (def split
+      (match
+        ((if (> n 0) (= (%byte-ref a 0) #\[) #f)
+          (if (null? close) (%bad l "invalid ListenAddress")
+            (pair (Str8 sub 1 (- close 1) a)
+                  (if (< (+ close 1) n) (%port l (Str8 sub (+ close 2) (- n close 2) a)) ()))))
+        ((= colons 1) (do (def i (Str8 index-of ":" a)) (pair (Str8 sub 0 i a) (%port l (Str8 sub (+ i 1) (- n i 1) a)))))
+        (#t (pair a ()))))
+    (def addr (first split))
+    (pair (if (if (str=? addr "0.0.0.0") #t (if (str=? addr "::") #t (str=? addr "*"))) () addr) (rest split))))
+
+; The settings in force, from the lines in order: an alist.  Command-line
+; Port lines, from -p or -o, stand in place of the file's.  Raises a
+; label 'value Err whose message is OpenSSH's for a value it refuses.
+(def ssh-server-settings
+  (fn (_ lines)
+    (def port-lines (List filter (fn (_ l) (str=? (first l) "port")) lines))
+    (def from-command-line (List filter (fn (_ l) (%prefix? "command-line" (List ref 2 l))) port-lines))
+    (def ports (List map (fn (_ l) (%port l (%arg l))) (if (null? from-command-line) port-lines from-command-line)))
+    (def ports* (if (null? ports) (list 22) ports))
+    (def listens (List map %listen (List filter (fn (_ l) (str=? (first l) "listenaddress")) lines)))
+    (def keys (List flat-map (fn (_ a) a) (ssh-config-all lines "hostkey")))
+    (def akf (ssh-config-first lines "authorizedkeysfile"))
+    (%algorithms lines "ciphers" "chacha20-poly1305@openssh.com")
+    (%algorithms lines "kexalgorithms" "curve25519-sha256")
+    (%algorithms lines "hostkeyalgorithms" "ssh-ed25519")
+    (%algorithms lines "pubkeyacceptedalgorithms" "ssh-ed25519")
+    (list (pair (lit ports) ports*)
+          (pair (lit listen)
+            (if (null? listens) (List map (fn (_ p) (pair () p)) ports*)
+              (List flat-map (fn (_ a) (if (null? (rest a)) (List map (fn (_ p) (pair (first a) p)) ports*) (list a))) listens)))
+          (pair (lit hostkeys) (if (null? keys) (list "/etc/ssh/ssh_host_rsa_key" "/etc/ssh/ssh_host_ecdsa_key" "/etc/ssh/ssh_host_ed25519_key") keys))
+          (pair (lit hostkeys-given) (not (null? keys)))
+          (pair (lit pidfile) ((fn (_ p) (if (str=? (Str8 downcase p) "none") () p)) (%one lines "pidfile" "/var/run/sshd.pid")))
+          (pair (lit authorized) (if (null? akf) (list ".ssh/authorized_keys" ".ssh/authorized_keys2")
+                                   (if (if (= (List length akf) 1) (str=? (Str8 downcase (first akf)) "none") #f) () akf)))
+          (pair (lit password) (%yes? lines "passwordauthentication" #t))
+          (pair (lit pubkey) (%yes? lines "pubkeyauthentication" #t))
+          (pair (lit empty) (%yes? lines "permitemptypasswords" #f))
+          (pair (lit root) ((fn (_ v) (if (str=? v "without-password") "prohibit-password" v))
+                             (%choice lines "permitrootlogin" (list "yes" "no" "prohibit-password" "without-password" "forced-commands-only") "prohibit-password")))
+          (pair (lit tcp) ((fn (_ v) (if (%yes? lines "disableforwarding" #f) "no" (if (str=? v "yes") "all" v)))
+                            (%choice lines "allowtcpforwarding" (list "yes" "all" "no" "local" "remote") "yes")))
+          (pair (lit gateway) (%choice lines "gatewayports" (list "no" "yes" "clientspecified") "no"))
+          (pair (lit limits) (list (%seconds lines "clientaliveinterval" 0) (%count lines "clientalivecountmax" 3) (%channel-timeout lines)))
+          (pair (lit facility) (%choice lines "syslogfacility"
+                                 (list "daemon" "user" "auth" "authpriv" "local0" "local1" "local2" "local3" "local4" "local5" "local6" "local7") "auth"))
+          (pair (lit level) (%choice lines "loglevel" (list "quiet" "fatal" "error" "info" "verbose" "debug" "debug1" "debug2" "debug3") "info"))
+          (pair (lit tries) (%count lines "maxauthtries" 6))
+          (pair (lit accept) (List flat-map (fn (_ a) a) (ssh-config-all lines "acceptenv"))))))
+
+; The settings as -T prints them, a keyword and its value a line.
+(def %print
+  (fn (_ s)
+    (def yn (fn (_ b) (if b "yes" "no")))
+    (def limits (%get s (lit limits)))
+    (Str8 join ""
+      (List map (fn (_ l) (Str8 append l "\n"))
+        (List append
+          (List map (fn (_ p) (Str8 append "port " (%num p))) (%get s (lit ports)))
+          (List map (fn (_ a) (Str8 append "listenaddress " (if (null? (first a)) "0.0.0.0" (first a)) ":" (%num (rest a)))) (%get s (lit listen)))
+          (List map (fn (_ k) (Str8 append "hostkey " k)) (%get s (lit hostkeys)))
+          (list (Str8 append "pidfile " (if (null? (%get s (lit pidfile))) "none" (%get s (lit pidfile))))
+                (Str8 append "authorizedkeysfile " (if (null? (%get s (lit authorized))) "none" (Str8 join " " (%get s (lit authorized)))))
+                (Str8 append "passwordauthentication " (yn (%get s (lit password))))
+                (Str8 append "pubkeyauthentication " (yn (%get s (lit pubkey))))
+                (Str8 append "permitemptypasswords " (yn (%get s (lit empty))))
+                (Str8 append "permitrootlogin " (%get s (lit root)))
+                (Str8 append "allowtcpforwarding " (if (str=? (%get s (lit tcp)) "all") "yes" (%get s (lit tcp))))
+                (Str8 append "gatewayports " (%get s (lit gateway)))
+                (Str8 append "clientaliveinterval " (%num (first limits)))
+                (Str8 append "clientalivecountmax " (%num (List ref 1 limits)))
+                (Str8 append "channeltimeout " (if (= (List ref 2 limits) 0) "none" (Str8 append "global=" (%num (List ref 2 limits)))))
+                (Str8 append "syslogfacility " (Str8 upcase (%get s (lit facility))))
+                (Str8 append "loglevel " (Str8 upcase (%get s (lit level))))
+                (Str8 append "maxauthtries " (%num (%get s (lit tries)))))
+          (List map (fn (_ e) (Str8 append "acceptenv " e)) (%get s (lit accept))))))))
+
 ; --- authorized_keys --------------------------------------------------------
 
-; The base64 key of every ssh-ed25519 line in the file, options or not.
+; The files AuthorizedKeysFile names for a user: %h the home directory,
+; %u the user, %% a percent; a relative one under the home directory.
+(def %key-files
+  (fn (_ names user home)
+    (List map
+      (fn (_ n)
+        (def e (Str8 join "%" (List map (fn (_ part) (Str8 join user (Str8 split "%u" (Str8 join home (Str8 split "%h" part)))))
+                                (Str8 split "%%" n))))
+        (if (if (> (Str8 length e) 0) (= (%byte-ref e 0) #\/) #f) e (Str8 append home "/" e)))
+      names)))
+
+; The base64 key of every ssh-ed25519 line in the files, options or not.
 (def %authorized
-  (fn (_ dir)
-    (def path (Str8 append dir "/authorized_keys"))
-    (if (not (File exists? path)) ()
-      ((fn (self lines acc)
-         (if (null? lines) acc
-           (do (def ws (List filter (fn (_ w) (> (Str8 length w) 0))
-                         (Str8 split " " (Str8 join " " (Str8 split "\t" (first lines))))))
-               ; the key follows its type, wherever options put the type
-               (def at ((fn (self ws) (if (null? ws) () (if (str=? (first ws) "ssh-ed25519") ws (self (rest ws))))) ws))
-               (self (rest lines)
-                 (if (if (null? at) #t (null? (rest at))) acc (pair (first (rest at)) acc))))))
-       (Str8 split "\n" (File read-all path)) ()))))
+  (fn (_ paths)
+    (List flat-map
+      (fn (_ path)
+        (def text (guard (e ()) (File read-all path)))
+        (if (null? text) ()
+          (List flat-map
+            (fn (_ line)
+              (def ws (List filter (fn (_ w) (> (Str8 length w) 0))
+                        (Str8 split " " (Str8 join " " (Str8 split "\t" line)))))
+              ; the key follows its type, wherever options put the type
+              (def at ((fn (self ws) (if (null? ws) () (if (str=? (first ws) "ssh-ed25519") ws (self (rest ws))))) ws))
+              (if (if (null? at) #t (null? (rest at))) () (list (first (rest at)))))
+            (Str8 split "\n" text))))
+      paths)))
 
 ; --- authentication (RFC 4252): publickey with ssh-ed25519, and password ----
 
-; The methods a failure offers: publickey, and password unless -s.
+; The methods a failure offers.
 (def %failure
-  (fn (_ c passwords)
+  (fn (_ c s)
     (def f (%packet-of ssh-msg-userauth-failure))
-    (ssh-put-names f (if passwords (list "publickey" "password") (list "publickey")))
+    (ssh-put-names f (List append (if (%get s (lit pubkey)) (list "publickey") ())
+                                  (if (%get s (lit password)) (list "password") ())))
     (ssh-put-bool f #f)
     (%send c f)))
 
@@ -135,8 +341,14 @@
           (List map (fn (_ l) (Str8 split ":" l))
             (Str8 split "\n" (guard (e "") (File read-all "/etc/passwd")))))))))
 
-; A user's password hash, as Dropbear finds it: the passwd entry's, or
-; the shadow entry's when that is "x"; () when there is none.
+; A user's home directory: the passwd entry's, or HOME.
+(def %home
+  (fn (_ user)
+    (def pw (%entry "/etc/passwd" user))
+    (if (> (List length pw) 5) (List ref 5 pw) (Sys getenv "HOME"))))
+
+; A user's password hash: the passwd entry's, or the shadow entry's when
+; that is "x"; () when there is none.
 (def %hash-of
   (fn (_ user)
     (def pw (%entry "/etc/passwd" user))
@@ -162,65 +374,86 @@
         (guard (e ()) (Crypt des password stored)))
       (#t ()))))
 
-; A password request checked as Dropbear checks it: no change, a hash
-; there, not locked, not blank, and the crypt equal; logged as Dropbear
-; logs each outcome.
+; A password request checked: no change asked, root let in only as
+; PermitRootLogin yes allows, a hash there, not locked, not blank unless
+; PermitEmptyPasswords, and the crypt equal.  Each refusal logged as
+; OpenSSH logs it.
 (def %password-ok
-  (fn (_ in user peer)
+  (fn (_ in user from s)
     (def change (ssh-get-bool in))
     (def password (ssh-get-text in))
     (def stored (if change () (%hash-of user)))
     (def test (if (null? stored) () (%crypt password stored)))
+    (def failed (fn (_) (%log (Str8 append "Failed password for " user " from " from " ssh2")) #f))
     (match
-      ((null? stored) #f)
-      ((null? test) (do (%log-at (lit warning) (Str8 append "User account '" user "' is locked")) #f))
-      ((= (Str8 length stored) 0) (do (%log-at (lit warning) (Str8 append "User '" user "' has blank password, rejected")) #f))
-      ((str=? test stored) (do (%log-at (lit notice) (Str8 append "Password auth succeeded for '" user "' from " peer)) #t))
-      (#t (do (%log-at (lit warning) (Str8 append "Bad password attempt for '" user "' from " peer)) #f)))))
+      ((if (str=? user "root") (not (str=? (%get s (lit root)) "yes")) #f)
+        (do (%log (Str8 append "ROOT LOGIN REFUSED FROM " from)) (failed)))
+      ((null? stored) (failed))
+      ((null? test) (do (%log (Str8 append "User " user " not allowed because account is locked")) (failed)))
+      ((if (= (Str8 length stored) 0) (not (%get s (lit empty))) #f) (failed))
+      ((str=? test stored) (do (%log (Str8 append "Accepted password for " user " from " from " ssh2")) #t))
+      (#t (failed)))))
 
 ; Requests answered until one succeeds, for the user this server runs as:
-; a key in authorized_keys whose signature over the session id and the
-; request checks, or, unless passwords are disabled, the user's password.
-; A key request with no signature asks whether the key would do, and is
-; answered PK_OK when it would.  Answers the user.
+; a key in an authorized_keys file whose signature over the session id
+; and the request checks, or the user's password.  A key request with no
+; signature asks whether the key would do, and is answered PK_OK when it
+; would.  MaxAuthTries failures disconnect.  Answers the user.
 (def %authenticate
-  (fn (_ c dir peer passwords)
+  (fn (_ c s from)
     (def sr (ssh-expect! c ssh-msg-service-request "SERVICE_REQUEST"))
     (def sin (ssh-in (first sr) 1 (- (rest sr) 1)))
     (unless (str=? (ssh-get-text sin) "ssh-userauth")
-      (Err raise 'value "ssh: a service other than ssh-userauth asked for" ()))
+      (Err raise 'value "a service other than ssh-userauth asked for" ()))
     (def sa (%packet-of ssh-msg-service-accept))
     (ssh-put-text sa "ssh-userauth")
     (%send c sa)
     (def me (%me))
-    (def keys (%authorized dir))
-    ((fn (self)
+    (def keys (%authorized (%key-files (%get s (lit authorized)) me (%home me))))
+    (def root-key? (if (str=? me "root") (List any? (fn (_ v) (str=? v (%get s (lit root)))) (list "yes" "prohibit-password")) #t))
+    ((fn (self failures)
+       (def fail
+         (fn (_ user counted)
+           (def n (if counted (+ failures 1) failures))
+           (if (>= n (%get s (lit tries)))
+             (do (%log-at "error" (Str8 append "maximum authentication attempts exceeded for " user " from " from " ssh2 [preauth]"))
+                 (def d (%packet-of ssh-msg-disconnect))
+                 (ssh-put-uint32 d 2)
+                 (ssh-put-text d "Too many authentication failures")
+                 (ssh-put-text d "")
+                 (%send c d)
+                 (Err raise 'io "too many authentication failures" ()))
+             (do (%failure c s) (self n)))))
        (def p (ssh-expect! c ssh-msg-userauth-request "USERAUTH_REQUEST"))
        (def in (ssh-in (first p) 1 (- (rest p) 1)))
        (def user (ssh-get-text in))
        (def service (ssh-get-text in))
        (def method (ssh-get-text in))
        (match
-         ((not (str=? user me)) (do (%failure c passwords) (self)))
-         ((if passwords (str=? method "password") #f)
-           (if (%password-ok in user peer)
+         ((str=? method "none") (do (%failure c s) (self failures)))
+         ((not (str=? user me))
+           (do (%log (if (null? (%entry "/etc/passwd" user)) (Str8 append "Invalid user " user " from " from)
+                       (Str8 append "User " user " from " from " not allowed because this server serves only " me)))
+               (fail user #t)))
+         ((if (%get s (lit password)) (str=? method "password") #f)
+           (if (%password-ok in user from s)
              (do (%send c (%packet-of ssh-msg-userauth-success)) user)
-             (do (%failure c passwords) (self))))
-         ((str=? method "publickey")
+             (fail user #t)))
+         ((if (%get s (lit pubkey)) (str=? method "publickey") #f)
            (do (def signed? (ssh-get-bool in))
                (def alg (ssh-get-text in))
                (def blob (ssh-get-string in))
                (def b64 (Base64 encode-bytes (%bytes (ssh-in-buf in) (first blob) (rest blob))))
                (def kin (ssh-in (ssh-in-buf in) (first blob) (rest blob)))
-               (def known (if (str=? alg "ssh-ed25519") (List any? (fn (_ k) (str=? k b64)) keys) #f))
+               (def known (if root-key? (if (str=? alg "ssh-ed25519") (List any? (fn (_ k) (str=? k b64)) keys) #f) #f))
                (match
-                 ((not known) (do (%failure c passwords) (self)))
+                 ((not known) (fail user #t))
                  ((not signed?)
                    (do (def ok (%packet-of %msg-userauth-pk-ok))
                        (ssh-put-text ok alg)
                        (ssh-put-string ok (ssh-in-buf in) (first blob) (rest blob))
                        (%send c ok)
-                       (self)))
+                       (self failures)))
                  (#t
                    (do (ssh-get-text kin)
                        (def pub (ssh-get-bytes kin))
@@ -234,13 +467,14 @@
                        (ssh-put-string data (ssh-session-id c) 0 32)
                        (ssh-put-bytes data (first p) 0 (- (first sig) 4))
                        (def msg (ssh-out-run data))
+                       (def line (Str8 append " for " user " from " from " ssh2: ED25519 " (ssh-key-fingerprint pub)))
                        (if (Ed25519 verify pub sig64 (first msg) 0 (rest msg))
                          (do (%send c (%packet-of ssh-msg-userauth-success))
-                             (%log-at (lit notice) (Str8 append "Pubkey auth succeeded for '" user "' with ssh-ed25519 key "
-                                                (ssh-key-fingerprint pub) " from " peer))
+                             (%log (Str8 append "Accepted publickey" line))
                              user)
-                         (do (%failure c passwords) (self))))))))
-         (#t (do (%failure c passwords) (self))))))))
+                         (do (%log (Str8 append "Failed publickey" line)) (fail user #t))))))))
+         (#t (fail user #t))))
+     0)))
 
 ; --- the command, on three pipes ------------------------------------------
 
@@ -248,34 +482,35 @@
 ; error each a pipe: (PID IN OUT ERR), IN the end we write, OUT and ERR
 ; the ends we read.
 (def %spawn
-  (fn (_ command sock)
+  (fn (_ command sock env)
     (def i (Sys pipe)) (def o (Sys pipe)) (def e (Sys pipe))
     (def pid (Sys fork))
     (when (= pid 0)
       (Sys dup2 (first i) 0) (Sys dup2 (rest o) 1) (Sys dup2 (rest e) 2)
       (List for-each (fn (_ fd) (Sys close fd))
         (list (first i) (rest i) (first o) (rest o) (first e) (rest e) sock))
+      (List for-each (fn (_ v) (Sys setenv (first v) (rest v))) env)
       (def shell (Sys getenv "SHELL"))
       (Sys exec (if (if (null? shell) #t (= (Str8 length shell) 0)) "/bin/sh" shell) (list "-c" command))
       (Sys exit 127))
     (Sys close (first i)) (Sys close (rest o)) (Sys close (rest e))
     (list pid (rest i) (first o) (first e))))
 
-; --- the clocks Dropbear's -K and -I read ------------------------------------
+; --- the clocks ------------------------------------------------------------
 ;
-; Seconds since the epoch: 1 the last packet sent, 2 the last received,
-; 3 the last carrying data either way, 4 the last keepalive asked.  A
-; keepalive is asked after -K seconds without sending or receiving; the
-; connection is given up after three times that without receiving
-; anything; -I seconds without data either way is the idle timeout.  One
-; connection a process.
+; The clocks ClientAliveInterval and ChannelTimeout read, seconds since
+; the epoch: 1 the last packet sent, 2 the last received, 3 the last
+; carrying data either way, 4 the last keepalive asked.  A keepalive is
+; asked after the interval without sending or receiving; the connection
+; is given up after ClientAliveCountMax intervals without receiving
+; anything; the global ChannelTimeout without data either way closes
+; it.  One connection a process.
 (def %SENT 1) (def %RECV 2) (def %DATA 3) (def %ASKED 4)
 (def %clock (Vector make 4 0))
-(def %KEEPALIVE-LIMIT 3)
 
 (def %clocks-start! (fn (_) (def now (Sys now)) (%oset! %clock %SENT now) (%oset! %clock %RECV now) (%oset! %clock %DATA now) (%oset! %clock %ASKED now)))
 
-; A keepalive asked: Dropbear's global request, wanting the answer that
+; A keepalive asked: OpenSSH's global request, wanting the answer that
 ; counts as the other end alive.
 (def %keepalive!
   (fn (_ c)
@@ -286,35 +521,35 @@
     (%oset! %clock %ASKED (Sys now))))
 
 ; How long a wait may last before a clock wants looking at, in
-; milliseconds, or -1 for no limit: limits is (KEEPALIVE . IDLE), 0 for
-; never.
+; milliseconds, or -1 for no limit: limits is (INTERVAL COUNT IDLE), an
+; interval or idle time of 0 for never.
 (def %wait-ms
   (fn (_ limits)
     (def now (Sys now))
-    (def k (first limits)) (def i (rest limits))
+    (def k (first limits)) (def n (List ref 1 limits)) (def i (List ref 2 limits))
     (def dues
       (List append
         (if (> k 0) (list (- (+ (%oref %clock %SENT) k) now) (- (+ (%oref %clock %RECV) k) now)
-                          (- (+ (%oref %clock %RECV) (* k %KEEPALIVE-LIMIT)) now)) ())
+                          (- (+ (%oref %clock %RECV) (* k n)) now)) ())
         (if (> i 0) (list (- (+ (%oref %clock %DATA) i) now)) ())))
     (if (null? dues) -1
       (do (def least (List fold (fn (_ a b) (if (< a b) a b)) (first dues) (rest dues)))
           (if (< least 0) 0 (* 1000 least))))))
 
 ; The clocks read: a keepalive asked when due, the connection given up
-; or closed when a limit has passed, as Dropbear says it.
+; or closed when a limit has passed; the error's message names which.
 (def %clocks!
   (fn (_ c limits)
     (def now (Sys now))
-    (def k (first limits)) (def i (rest limits))
+    (def k (first limits)) (def n (List ref 1 limits)) (def i (List ref 2 limits))
     (when (> k 0)
-      (do (when (>= (- now (%oref %clock %RECV)) (* k %KEEPALIVE-LIMIT))
-            (do (%log "Keepalive timeout") (Err raise 'io "Keepalive timeout" ())))
+      (do (when (>= (- now (%oref %clock %RECV)) (* k n))
+            (Err raise 'io "keepalive" ()))
           (when (if (>= (- now (%oref %clock %SENT)) k) #t
                   (if (>= (- now (%oref %clock %RECV)) k) (>= (- now (%oref %clock %ASKED)) k) #f))
             (%keepalive! c))))
     (when (if (> i 0) (>= (- now (%oref %clock %DATA)) i) #f)
-      (do (%log "Idle timeout") (Err raise 'io "Idle timeout" ())))))
+      (Err raise 'io "idle" ()))))
 
 ; --- the channels (RFC 4254) ---------------------------------------------------
 ;
@@ -333,11 +568,12 @@
 ; The connection's state: 1 the channels, 2 the next channel number, 3
 ; the bytes moved since the last collect, 4 whether a client's forwards
 ; are served, 5 the session channel or (), 6 whether a client's remote
-; forwards are served, 7 whether their listeners may bind an address
-; other than localhost, 8 the listeners as (FD ADDRESS PORT), ADDRESS as
-; the client asked.
+; forwards are served, 7 GatewayPorts, as the settings spell it, 8 the
+; listeners as (FD ADDRESS PORT), ADDRESS as the client asked, 9
+; AcceptEnv's patterns, 10 the variables the client sent that they
+; accept, as (NAME . VALUE).
 (def %CHANNELS 1) (def %NEXT 2) (def %MOVED 3) (def %FORWARDING 4) (def %SESSION 5)
-(def %REMOTE 6) (def %ANY-HOST 7) (def %LISTENERS 8)
+(def %REMOTE 6) (def %GATEWAY 7) (def %LISTENERS 8) (def %ACCEPT 9) (def %ENV 10)
 (def %rn (fn (_ run i) (%oref run i)))
 (def %rn! (fn (_ run i v) (%oset! run i v)))
 (def %min (fn (_ a b) (if (< a b) a b)))
@@ -426,14 +662,15 @@
               ((null? fd) (%refuse! c sender 2 (Str8 append "connect to " host ":" (%num port) " failed")))
               (#t (do (def ch (%channel! run (lit forward) sender window max))
                       (%ch! ch %FD fd)
-                      (%log (Str8 append "forward to " host ":" (%num port)))
+                      (%debug (Str8 append "forward to " host ":" (%num port)))
                       (%confirm! c ch))))))
       (#t (%refuse! c sender 3 (Str8 append "channel type not served: " type))))))
 
 ; A global request from the client answered: tcpip-forward listens for
-; a remote forward, on localhost unless the server allows any host and
-; the client asked for another address, "" every one, as Dropbear has
-; it; cancel-tcpip-forward closes that listener; nothing else is served.
+; a remote forward where GatewayPorts says: localhost under no, every
+; interface under yes, under clientspecified the address the client asked,
+; "" or * every one; cancel-tcpip-forward closes that listener; nothing
+; else is served.
 (def %global!
   (fn (_ c run in)
     (def name (ssh-get-text in))
@@ -443,14 +680,17 @@
         ((str=? name "tcpip-forward")
           (do (def address (ssh-get-text in))
               (def port (ssh-get-uint32 in))
-              (def bind (if (if (%rn run %ANY-HOST) (not (str=? address "localhost")) #f)
-                          (if (str=? address "") () (%address address))
-                          "127.0.0.1"))
+              (def gateway (%rn run %GATEWAY))
+              (def bind (match ((str=? gateway "no") "127.0.0.1")
+                               ((str=? gateway "yes") ())
+                               ((if (str=? address "") #t (str=? address "*")) ())
+                               ((str=? address "localhost") "127.0.0.1")
+                               (#t (%address address))))
               (def fd (if (if (%rn run %REMOTE) (> port 0) #f)
                         (guard (e ()) (if (null? bind) (Socket tcp-listen port) (Socket tcp-listen-on bind port)))
                         ()))
               (unless (null? fd)
-                (do (%log (Str8 append "remote forward on " address ":" (%num port)))
+                (do (%debug (Str8 append "remote forward on " address ":" (%num port)))
                     (%rn! run %LISTENERS (List append (%rn run %LISTENERS) (list (list fd address port))))))
               (not (null? fd))))
         ((str=? name "cancel-tcpip-forward")
@@ -555,19 +795,29 @@
             (%ch! ch %MAX (ssh-get-uint32 in))))
       ((= t %msg-channel-open-failure)
         (do (ssh-get-uint32 in)
-            (%log (Str8 append "the client refused a forwarded connection: " (ssh-get-text in)))
+            (%debug (Str8 append "the client refused a forwarded connection: " (ssh-get-text in)))
             (guard (e ()) (Socket close (%ch ch %FD)))
             (%drop! run ch)))
       ((= t %msg-channel-request)
         (do (def name (ssh-get-text in))
             (def want-reply (ssh-get-bool in))
-            (if (if (str=? name "exec") (if (eq? (%ch ch %KIND) (lit session)) (null? (%ch ch %CHILD)) #f) #f)
-              (do (def command (ssh-get-text in))
-                  (%log (Str8 append "exec: " command))
-                  (%ch! ch %CHILD (%spawn command sock))
-                  (%ch! ch %OUT #t) (%ch! ch %ERR #t)
-                  (%reply c ch want-reply #t))
-              (%reply c ch want-reply #f))))
+            (def fresh (if (eq? (%ch ch %KIND) (lit session)) (null? (%ch ch %CHILD)) #f))
+            (match
+              ((if fresh (str=? name "exec") #f)
+                (do (def command (ssh-get-text in))
+                    (%debug (Str8 append "exec: " command))
+                    (%ch! ch %CHILD (%spawn command sock (%rn run %ENV)))
+                    (%ch! ch %OUT #t) (%ch! ch %ERR #t)
+                    (%reply c ch want-reply #t)))
+              ; a variable kept for the command when AcceptEnv's
+              ; patterns take its name
+              ((if fresh (str=? name "env") #f)
+                (do (def var (ssh-get-text in))
+                    (def value (ssh-get-text in))
+                    (def ok (ssh-config-patterns? (%rn run %ACCEPT) var))
+                    (when ok (%rn! run %ENV (List append (%rn run %ENV) (list (pair var value)))))
+                    (%reply c ch want-reply ok)))
+              (#t (%reply c ch want-reply #f)))))
       ((= t %msg-channel-window-adjust)
         (%ch! ch %WINDOW (+ (%ch ch %WINDOW) (ssh-get-uint32 in))))
       ((= t %msg-channel-data)
@@ -601,16 +851,18 @@
 
 ; The connection's channels served: until the session channel has
 ; closed both ways and no forward remains, or, with no session opened,
-; until the connection ends.  local, remote and any-host are what the
-; server allows: a client's forwards, its remote forwards, and those on
-; an address other than localhost.
+; until the connection ends, under the settings s: AllowTcpForwarding,
+; GatewayPorts, AcceptEnv and the clocks.
 (def %serve-session
-  (fn (_ c sock local remote any-host limits)
-    (def run (Vector make 8 ()))
+  (fn (_ c sock s)
+    (def run (Vector make 10 ()))
+    (def tcp (%get s (lit tcp)))
+    (def limits (%get s (lit limits)))
     (%clocks-start!)
     (%rn! run %CHANNELS ()) (%rn! run %NEXT 0) (%rn! run %MOVED 0)
-    (%rn! run %FORWARDING local) (%rn! run %SESSION ())
-    (%rn! run %REMOTE remote) (%rn! run %ANY-HOST any-host) (%rn! run %LISTENERS ())
+    (%rn! run %FORWARDING (if (str=? tcp "all") #t (str=? tcp "local"))) (%rn! run %SESSION ())
+    (%rn! run %REMOTE (if (str=? tcp "all") #t (str=? tcp "remote"))) (%rn! run %GATEWAY (%get s (lit gateway)))
+    (%rn! run %LISTENERS ()) (%rn! run %ACCEPT (%get s (lit accept))) (%rn! run %ENV ())
     ((fn (self)
        (def session (%rn run %SESSION))
        (unless (if (null? session) #f
@@ -644,29 +896,24 @@
                    (%clocks! c limits)))
              (when (if (null? child) #f
                      (if (%ch session %CLOSED) #f (if (%ch session %OUT) #f (not (%ch session %ERR)))))
-               (%log (Str8 append "exit status " (%num (%finish! c session)))))
+               (%debug (Str8 append "exit status " (%num (%finish! c session)))))
              (when (> (%rn run %MOVED) %chunk) (do (Heap collect) (%rn! run %MOVED 0)))
              (self)))))))
 
 ; --- the listener ----------------------------------------------------------
 
-; The host key read from keyfile, or under -R made there when the file is
-; not there, logged with its fingerprint as Dropbear logs it.  Without
-; one the server says what Dropbear says and exits 1.
+; The host key: the first of the HostKey files that reads as an
+; ssh-ed25519 key.  A named file that does not read is logged; the
+; default names of the types not served are passed over when absent.
 (def %host-key
-  (fn (_ keyfile make)
-    (def key (guard (e ()) (ssh-key-of-file keyfile)))
-    (match
-      ((not (null? key)) key)
-      ((not make)
-        (do (%log "No hostkeys available. 'dropbear -R' may be useful or run dropbearkey.")
-            (Sys exit 1)))
-      (#t
-        (do (def pub (ssh-keygen-make keyfile))
-            (unless pub
-              (do (%log (Str8 append "Couldn't read or generate hostkey " keyfile)) (Sys exit 1)))
-            (%log (Str8 append "Generated hostkey " keyfile ", fingerprint is " (ssh-key-fingerprint pub)))
-            (ssh-key-of-file keyfile))))))
+  (fn (_ s)
+    ((fn (self paths)
+       (if (null? paths) ()
+         (do (def key (guard (e ()) (ssh-key-of-file (first paths))))
+             (when (if (null? key) (if (%get s (lit hostkeys-given)) #t (File exists? (first paths))) #f)
+               (%log-at "error" (Str8 append "Unable to load host key: " (first paths))))
+             (if (null? key) (self (rest paths)) key))))
+     (%get s (lit hostkeys)))))
 
 (def %dlopen (prim-ref (lit ffi) (lit dlopen)))
 (def %dlsym (prim-ref (lit ffi) (lit dlsym)))
@@ -684,8 +931,7 @@
     (%setsid!)
     (Sys chdir "/")))
 
-; The standard descriptors on /dev/null: in the background the log goes
-; nowhere, as Dropbear's does without syslog.
+; The standard descriptors on /dev/null, as a daemon's are.
 (def %quiet!
   (fn (_)
     (def null (File open "/dev/null" (lit rdwr)))
@@ -693,12 +939,13 @@
       (do (Sys dup2 null 0) (Sys dup2 null 1) (Sys dup2 null 2)
           (when (> null 2) (File close null))))))
 
-; The pid written to pidfile, so the server can be killed easily; a path
-; that cannot be written is let be, as Dropbear lets it.
+; The pid written to the PidFile; a path that cannot be written is
+; logged and let be.
 (def %pidfile!
   (fn (_ path)
     (def fd (File open path (list (lit wronly) (lit creat) (lit trunc)) 420))
-    (unless (< fd 0)
+    (if (< fd 0)
+      (%log-at "error" (Str8 append "Couldn't create pid file \"" path "\""))
       (do (def line (Str8 append (%num (Sys getpid)) "\n"))
           (File write fd line (%byte-len line))
           (File close fd)))))
@@ -708,51 +955,110 @@
     (def e (List find (fn (_ p) (str=? (first p) name)) (Sys signals)))
     (if (null? e) () (rest e))))
 
-; One connection served, in its own process.
+; One connection served.
 (def %serve-connection
-  (fn (_ fd seed pub dir local remote any-host limits passwords)
-    (def peer ((fn (_ p) (Str8 append (first p) ":" (%num (rest p)))) (Socket peer fd)))
-    (%log (Str8 append "Child connection from " peer))
+  (fn (_ fd key s)
+    (def peer (Socket peer fd))
+    (def from (Str8 append (first peer) " port " (%num (rest peer))))
+    (%log-at "verbose" (Str8 append "Connection from " from))
     (def c (ssh-open fd ()))
-    (def outcome
-      (guard (e (Str8 append "Exit from <" peer ">: the connection ended"))
+    (def user
+      (guard (e ())
         (ssh-exchange-versions! c)
-        (ssh-kex-server! c seed pub)
-        (def user (%authenticate c dir peer passwords))
-        (%serve-session c fd local remote any-host limits)
-        (Str8 append "Exit (" user ") from <" peer ">: Exited normally")))
-    (%log outcome)
+        (ssh-kex-server! c (first key) (rest key))
+        (%authenticate c s from)))
+    (if (null? user)
+      (%log (Str8 append "Connection closed by " from " [preauth]"))
+      (do (def done (Str8 append "Disconnected from user " user " " from))
+          (%log (guard (e (match ((str=? (%message e) "keepalive") (Str8 append "Timeout, client not responding from user " user " " from))
+                                 ((str=? (%message e) "idle") (Str8 append done ": the channels were idle past ChannelTimeout"))
+                                 (#t done)))
+                  (%serve-session c fd s)
+                  done))))
     (Socket close fd)))
 
-; Connections taken until the process is stopped, each served in a
-; process of its own while this one goes back to listening.  The host key
-; is read once; a dead connection's process is reaped by the kernel.
-(def ssh-serve
-  (fn (_ keyfile addr port dir make background pidfile local remote any-host limits passwords syslog)
-    (%set-first! %log-syslog syslog)
-    (def key (%host-key keyfile make))
-    (def lfd
-      (guard (e (do (%log-at (lit warning) (Str8 append "Failed listening on '" (if (null? addr) "" addr) ":" (%num port)
-                                       "': the address could not be bound"))
-                    (Sys exit 1)))
-        (if (null? addr) (Socket tcp-listen port) (Socket tcp-listen-on addr port))))
-    (when background (%background!))
-    (%log (if background "Running in background" "Not backgrounding"))
-    (%pidfile! pidfile)
-    (when background (%quiet!))
+; The listening sockets, one a ListenAddress and port, each logged; an
+; address that cannot be bound is logged and passed over.
+(def %listeners
+  (fn (_ s)
+    (List flat-map
+      (fn (_ a)
+        (def where (Str8 append (if (null? (first a)) "0.0.0.0" (first a)) " port " (%num (rest a))))
+        (def fd (guard (e ()) (if (null? (first a)) (Socket tcp-listen (rest a)) (Socket tcp-listen-on (first a) (rest a)))))
+        (if (null? fd)
+          (do (%log-at "error" (Str8 append "Bind to port " (%num (rest a)) " on " (if (null? (first a)) "0.0.0.0" (first a)) " failed: Address already in use."))
+              ())
+          (do (%log (Str8 append "Server listening on " where ".")) (list fd))))
+      (%get s (lit listen)))))
+
+; The server's plan done: (CONFIG OPTIONS MODE), MODE (FOREGROUND DEBUG
+; STDERR LOGFILE TEST PRINT).  The configuration settled -- the options,
+; then the file -- and checked; under -t the host key read and nothing
+; more, under -T the settings printed; otherwise the listeners opened and
+; connections taken until the process is stopped, each served in a
+; process of its own, or the one connection served here under -d.  The
+; exit status, when it ends.
+(def ssh-server-main
+  (fn (_ plan)
+    (def mode (List ref 2 plan))
+    (def foreground (first mode)) (def debug (List ref 1 mode)) (def stderr (List ref 2 mode))
+    (def logfile (List ref 3 mode))
+    (def say (fn (_ t) (File write 2 (Str8 append t "\n") (+ (%byte-len t) 1))))
+    (def path (first plan))
+    (def text (guard (e ()) (File read-all path)))
+    (def lines
+      (guard (e (do (say (%message e)) ()))
+        (List append (ssh-config-options (List ref 1 plan))
+                     (if (null? text) () (ssh-config-read text path () () () "/etc/ssh")))))
+    (def faults (ssh-config-faults lines ssh-config-sshd-keywords %refused ()))
+    (def s (if (null? faults) (guard (e (do (say (%message e)) ())) (ssh-server-settings lines)) ()))
+    (match
+      ((null? text) (do (say (Str8 append path ": No such file or directory")) 255))
+      ((not (null? faults))
+        (do (List for-each say faults)
+            (say (Str8 append path ": terminating, " (%num (List length faults)) " bad configuration options"))
+            255))
+      ((null? s) 255)
+      (#t
+        (do (%oset! %log-to 1 (not (if stderr #t (not (null? logfile)))))
+            (%oset! %log-to 3 (Str8 ->sym (%get s (lit facility))))
+            (%oset! %log-to 4 (%rank (%get s (lit level))))
+            (unless (null? logfile)
+              ((fn (_ fd) (if (< fd 0) (say (Str8 append "Couldn't open logfile " logfile)) (%oset! %log-to 2 fd)))
+               (File open logfile (list (lit wronly) (lit creat) (lit append)) 420)))
+            (def key (%host-key s))
+            (match
+              ((List ref 5 mode) (do (File write 1 (%print s) (%byte-len (%print s))) 0))
+              ((null? key) (do (say "sshd: no hostkeys available -- exiting.") 1))
+              ((List ref 4 mode) 0)
+              (#t (%listen-and-serve s key foreground debug))))))))
+
+(def %listen-and-serve
+  (fn (_ s key foreground debug)
+    (def lfds (%listeners s))
+    (when (null? lfds) (do (%log-at "fatal" "Cannot bind any address.") (Sys exit 255)))
+    (unless foreground (%background!))
+    (unless debug (unless (null? (%get s (lit pidfile))) (%pidfile! (%get s (lit pidfile)))))
+    (unless foreground (%quiet!))
     ; the engines, built once: each connection's process inherits them
     (ssh-engines! ())
     (def chld (%signal-number "CHLD"))
-    (unless (null? chld) (Sys signal chld (Sys sig-ign)))
+    (unless (if debug #t (null? chld)) (Sys signal chld (Sys sig-ign)))
     ((fn (self)
+       (def ready (Sys poll (List map (fn (_ l) (pair l (list (lit in)))) lfds) -1))
+       (def lfd (first (List find (fn (_ r) (not (null? (rest r)))) ready)))
        (def fd (Socket accept lfd))
-       (def pid (Sys fork))
-       (if (= pid 0)
-         (do (Socket close lfd)
-             (unless (null? chld) (Sys signal chld (Sys sig-dfl)))
-             (%serve-connection fd (first key) (rest key) dir local remote any-host limits passwords)
-             (Sys exit 0))
-         (do (Socket close fd)
-             (self)))))))
+       (if debug
+         (do (List for-each (fn (_ l) (Socket close l)) lfds)
+             (%serve-connection fd key s)
+             0)
+         (do (def pid (Sys fork))
+             (if (= pid 0)
+               (do (List for-each (fn (_ l) (Socket close l)) lfds)
+                   (unless (null? chld) (Sys signal chld (Sys sig-dfl)))
+                   (%serve-connection fd key s)
+                   (Sys exit 0))
+               (do (Socket close fd)
+                   (self)))))))))
 
-(provide ssh/server ssh-serve)
+(provide ssh/server ssh-server-main ssh-server-settings)

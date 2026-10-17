@@ -1,5 +1,5 @@
 #!/bin/sh
-# # x-ssh -- SSH on x-lang, after Dropbear
+# # x-ssh -- SSH on x-lang
 #
 # ## tests/spec-gate.sh -- shim onto the lang kit's gate
 #

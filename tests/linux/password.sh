@@ -1,22 +1,25 @@
 #!/bin/sh
-# # x-ssh -- SSH on x-lang, after Dropbear
+# # x-ssh -- SSH on x-lang
 #
 # ## tests/linux/password.sh -- password logins, as root in the container
 #
 # A user is made with a known password, its SHA-512 crypt in /etc/shadow
-# ("pw", x-lang's Crypt example), and the x-ssh server started as root,
-# the one user a server that does not drop privileges can log in.  Through
-# it:
+# ("pw", x-lang's Crypt example), and the x-ssh sshd started as root, the
+# one user a server that does not drop privileges can log in, with
+# PermitRootLogin yes.  Through it:
 #
 #   dbclient   Dropbear's client, DROPBEAR_PASSWORD: output and status
 #   ssh        OpenSSH's client, the password by SSH_ASKPASS
-#   x-ssh      x-ssh's own client, DROPBEAR_PASSWORD and no key
+#   x-ssh      x-ssh's own client, the password by SSH_ASKPASS, no key
 #   wrong      a wrong password is refused, status 255, and logged
-#   prompt     x-ssh's client asks at the terminal (expect), again after a
-#              wrong password, echoing neither
-#   syslog     a server without -E logs to busybox's syslogd, as dropbear
-#              in the authpriv facility
-#   -s         a server started with -s offers no password
+#   prompt     x-ssh's client asks at the terminal (expect): whether to
+#              trust the new host, then the password, again after a wrong
+#              one, echoing neither
+#   syslog     a server without -e logs to busybox's syslogd, as sshd in
+#              the auth facility
+#   root       under PermitRootLogin's default root's password is refused,
+#              logged, and MaxAuthTries ends it; under PasswordAuthentication
+#              no none is asked
 #
 # The clients are the oracles.
 set -u
@@ -26,40 +29,44 @@ export X_LANG_DIR=/langs/
 X=${X:-x}
 port=
 fx=$(mktemp -d)
-srvpid=
 trap 'rm -rf "$fx"' EXIT
 hash='$6$saltsalt$pauPrmdmG4BTE9h2HPmywiw152IFch6BJCEsaY6D.PLTfpV8sqvXwWdyfsgVgozkYH9B80bAip/08R2BPH2xk/'
 sed -i "s|^root:[^:]*:|root:$hash:|" /etc/shadow
-dropbearkey -t ed25519 -f "$fx/hostkey" > /dev/null 2>&1 || "$X" -l ssh -- dropbearkey -t ed25519 -f "$fx/hostkey" > /dev/null 2>&1
-: > "$fx/authorized_keys"
+"$X" -l ssh -- ssh-keygen -q -t ed25519 -N '' -f "$fx/hostkey" > /dev/null 2>&1
 mkdir -p "$fx/home"
+printf '#!/bin/sh\necho pw\n' > "$fx/askpass"; printf '#!/bin/sh\necho px\n' > "$fx/wrongpass"
+chmod +x "$fx/askpass" "$fx/wrongpass"
 failed=0
 fail() { echo "FAIL: $1" >&2; cat "$fx/client.err" >&2; tail -5 "$fx/server.log" >&2; failed=1; }
 
+# The server on a port, its options after the fixture's; the log on
+# standard error unless the caller says otherwise.
 start() {
-	port=$1; shift
-	USER=root "$X" -l ssh -- dropbear -F -E "$@" -r "$fx/hostkey" -p "127.0.0.1:$port" -D "$fx" > "$fx/server.log" 2>&1 &
-	srvpid=$!
+	port=$1; log=$2; shift 2
+	USER=root "$X" -l ssh -- sshd -D -f /dev/null -h "$fx/hostkey" -o ListenAddress=127.0.0.1 -p "$port" -o PidFile=none "$@" > "$log" 2>&1 &
+}
+started() {
 	i=0
-	while ! grep -q 'Not backgrounding' "$fx/server.log" 2>/dev/null; do
-		i=$((i + 1)); [ $i -lt 600 ] || { echo "FAIL: the server did not start" >&2; cat "$fx/server.log" >&2; exit 1; }
+	while ! grep -q "Server listening on 127.0.0.1 port $2." "$1" 2>/dev/null; do
+		i=$((i + 1)); [ $i -lt 600 ] || { echo "FAIL: the server did not start" >&2; cat "$1" >&2; exit 1; }
 		sleep 1
 	done
 }
+xssh() { HOME="$fx/home" "$X" -l ssh -- ssh -F none -o StrictHostKeyChecking=accept-new -q -p "$port" -l root "$@"; }
 
-start 2222
+start 2222 "$fx/server.log" -e -o PermitRootLogin=yes
+started "$fx/server.log" 2222
 
 # dbclient
 out=$(DROPBEAR_PASSWORD=pw dbclient -y -y -p "$port" root@127.0.0.1 'echo by password; exit 3' < /dev/null 2> "$fx/client.err")
 status=$?
-if [ "$out" = "by password" ] && [ "$status" = 3 ] && grep -q "Password auth succeeded for 'root'" "$fx/server.log"; then
+if [ "$out" = "by password" ] && [ "$status" = 3 ] && grep -q "Accepted password for root from 127.0.0.1 port [0-9]* ssh2" "$fx/server.log"; then
 	echo "ok: dbclient -- Dropbear's client logs in by password"
 else
 	fail "dbclient: output '$out' status $status"
 fi
 
 # ssh
-printf '#!/bin/sh\necho pw\n' > "$fx/askpass"; chmod +x "$fx/askpass"
 out=$(SSH_ASKPASS="$fx/askpass" SSH_ASKPASS_REQUIRE=force DISPLAY=: ssh -q -o StrictHostKeyChecking=no \
 	-o UserKnownHostsFile=/dev/null -o PubkeyAuthentication=no -o PreferredAuthentications=password \
 	-p "$port" root@127.0.0.1 'echo by password; exit 3' < /dev/null 2> "$fx/client.err")
@@ -71,18 +78,19 @@ else
 fi
 
 # x-ssh
-out=$(HOME="$fx/home" DROPBEAR_PASSWORD=pw "$X" -l ssh -- dbclient -y -p "$port" -l root 127.0.0.1 'echo both ends in x; exit 4' < /dev/null 2> "$fx/client.err")
+out=$(SSH_ASKPASS="$fx/askpass" SSH_ASKPASS_REQUIRE=force xssh 127.0.0.1 'echo both ends in x; exit 4' < /dev/null 2> "$fx/client.err")
 status=$?
 if [ "$out" = "both ends in x" ] && [ "$status" = 4 ]; then
-	echo "ok: x-ssh -- its own client, by password"
+	echo "ok: x-ssh -- its own client, the password by SSH_ASKPASS"
 else
 	fail "x-ssh: output '$out' status $status"
 fi
 
 # wrong
-HOME="$fx/home" DROPBEAR_PASSWORD=px "$X" -l ssh -- dbclient -y -p "$port" -l root 127.0.0.1 true < /dev/null > /dev/null 2> "$fx/client.err"
+SSH_ASKPASS="$fx/wrongpass" SSH_ASKPASS_REQUIRE=force xssh -o NumberOfPasswordPrompts=1 127.0.0.1 true < /dev/null > /dev/null 2> "$fx/client.err"
 status=$?
-if [ "$status" = 255 ] && grep -q "Bad password attempt for 'root'" "$fx/server.log"; then
+if [ "$status" = 255 ] && grep -q "Failed password for root from 127.0.0.1 port [0-9]* ssh2" "$fx/server.log" \
+	&& grep -q 'root@127.0.0.1: Permission denied (publickey,password).' "$fx/client.err"; then
 	echo "ok: wrong -- a wrong password is refused and logged"
 else
 	fail "wrong: status $status"
@@ -91,36 +99,44 @@ fi
 # prompt
 mkdir -p /tmp/prompt-home
 if expect tests/linux/prompt.exp "$port" > "$fx/prompt.out" 2>&1 && grep -qx ok "$fx/prompt.out"; then
-	echo "ok: prompt -- x-ssh asks at the terminal, again after a wrong password, echoing neither"
+	echo "ok: prompt -- x-ssh asks whether to trust the host, then the password, again after a wrong one, echoing neither"
 else
 	fail "prompt: $(cat "$fx/prompt.out")"
 fi
 
-# syslog: a server without -E logs to busybox's syslogd, as Dropbear does
+# syslog: a server without -e logs to busybox's syslogd, as sshd, auth
 syslogd -O "$fx/messages"
-USER=root "$X" -l ssh -- dropbear -F -r "$fx/hostkey" -p 127.0.0.1:2224 -D "$fx" > "$fx/quiet.log" 2>&1 &
+start 2224 "$fx/quiet.log" -o PermitRootLogin=yes
 i=0
-while ! grep -q 'dropbear\[[0-9]*\]: Not backgrounding' "$fx/messages" 2>/dev/null; do
+while ! grep -q 'sshd\[[0-9]*\]: Server listening on 127.0.0.1 port 2224.' "$fx/messages" 2>/dev/null; do
 	i=$((i + 1)); [ $i -lt 600 ] || break; sleep 1
 done
 out=$(DROPBEAR_PASSWORD=pw dbclient -y -y -p 2224 root@127.0.0.1 'echo by syslog' < /dev/null 2> "$fx/client.err")
-if [ "$out" = "by syslog" ] && grep -q "authpriv.notice dropbear\\[[0-9]*\\]: Password auth succeeded for 'root'" "$fx/messages" \
-	&& ! grep -q 'Password auth' "$fx/quiet.log"; then
-	echo "ok: syslog -- without -E the server logs to syslogd as dropbear, authpriv"
+if [ "$out" = "by syslog" ] && grep -q "auth.info sshd\\[[0-9]*\\]: Accepted password for root from 127.0.0.1" "$fx/messages" \
+	&& ! grep -q 'Accepted password' "$fx/quiet.log"; then
+	echo "ok: syslog -- without -e the server logs to syslogd as sshd, auth"
 else
 	fail "syslog: output '$out'"; cat "$fx/messages" >&2; cat "$fx/quiet.log" >&2
 fi
 
-# -s
+# root: PermitRootLogin's default refuses root's password, and says so,
+# until MaxAuthTries disconnects a client that keeps trying; Dropbear's
+# client exits 0 after that disconnect, so the log is the judge.
+# PasswordAuthentication no offers none.
 # the launcher pipes the program into the engine, a child of its own: the
-# first server stays up, and the second listens on a port of its own
-start 2223 -s
-DROPBEAR_PASSWORD=pw dbclient -y -y -p "$port" root@127.0.0.1 true < /dev/null > /dev/null 2> "$fx/client.err"
-status=$?
-if [ "$status" != 0 ] && ! grep -q 'Password auth' "$fx/server.log"; then
-	echo "ok: -s -- a server started with -s offers no password"
+# first servers stay up, and these listen on ports of their own
+start 2225 "$fx/root.log" -e
+started "$fx/root.log" 2225
+out=$(DROPBEAR_PASSWORD=pw dbclient -y -y -p 2225 root@127.0.0.1 'echo got-in' < /dev/null 2> "$fx/client.err")
+start 2223 "$fx/nopw.log" -e -o PermitRootLogin=yes -o PasswordAuthentication=no
+started "$fx/nopw.log" 2223
+out2=$(DROPBEAR_PASSWORD=pw dbclient -y -y -p 2223 root@127.0.0.1 'echo got-in' < /dev/null 2> "$fx/client.err")
+if [ -z "$out" ] && grep -q 'ROOT LOGIN REFUSED FROM 127.0.0.1 port' "$fx/root.log" \
+	&& grep -q 'maximum authentication attempts exceeded for root' "$fx/root.log" && ! grep -q 'Accepted' "$fx/root.log" \
+	&& [ -z "$out2" ] && ! grep -q 'password for root' "$fx/nopw.log"; then
+	echo "ok: root -- PermitRootLogin's default refuses root's password, MaxAuthTries ends it; PasswordAuthentication no offers none"
 else
-	fail "-s: status $status"
+	fail "root: outputs '$out' and '$out2'"; cat "$fx/root.log" "$fx/nopw.log" >&2
 fi
 
 exit $failed

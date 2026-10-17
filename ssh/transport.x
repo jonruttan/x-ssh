@@ -1,4 +1,4 @@
-; # x-ssh -- SSH on x-lang, after Dropbear
+; # x-ssh -- SSH on x-lang
 ;
 ; ## ssh/transport.x -- the transport layer, from either end
 ;
@@ -8,7 +8,7 @@
 ;
 ; RFC 4253: the version exchange, the binary packet protocol, the key
 ; exchange and the keys it derives; RFC 4252 for the authentication that
-; follows.  One cipher suite, the one Dropbear and OpenSSH prefer and the
+; follows.  One cipher suite, the one OpenSSH prefers and the
 ; codecs x-lang has: curve25519-sha256, ssh-ed25519, and
 ; chacha20-poly1305@openssh.com, whose framing is OpenSSH's
 ; PROTOCOL.chacha20poly1305 -- two keys from the 64 derived, the length

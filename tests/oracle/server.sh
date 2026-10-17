@@ -1,22 +1,25 @@
 #!/bin/sh
-# tests/oracle/server.sh -- x-ssh's server, driven by Dropbear's client
-# and OpenSSH's.
+# tests/oracle/server.sh -- x-ssh's sshd, driven by Dropbear's client and
+# OpenSSH's.
 #
 # Usage: X=/path/to/x sh tests/oracle/server.sh DROPBEAR_DIR [PORT]
 #
 # DROPBEAR_DIR holds a built Dropbear (dbclient, dropbearkey).  A fixture
 # is made in a scratch directory: a host key and a Dropbear user key from
 # dropbearkey, an OpenSSH user key from ssh-keygen, and both users' public
-# lines as the authorized_keys the server is pointed at with -D.  The
-# x-ssh server is started on 127.0.0.1:PORT, and through it:
+# lines as the AuthorizedKeysFile the server is given.  The x-ssh server
+# is started on 127.0.0.1:PORT, in the foreground with its log on
+# standard error, and through it:
 #
 #   dbclient  `echo hi from the x-ssh server; exit 3`: output and status
 #   ssh       the same through OpenSSH's client, which asks whether a
 #             key would do before it signs, and sends requests the
-#             server declines
+#             server declines; the log says so in OpenSSH's words
 #   x-ssh     x-ssh's own client, with the Dropbear-format key
 #   refused   a key not in authorized_keys is refused
 #   input     200000 random bytes through `cksum` on the server's side
+#   env       OpenSSH's SetEnv and x-ssh's SendEnv reach the command for
+#             a variable AcceptEnv takes, and not for one it does not
 #   git       `git clone` over OpenSSH's client from the server's
 #             git-upload-pack: the clone's HEAD and its fsck
 #   forward   a client's -L served as direct-tcpip channels to the server's
@@ -24,11 +27,13 @@
 #   remote    a client's -R listened for by the server, its connections opened
 #             to the client and carried to the server's own ssh port: x-ssh's
 #             client (two connections) and OpenSSH's
-#   netcat    x-ssh's client's -B through the server to its own ssh port
-#   clocks    a -K 1 client the server keeps alive, a -I 2 client ending on its
-#             own clock, and a server started with -I closing an idle client
-#   background  a server started without -F returns at once, makes its
-#             host key under -R, writes -P's pidfile, and serves dbclient
+#   stdio     x-ssh's client's -W through the server to its own ssh port
+#   clocks    a client asking a keepalive each second the server answers, a
+#             client ending on its own ChannelTimeout, and a server with a
+#             ChannelTimeout closing an idle client
+#   test      -t passes a sound configuration and refuses AllowUsers
+#   background  ssh-keygen -A makes the host key; a server started without
+#             -D returns at once, writes its PidFile and serves dbclient
 #
 # The clients and git are the oracles.
 set -u
@@ -39,6 +44,7 @@ fx=$(mktemp -d "${TMPDIR:-/tmp}/x-ssh-server.XXXXXX")
 # The launcher pipes the program into the engine, a child of its own,
 # so the server's pid is a shell's: the whole tree under it goes.
 kill_tree() {
+	[ -n "${1:-}" ] || return 0
 	for c in $(ps -axo pid,ppid | awk -v p="$1" '$2 == p { print $1 }'); do kill_tree "$c"; done
 	kill "$1" 2>/dev/null
 }
@@ -52,19 +58,28 @@ ssh-keygen -q -t ed25519 -N '' -C x-ssh-server -f "$fx/osshkey"
 ssh-keygen -q -t ed25519 -N '' -C stranger -f "$fx/stranger"
 "$db/dropbearkey" -y -f "$fx/dbkey" 2>/dev/null | grep '^ssh-ed25519 ' > "$fx/authorized_keys"
 cat "$fx/osshkey.pub" >> "$fx/authorized_keys"
-"$X" -l ssh -- dropbear -F -E -r "$fx/hostkey" -p "127.0.0.1:$port" -D "$fx" > "$fx/server.log" 2>&1 &
+user=$(id -un)
+# the server's options: its own configuration, none of the system's
+sshd() {
+	"$X" -l ssh -- sshd -f /dev/null -h "$fx/hostkey" -o ListenAddress=127.0.0.1 \
+		-o AuthorizedKeysFile="$fx/authorized_keys" -o PidFile=none -o PasswordAuthentication=no "$@"
+}
+started() {
+	i=0
+	while ! grep -q "Server listening on 127.0.0.1 port $2." "$1" 2>/dev/null; do
+		i=$((i + 1))
+		[ $i -lt 600 ] || { echo "FAIL: the server did not start" >&2; cat "$1" >&2; exit 1; }
+		sleep 1
+	done
+}
+sshd -D -e -p "$port" -o LogLevel=DEBUG1 -o AcceptEnv='XSSH_*' > "$fx/server.log" 2>&1 &
 srvpid=$!
 # the listener builds the curves' engines before it listens
-i=0
-while ! grep -q 'Not backgrounding' "$fx/server.log" 2>/dev/null; do
-	i=$((i + 1))
-	[ $i -lt 600 ] || { echo "FAIL: the server did not start" >&2; cat "$fx/server.log" >&2; exit 1; }
-	sleep 1
-done
-user=$(id -un)
+started "$fx/server.log" "$port"
 # x-ssh's client's home, for its known_hosts
 mkdir -p "$fx/home"
-ossh="ssh -q -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p $port"
+ossh="ssh -q -F none -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p $port"
+xssh() { HOME="$fx/home" "$X" -l ssh -- ssh -F none -o StrictHostKeyChecking=accept-new -q -p "$port" -i "$fx/dbkey" -l "$user" "$@"; }
 failed=0
 
 fail() {
@@ -86,14 +101,16 @@ fi
 # ssh
 out=$($ossh -i "$fx/osshkey" "$user@127.0.0.1" 'echo hi from the x-ssh server; exit 3' < /dev/null 2> "$fx/client.err")
 status=$?
-if [ "$out" = "hi from the x-ssh server" ] && [ "$status" = 3 ]; then
-	echo "ok: ssh -- OpenSSH's client too"
+fp=$(ssh-keygen -l -f "$fx/osshkey" | cut -d' ' -f2)
+if [ "$out" = "hi from the x-ssh server" ] && [ "$status" = 3 ] \
+	&& grep -q "Accepted publickey for $user from 127.0.0.1 port [0-9]* ssh2: ED25519 $fp" "$fx/server.log"; then
+	echo "ok: ssh -- OpenSSH's client too, and the log says so as OpenSSH's sshd would"
 else
 	fail "ssh: output '$out' status $status"
 fi
 
 # x-ssh, both ends: x-ssh's own client against its own server
-out=$(HOME="$fx/home" "$X" -l ssh -- dbclient -y -p "$port" -i "$fx/dbkey" -l "$user" 127.0.0.1 'echo both ends in x; exit 4' < /dev/null 2> "$fx/client.err")
+out=$(xssh 127.0.0.1 'echo both ends in x; exit 4' < /dev/null 2> "$fx/client.err")
 status=$?
 if [ "$out" = "both ends in x" ] && [ "$status" = 4 ]; then
 	echo "ok: x-ssh -- its own client against its own server"
@@ -120,6 +137,16 @@ else
 	fail "input: the server side's cksum '$got', the client side's '$want'"
 fi
 
+# env: AcceptEnv XSSH_* takes OpenSSH's SetEnv and x-ssh's SendEnv, and
+# leaves a variable it does not name behind
+out=$($ossh -i "$fx/osshkey" -o SetEnv="XSSH_ONE=from-openssh OTHER_ONE=kept-out" "$user@127.0.0.1" 'echo "$XSSH_ONE/${OTHER_ONE:-none}"' < /dev/null 2> "$fx/client.err")
+out2=$(XSSH_TWO=from-x-ssh xssh -o SendEnv=XSSH_TWO 127.0.0.1 'echo "$XSSH_TWO"' < /dev/null 2> "$fx/client.err")
+if [ "$out" = "from-openssh/none" ] && [ "$out2" = "from-x-ssh" ]; then
+	echo "ok: env -- AcceptEnv takes what it names from either client, and nothing else"
+else
+	fail "env: OpenSSH's '$out', x-ssh's '$out2'"
+fi
+
 # git
 src="$fx/src.git"
 git init -q --bare "$src"
@@ -140,7 +167,7 @@ fi
 # forward: a client's -L served as direct-tcpip channels, to the server's
 # own ssh port: x-ssh's client, then OpenSSH's, two connections each
 fport=$((port + 10))
-HOME="$fx/home" "$X" -l ssh -- dbclient -p "$port" -i "$fx/dbkey" -l "$user" -N -L "$fport:127.0.0.1:$port" 127.0.0.1 < /dev/null 2> "$fx/fwd.err" &
+xssh -N -L "$fport:127.0.0.1:$port" 127.0.0.1 < /dev/null 2> "$fx/fwd.err" &
 fwdpid=$!
 i=0
 while ! nc -z 127.0.0.1 "$fport" 2>/dev/null && [ $i -lt 60 ]; do i=$((i + 1)); sleep 1; done
@@ -171,7 +198,7 @@ fi
 # opened to the client and carried to the server's own ssh port: x-ssh's
 # client, then OpenSSH's
 rport=$((port + 20))
-HOME="$fx/home" "$X" -l ssh -- dbclient -p "$port" -i "$fx/dbkey" -l "$user" -N -R "$rport:127.0.0.1:$port" 127.0.0.1 < /dev/null 2> "$fx/fwd.err" &
+xssh -N -R "$rport:127.0.0.1:$port" 127.0.0.1 < /dev/null 2> "$fx/fwd.err" &
 fwdpid=$!
 i=0
 while [ "$(grep -c "remote forward on" "$fx/server.log")" -lt 1 ] && [ $i -lt 60 ]; do i=$((i + 1)); sleep 1; done
@@ -198,70 +225,82 @@ else
 	fail "remote: OpenSSH's client read '$one'"; cat "$fx/fwd.err" >&2; tail -5 "$fx/server.log" >&2
 fi
 
-# netcat: x-ssh's client's -B through the x-ssh server to its own ssh port
-out=$(HOME="$fx/home" "$X" -l ssh -- dbclient -p "$port" -i "$fx/dbkey" -l "$user" -B "127.0.0.1:$port" 127.0.0.1 < /dev/null 2> "$fx/fwd.err" | head -c 13)
+# stdio: x-ssh's client's -W through the x-ssh server to its own ssh port
+out=$(xssh -W "127.0.0.1:$port" 127.0.0.1 < /dev/null 2> "$fx/fwd.err" | head -c 13)
 if [ "$out" = "SSH-2.0-x-ssh" ]; then
-	echo "ok: netcat -- -B through the x-ssh server carries its own version line"
+	echo "ok: stdio -- -W through the x-ssh server carries its own version line"
 else
-	fail "netcat: read '$out'"
+	fail "stdio: read '$out'"
 	cat "$fx/fwd.err" >&2; tail -5 "$fx/server.log" >&2
 fi
 
-# clocks: x-ssh's client kept alive by keepalives the x-ssh server answers,
-# then ending on its own idle clock; and a server started with -I closing
-# an idle Dropbear client
-HOME="$fx/home" "$X" -l ssh -- dbclient -p "$port" -i "$fx/dbkey" -l "$user" -N -K 1 127.0.0.1 < /dev/null > /dev/null 2> "$fx/fwd.err" &
+# clocks: x-ssh's client kept alive by keepalives the x-ssh server
+# answers, then ending on its own ChannelTimeout; and a server with a
+# ChannelTimeout closing an idle Dropbear client
+xssh -N -o ServerAliveInterval=1 127.0.0.1 < /dev/null > /dev/null 2> "$fx/fwd.err" &
 fwdpid=$!
 sleep 12
 if kill -0 $fwdpid 2>/dev/null; then
 	echo "ok: clocks -- a client asking a keepalive each second is still up after 12s"
 else
-	fail "clocks: the -K 1 client is gone"; cat "$fx/fwd.err" >&2
+	fail "clocks: the ServerAliveInterval 1 client is gone"; cat "$fx/fwd.err" >&2
 fi
 kill_tree $fwdpid
 fwdpid=
 start=$(date +%s)
-HOME="$fx/home" "$X" -l ssh -- dbclient -p "$port" -i "$fx/dbkey" -l "$user" -N -I 2 127.0.0.1 < /dev/null > /dev/null 2> "$fx/fwd.err"
+xssh -N -o ChannelTimeout=global=2 127.0.0.1 < /dev/null > /dev/null 2> "$fx/fwd.err"
 status=$?
 took=$(( $(date +%s) - start ))
-if [ "$status" != 0 ] && [ $took -lt 40 ] && grep -q 'Idle timeout' "$fx/fwd.err"; then
-	echo "ok: clocks -- -I ends the connection on the client's clock (${took}s)"
+if [ "$status" = 255 ] && [ $took -lt 40 ] && grep -q 'ChannelTimeout' "$fx/fwd.err"; then
+	echo "ok: clocks -- ChannelTimeout ends the connection on the client's clock (${took}s)"
 else
-	fail "clocks: -I client status $status after ${took}s"; cat "$fx/fwd.err" >&2
+	fail "clocks: ChannelTimeout client status $status after ${took}s"; cat "$fx/fwd.err" >&2
 fi
 iport=$((port + 30))
-"$X" -l ssh -- dropbear -F -E -I 2 -r "$fx/hostkey" -p "127.0.0.1:$iport" -D "$fx" > "$fx/idle.log" 2>&1 &
+sshd -D -e -p "$iport" -o ChannelTimeout=global=2 > "$fx/idle.log" 2>&1 &
 idlepid=$!
-i=0
-while ! grep -q 'Not backgrounding' "$fx/idle.log" 2>/dev/null; do i=$((i + 1)); [ $i -lt 600 ] || break; sleep 1; done
+started "$fx/idle.log" "$iport"
 start=$(date +%s)
 "$db/dbclient" -y -y -p "$iport" -i "$fx/dbkey" -N "$user@127.0.0.1" < /dev/null > /dev/null 2> "$fx/client.err"
 took=$(( $(date +%s) - start ))
 kill_tree $idlepid
-if [ $took -lt 40 ] && grep -q 'Idle timeout' "$fx/idle.log"; then
-	echo "ok: clocks -- a server started with -I closes an idle client (${took}s)"
+if [ $took -lt 40 ] && grep -q 'idle past ChannelTimeout' "$fx/idle.log"; then
+	echo "ok: clocks -- a server with a ChannelTimeout closes an idle client (${took}s)"
 else
-	fail "clocks: the -I server kept the client ${took}s"; cat "$fx/idle.log" >&2
+	fail "clocks: the ChannelTimeout server kept the client ${took}s"; cat "$fx/idle.log" >&2
 fi
 
-# background: no -F, -R making the host key at -r's path, -P the pidfile;
-# the command returns, the server stays, a client is served through it
+# test: -t passes this configuration, and refuses one with AllowUsers
+sshd -t > "$fx/test.out" 2>&1
+good=$?
+sshd -t -o AllowUsers="$user" > "$fx/test.bad" 2>&1
+bad=$?
+if [ "$good" = 0 ] && [ "$bad" = 255 ] && grep -q 'allowusers is not served' "$fx/test.bad"; then
+	echo "ok: test -- -t passes a sound configuration and refuses AllowUsers"
+else
+	fail "test: -t gave $good, with AllowUsers $bad"; cat "$fx/test.out" "$fx/test.bad" >&2
+fi
+
+# background: ssh-keygen -A making the host key under a prefix, a server
+# without -D returning at once with its PidFile written, serving dbclient
 bport=$((port + 1))
-"$X" -l ssh -- dropbear -E -R -r "$fx/madekey" -p "127.0.0.1:$bport" -D "$fx" -P "$fx/pid" > "$fx/bg.log" 2>&1
+mkdir -p "$fx/root/etc/ssh"
+"$X" -l ssh -- ssh-keygen -A -f "$fx/root" > "$fx/keygen.out" 2>&1
+"$X" -l ssh -- sshd -f /dev/null -h "$fx/root/etc/ssh/ssh_host_ed25519_key" -o ListenAddress=127.0.0.1 -p "$bport" \
+	-o AuthorizedKeysFile="$fx/authorized_keys" -o PidFile="$fx/pid" > "$fx/bg.log" 2>&1
 status=$?
 i=0
-while [ ! -s "$fx/pid" ] && [ $i -lt 60 ]; do i=$((i + 1)); sleep 1; done
+while [ ! -s "$fx/pid" ] && [ $i -lt 600 ]; do i=$((i + 1)); sleep 1; done
 bgpid=$(cat "$fx/pid" 2>/dev/null)
 out=$("$db/dbclient" -y -y -p "$bport" -i "$fx/dbkey" "$user@127.0.0.1" 'echo from the background; exit 5' < /dev/null 2> "$fx/client.err")
 bstatus=$?
 if [ "$status" = 0 ] && [ -n "$bgpid" ] && [ "$out" = "from the background" ] && [ "$bstatus" = 5 ] \
-	&& grep -q "Generated hostkey $fx/madekey, fingerprint is SHA256:" "$fx/bg.log" \
-	&& grep -q 'Running in background' "$fx/bg.log" \
-	&& "$db/dropbearkey" -y -f "$fx/madekey" > /dev/null 2>&1; then
-	echo "ok: background -- the server returned at once, made its key, wrote its pid and served"
+	&& grep -q 'ssh-keygen: generating new host keys: ED25519' "$fx/keygen.out" \
+	&& ssh-keygen -l -f "$fx/root/etc/ssh/ssh_host_ed25519_key" > /dev/null 2>&1; then
+	echo "ok: background -- ssh-keygen -A made the key; the server returned at once, wrote its pid and served"
 else
 	fail "background: status $status, pid '$bgpid', output '$out' status $bstatus"
-	cat "$fx/bg.log" >&2
+	cat "$fx/keygen.out" "$fx/bg.log" >&2
 fi
 kill $bgpid 2>/dev/null
 

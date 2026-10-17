@@ -1,5 +1,5 @@
 #!/bin/sh
-# # x-ssh -- SSH on x-lang, after Dropbear
+# # x-ssh -- SSH on x-lang
 #
 # ## tests/spec-runner.sh -- the bundle's runner
 #

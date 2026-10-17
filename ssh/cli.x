@@ -1,4 +1,4 @@
-; # x-ssh -- SSH on x-lang, after Dropbear
+; # x-ssh -- SSH on x-lang
 ;
 ; ## ssh/cli.x -- the command line
 ;
@@ -6,146 +6,227 @@
 ; @copyright 2026 Jon Ruttan
 ; @license MIT No Attribution (MIT-0)
 ;
-; x -l ssh -- PROGRAM [ARGS] runs PROGRAM, as `dropbearmulti PROGRAM ARGS`
-; does: the server, the client, the key generator, the key converter or
-; scp, each by Dropbear's names.  Each program's options are declared once,
-; in ssh-programs: the declaration is what --help prints and what its line
-; is parsed against.  ssh-plan turns a line into what to do, with no side
-; effects; ssh-main does it.  Like Dropbear, everything goes to standard
-; error.
+; x -l ssh -- PROGRAM [ARGS] runs PROGRAM: the server, the client, the key
+; generator or scp, each by OpenSSH's name and with OpenSSH's options.
+; Each program's options are declared once, in ssh-programs: the
+; declaration is what --help prints and what its line is parsed against.
+; ssh-plan turns a line into what to do, with no side effects; ssh-main
+; does it.  The client's and server's flags become the configuration
+; lines they stand for, ahead of -o's and the files', so one reader
+; settles them all.
 
 (module ssh/cli)
 
 (import x/sys/opts Opts)
 (import x/sys/file File)
-(import ssh/client ssh-client-run)
-(import ssh/keygen ssh-keygen-generate ssh-keygen-print)
-(import ssh/server ssh-serve)
+(import ssh/client ssh-client-main)
+(import ssh/keygen ssh-keygen-main)
+(import ssh/server ssh-server-main)
 (import ssh/scp ssh-scp-client ssh-scp-remote)
-(import ssh/convert ssh-convert)
 
 (def %byte-len (prim-ref (lit str) (lit byte-len)))
+(def %byte-ref (prim-ref (lit str) (lit byte-ref)))
 
 (def %version-row (Opts flag "-V" "Print the version"))
 
-; One row a program: (LABEL NAMES WHAT DECLARATION) -- the names Dropbear
-; answers to, the first the one it lists, and what the program is.
+; One row a program: (LABEL NAME WHAT DECLARATION).
 (def %row
-  (fn (_ label names what synopsis rows)
-    (list label names what (Opts declare (first names) synopsis () rows))))
+  (fn (_ label name what synopsis rows)
+    (list label name what (Opts declare name synopsis () rows))))
 
 (def ssh-programs
   (list
-    (%row (lit server) (list "dropbear") "the server" "[options]"
-      (list (Opts arg "-r" "keyfile" "Specify the host key: ssh-ed25519, Dropbear's or OpenSSH's file")
-            (Opts arg "-p" "[address:]port" "Listen on the address and port, default 22 on every address")
-            (Opts arg "-D" "dir" "Directory containing the authorized_keys file, default ~/.ssh")
-            (Opts flag "-R" "Create hostkeys as required")
-            (Opts flag "-F" "Don't fork into background")
-            (Opts flag "-E" "Log to stderr rather than syslog")
-            (Opts arg "-P" "pidfile" "Create pid file PidFile, default /var/run/dropbear.pid")
-            (Opts flag "-j" "Disable local port forwarding")
-            (Opts flag "-k" "Disable remote port forwarding")
-            (Opts flag "-a" "Allow connections to forwarded ports from any host")
-            (Opts arg "-K" "secs" "Seconds without traffic before a keepalive is asked; 0 is never, the default")
-            (Opts arg "-I" "secs" "Seconds without data before the connection closes; 0 is never, the default")
-            (Opts flag "-s" "Disable password logins")
+    (%row (lit server) "sshd" "the server" "[options]"
+      (list (Opts flag "-D" "Do not detach and become a daemon")
+            (Opts flag "-d" "Debug mode: one connection, not forked, the log on standard error")
+            (Opts flag "-e" "Write the log to standard error instead of the system log")
+            (Opts arg "-E" "log_file" "Append the log to log_file instead of the system log")
+            (Opts arg "-f" "config_file" "The configuration file, default /etc/ssh/sshd_config")
+            (Opts arg "-h" "host_key_file" "A host key file, read before the configuration's")
+            (Opts arg "-o" "option" "An option in the configuration file's form, before the file's")
+            (Opts arg "-p" "port" "Listen on port, in place of the configuration's")
+            (Opts flag "-q" "Quiet: nothing is logged")
+            (Opts flag "-t" "Test the configuration and the host keys")
+            (Opts flag "-T" "Test the configuration and print the settings in force")
             %version-row))
-    (%row (lit client) (list "dbclient" "ssh") "the client"
-      "[options] [user@]host[/port] [command]"
-      (list (Opts arg "-p" "port" "Remote port")
-            (Opts arg "-i" "keyfile" "The ssh-ed25519 key to authenticate with (OpenSSH format)")
-            (Opts arg "-l" "user" "The user to log in as")
-            (Opts flag "-y" "Accept and record the key of a host not in known_hosts")
-            (Opts arg "-L" "forward" "Local port forwarding: [listenaddress:]listenport:remotehost:remoteport")
-            (Opts arg "-R" "forward" "Remote port forwarding: [listenaddress:]listenport:remotehost:remoteport")
-            (Opts arg "-B" "endpoint" "Netcat-alike forwarding to endhost:endport")
-            (Opts arg "-K" "secs" "Seconds without traffic before a keepalive is asked; 0 is never, the default")
-            (Opts arg "-I" "secs" "Seconds without data before the connection closes; 0 is never, the default")
-            (Opts flag "-N" "Don't run a remote command")
-            (Opts flag "-g" "Allow remote hosts to connect to forwarded ports")
-            (Opts flag "-v" "Trace the connection on standard error")
+    (%row (lit client) "ssh" "the client" "[options] destination [command]"
+      (list (Opts flag "-C" "Ask for compression (none is served)")
+            (Opts arg "-F" "configfile" "The user configuration file, default ~/.ssh/config")
+            (Opts flag "-G" "Print the configuration in force for destination and exit")
+            (Opts flag "-g" "Allow remote hosts to connect to local forwarded ports")
+            (Opts arg "-i" "identity_file" "A key to authenticate with, before the configuration's")
+            (Opts arg "-L" "address" "Local forwarding: [bind_address:]port:host:hostport")
+            (Opts arg "-l" "login_name" "The user to log in as")
+            (Opts flag "-N" "Do not run a remote command")
+            (Opts flag "-n" "Read standard input from /dev/null")
+            (Opts arg "-o" "option" "An option in the configuration file's form, before the files'")
+            (Opts arg "-p" "port" "The port to connect to")
+            (Opts flag "-q" "Quiet: warnings and diagnostics suppressed")
+            (Opts arg "-R" "address" "Remote forwarding: [bind_address:]port:host:hostport")
+            (Opts flag "-T" "Do not allocate a terminal (none ever is)")
+            (Opts flag "-v" "Verbose: trace the connection on standard error")
+            (Opts arg "-W" "host:port" "Carry standard input and output to host:port through the server")
+            (Opts flag "-x" "Disable X11 forwarding (none is served)")
             %version-row))
-    (%row (lit keygen) (list "dropbearkey" "ssh-keygen") "the key generator"
-      "-t type -f filename [-s bits]"
-      (list (Opts arg "-t" "type" "Type of key to generate: ed25519")
-            (Opts arg "-f" "filename" "Use filename for the secret key")
-            (Opts arg "-s" "bits" "Key size in bits; ed25519 has a fixed size of 256 bits")
-            (Opts flag "-y" "Just print the public key and fingerprint for the private key in filename")
-            (Opts arg "-C" "comment" "Specify the key comment")))
-    (%row (lit convert) (list "dropbearconvert") "the key converter"
-      "<inputtype> <outputtype> <inputfile> <outputfile>" ())
-    (%row (lit scp) (list "scp") "secure copy" "[options] [[user@]host1:]file1 [...] [[user@]host2:]file2"
-      (list (Opts arg "-P" "port" "Port to connect to on the remote host")
-            (Opts arg "-i" "identity_file" "The key to authenticate with, passed to the ssh program")
-            (Opts arg "-S" "program" "The program to connect with, default ssh")
+    (%row (lit keygen) "ssh-keygen" "the key tool" "[options]"
+      (list (Opts flag "-A" "Make each missing host key in /etc/ssh, or under -f's prefix")
+            (Opts arg "-b" "bits" "Key size in bits; an ed25519 key's is fixed")
+            (Opts arg "-C" "comment" "The key's comment")
+            (Opts arg "-F" "hostname" "Find hostname in known_hosts")
+            (Opts arg "-f" "filename" "The key file")
+            (Opts flag "-l" "Show the key's fingerprint")
+            (Opts arg "-N" "new_passphrase" "The new passphrase")
+            (Opts arg "-P" "passphrase" "The old passphrase")
+            (Opts flag "-p" "Change the passphrase, rewriting the file in OpenSSH's format")
+            (Opts flag "-q" "Quiet")
+            (Opts arg "-R" "hostname" "Remove hostname's keys from known_hosts")
+            (Opts arg "-t" "type" "The type of key to make: ed25519")
+            (Opts flag "-v" "Verbose: with -l, the key's randomart too")
+            (Opts flag "-y" "Print the public key of a private key file")))
+    (%row (lit scp) "scp" "secure copy" "[options] source ... target"
+      (list (Opts arg "-F" "ssh_config" "The configuration file, passed to ssh")
+            (Opts arg "-i" "identity_file" "The key to authenticate with, passed to ssh")
+            (Opts flag "-O" "The original scp protocol (the only one served)")
+            (Opts arg "-o" "ssh_option" "An option passed to ssh")
+            (Opts arg "-P" "port" "The port to connect to on the remote host")
             (Opts flag "-p" "Preserve modification times")
-            (Opts flag "-r" "Copy directories recursively")
             (Opts flag "-q" "Quiet: no progress meter (x-ssh has none)")
-            (Opts flag "-v" "Verbose")
+            (Opts flag "-r" "Copy directories recursively")
+            (Opts arg "-S" "program" "The program to connect with, default ssh")
+            (Opts flag "-s" "The SFTP protocol (not served)")
+            (Opts flag "-v" "Verbose, passed to ssh")
             (Opts hidden (Opts flag "-d" "The target must be a directory (the remote end)"))
             (Opts hidden (Opts flag "-t" "Receive files (the remote end)"))
             (Opts hidden (Opts flag "-f" "Send files (the remote end)"))))))
 
 ; The program row a name answers to, or ().
 (def ssh-program
-  (fn (_ name)
-    (List find (fn (_ p) (List any? (fn (_ n) (str=? n name)) (first (rest p))))
-      ssh-programs)))
+  (fn (_ name) (List find (fn (_ p) (str=? (first (rest p)) name)) ssh-programs)))
 
-(def %multi
+(def %programs
   (fn (_)
     (Str8 join "\n"
       (List append
-        (list (Str8 append "x-ssh multi-purpose v" ssh-version)
-              "Run 'x -l ssh -- <command>' with one of the following commands.")
-        (List map
-          (fn (_ p)
-            (Str8 append
-              (Str8 join " or " (List map (fn (_ n) (Str8 append "'" n "'")) (first (rest p))))
-              " - " (first (rest (rest p)))))
-          ssh-programs)
+        (list (Str8 append "x-ssh v" ssh-version)
+              "Run 'x -l ssh -- <program>' with one of these programs:")
+        (List map (fn (_ p) (Str8 append "'" (first (rest p)) "' - " (first (rest (rest p))))) ssh-programs)
         (list "")))))
 
-; A line to (PROGRAM TEXT STATUS): the program's label (() for none), what
-; to print, and the exit status.
+; A line to (PROGRAM WHAT STATUS): the program's label (() for none), and
+; what to do -- a list naming it -- or the text to print with the status.
 (def ssh-plan
   (fn (_ ops)
     (def p (if (null? ops) () (ssh-program (first ops))))
-    (def decl (if (null? p) () (first (rest (rest (rest p))))))
+    (def decl (if (null? p) () (List ref 3 p)))
     (def o (if (null? p) () (Opts parse decl (rest ops))))
     (match
-      ((null? p) (list () (%multi) 1))
+      ((null? p) (list () (%programs) 1))
       ((Opts help? decl (rest ops)) (list (first p) (Opts usage decl) 0))
       ((not (null? (Opts unknown o)))
         (list (first p) (Str8 append "Invalid option " (Opts unknown o) "\n" (Opts usage decl)) 1))
       ((Opts on? o "-V") (list (first p) (Str8 append "x-ssh v" ssh-version "\n") 0))
-      ((if (eq? (first p) (lit client)) (not (null? (Opts operands o))) #f)
-        (%client-plan o))
+      ((eq? (first p) (lit client)) (%client-plan o decl))
       ((eq? (first p) (lit keygen)) (%keygen-plan o decl))
-      ((eq? (first p) (lit server)) (%server-plan o))
-      ((eq? (first p) (lit scp)) (%scp-plan o decl))
-      (#t (%convert-plan o decl)))))
+      ((eq? (first p) (lit server)) (%server-plan o decl))
+      (#t (%scp-plan o decl)))))
 
-; dropbearconvert's line as what to do: (convert (convert IN-TYPE OUT-TYPE
-; IN-FILE OUT-FILE) 0), or what Dropbear says of a bad line, status 1.
-(def %convert-plan
+(def %value (fn (_ o flag) (if (Opts on? o flag) (Opts value o flag) ())))
+
+; The server's line: (server (serve CONFIG OPTIONS MODE) 0).  OPTIONS are
+; configuration lines, -q's and -d's log level, -o's, -h's host keys and
+; -p's ports, ahead of the file's; MODE is (FOREGROUND DEBUG STDERR
+; LOGFILE TEST PRINT).
+(def %server-plan
+  (fn (_ o decl)
+    (def debug (Opts on? o "-d"))
+    (if (not (null? (Opts operands o)))
+      (list (lit server) (Str8 append "Extra argument " (first (Opts operands o)) ".\n" (Opts usage decl)) 1)
+      (list (lit server)
+            (list (lit serve)
+                  (if (Opts on? o "-f") (Opts value o "-f") "/etc/ssh/sshd_config")
+                  (List append
+                    (if (Opts on? o "-q") (list "LogLevel QUIET") ())
+                    (if debug (list "LogLevel DEBUG1") ())
+                    (Opts values o "-o")
+                    (List map (fn (_ h) (Str8 append "HostKey \"" h "\"")) (Opts values o "-h"))
+                    (List map (fn (_ p) (Str8 append "Port " p)) (Opts values o "-p")))
+                  (list (if debug #t (Opts on? o "-D")) debug (if debug #t (Opts on? o "-e")) (%value o "-E")
+                        (Opts on? o "-t") (Opts on? o "-T")))
+            0))))
+
+; A destination, [user@]host or ssh://[user@]host[:port], as (USER HOST
+; PORT), the absent parts ().
+(def ssh-destination
+  (fn (_ d)
+    (def url (if (> (Str8 length d) 6) (str=? (Str8 sub 0 6 d) "ssh://") #f))
+    (def rest-of (fn (_ s i) (Str8 sub i (- (Str8 length s) i) s)))
+    (def s (if url (rest-of d 6) d))
+    (def at ((fn (self i) (if (< i 0) () (if (= (%byte-ref s i) #\@) i (self (- i 1))))) (- (Str8 length s) 1)))
+    (def user (if (null? at) () (Str8 sub 0 at s)))
+    (def hp (if (null? at) s (rest-of s (+ at 1))))
+    (def colon (if url (Str8 index-of ":" hp) ()))
+    (list user (if (null? colon) hp (Str8 sub 0 colon hp)) (if (null? colon) () (rest-of hp (+ colon 1))))))
+
+; The client's line: (client (exec HOST COMMAND OPTIONS CONFIG STDIO
+; PRINT) 0), OPTIONS the configuration lines its flags stand for, then
+; -o's, then the destination's user and port; COMMAND () for none; STDIO
+; -W's host:port or ().
+(def %client-plan
   (fn (_ o decl)
     (def ops (Opts operands o))
-    (def %type? (fn (_ t) (if (str=? t "openssh") #t (str=? t "dropbear"))))
-    (match
-      ((not (= (List length ops) 4))
-        (list (lit convert) (Str8 append "All arguments must be specified\n" (Opts usage decl)) 1))
-      ((not (%type? (first ops)))
-        (list (lit convert) (Str8 append "Invalid input key type\n" (Opts usage decl)) 1))
-      ((not (%type? (List ref 1 ops)))
-        (list (lit convert) (Str8 append "Invalid output key type\n" (Opts usage decl)) 1))
-      (#t (list (lit convert) (pair (lit convert) ops) 0)))))
+    (def q (fn (_ s) (Str8 append "\"" s "\"")))
+    (if (null? ops)
+      (list (lit client) (Opts usage decl) 255)
+      (do (def dest (ssh-destination (first ops)))
+          (list (lit client)
+                (list (lit exec) (List ref 1 dest)
+                      (if (null? (rest ops)) () (Str8 join " " (rest ops)))
+                      (List append
+                        (if (Opts on? o "-l") (list (Str8 append "User " (q (Opts value o "-l")))) ())
+                        (if (Opts on? o "-p") (list (Str8 append "Port " (Opts value o "-p"))) ())
+                        (List map (fn (_ i) (Str8 append "IdentityFile " (q i))) (Opts values o "-i"))
+                        (List map (fn (_ f) (Str8 append "LocalForward " f)) (Opts values o "-L"))
+                        (List map (fn (_ f) (Str8 append "RemoteForward " f)) (Opts values o "-R"))
+                        (if (Opts on? o "-g") (list "GatewayPorts yes") ())
+                        (if (Opts on? o "-N") (list "SessionType none") ())
+                        (if (Opts on? o "-n") (list "StdinNull yes") ())
+                        (if (Opts on? o "-T") (list "RequestTTY no") ())
+                        (if (Opts on? o "-x") (list "ForwardX11 no") ())
+                        (if (Opts on? o "-C") (list "Compression yes") ())
+                        (if (Opts on? o "-q") (list "LogLevel QUIET") ())
+                        (if (Opts on? o "-v") (list "LogLevel DEBUG1") ())
+                        (Opts values o "-o")
+                        (if (null? (first dest)) () (list (Str8 append "User " (q (first dest)))))
+                        (if (null? (List ref 2 dest)) () (list (Str8 append "Port " (List ref 2 dest)))))
+                      (%value o "-F")
+                      (%value o "-W")
+                      (Opts on? o "-G"))
+                0)))))
 
-; scp's line as what to do: (scp (to OPERANDS PRESERVE RECURSIVE) 0) or
-; (scp (from OPERANDS PRESERVE RECURSIVE) 0) for the remote ends, (scp
-; (copy OPERANDS PROGRAM PORT KEY PRESERVE RECURSIVE) 0) for a client, or
-; what it says and its status.
+; The key tool's line, as what to do: (keygen (ACTION ...) 0), the file
+; () when none is named, for the tool to ask.
+(def %keygen-plan
+  (fn (_ o decl)
+    (def file (%value o "-f"))
+    (def type (if (Opts on? o "-t") (Str8 downcase (Opts value o "-t")) "ed25519"))
+    (def plan (fn (_ what) (list (lit keygen) what 0)))
+    (match
+      ((Opts on? o "-A") (plan (list (lit hosts) file)))
+      ((Opts on? o "-R") (plan (list (lit remove) (Opts value o "-R") file)))
+      ((Opts on? o "-F") (plan (list (lit find) (Opts value o "-F") file)))
+      ((Opts on? o "-y") (plan (list (lit public) file (%value o "-P"))))
+      ((Opts on? o "-l") (plan (list (lit fingerprint) file (Opts on? o "-v"))))
+      ((Opts on? o "-p") (plan (list (lit passphrase) file (%value o "-P") (%value o "-N"))))
+      ((List any? (fn (_ t) (str=? t type)) (list "rsa" "dsa" "ecdsa" "ecdsa-sk" "ed25519-sk"))
+        (list (lit keygen) (Str8 append "x-ssh: key type " type " is not served yet\n") 1))
+      ((not (str=? type "ed25519")) (list (lit keygen) (Str8 append "unknown key type " type "\n") 1))
+      (#t (plan (list (lit generate) file (%value o "-C") (%value o "-N") (Opts on? o "-q")))))))
+
+; scp's line: (scp (to OPERANDS PRESERVE RECURSIVE) 0) or (scp (from
+; OPERANDS PRESERVE RECURSIVE) 0) for the remote ends, (scp (copy
+; OPERANDS PROGRAM ARGS PRESERVE RECURSIVE) 0) for a client, ARGS what
+; the ssh program is given before the host, or what it says and its
+; status.
 (def %scp-plan
   (fn (_ o decl)
     (def ops (Opts operands o))
@@ -154,134 +235,24 @@
     (match
       ((Opts on? o "-t") (list (lit scp) (list (lit to) ops preserve recursive) 0))
       ((Opts on? o "-f") (list (lit scp) (list (lit from) ops preserve recursive) 0))
+      ((Opts on? o "-s") (list (lit scp) "scp: the SFTP protocol is not served; the original one is, as under -O\n" 1))
       ((< (List length ops) 2) (list (lit scp) (Opts usage decl) 1))
       (#t (list (lit scp)
                 (list (lit copy) ops
                       (if (Opts on? o "-S") (Opts value o "-S") "ssh")
-                      (if (Opts on? o "-P") (Opts value o "-P") ())
-                      (if (Opts on? o "-i") (Opts value o "-i") ())
+                      (List append
+                        (list "-x" "-oPermitLocalCommand=no" "-oClearAllForwardings=yes" "-oRemoteCommand=none"
+                              "-oRequestTTY=no" "-oForwardAgent=no")
+                        (if (Opts on? o "-v") (list "-v") ())
+                        (if (Opts on? o "-F") (list "-F" (Opts value o "-F")) ())
+                        (List flat-map (fn (_ v) (list "-o" v)) (Opts values o "-o"))
+                        (if (Opts on? o "-P") (list "-p" (Opts value o "-P")) ())
+                        (if (Opts on? o "-i") (list "-i" (Opts value o "-i")) ()))
                       preserve recursive)
                 0)))))
 
-; The server's line as what to do: (server (serve KEYFILE ADDRESS PORT DIR
-; MAKE-KEY BACKGROUND PIDFILE) 0), the address () for every one, the key
-; and pidfile Dropbear's defaults unless given.
-(def %server-plan
-  (fn (_ o)
-    (def key (if (Opts on? o "-r") (Opts value o "-r") "/etc/dropbear/dropbear_ed25519_host_key"))
-    (def pidfile (if (Opts on? o "-P") (Opts value o "-P") "/var/run/dropbear.pid"))
-    (def p (if (Opts on? o "-p") (Opts value o "-p") "22"))
-    (def colon ((fn (self i) (if (< i 0) () (if (= ((prim-ref (lit str) (lit byte-ref)) p i) #\:) i (self (- i 1)))))
-                (- (Str8 length p) 1)))
-    (def addr (if (null? colon) () (Str8 sub 0 colon p)))
-    (def port (%int-or-nil (if (null? colon) p (Str8 sub (+ colon 1) (- (Str8 length p) colon 1) p))))
-    (def dir (if (Opts on? o "-D") (Opts value o "-D") (Str8 append (Sys getenv "HOME") "/.ssh")))
-    (match
-      ((null? port) (list (lit server) (Str8 append "Bad port '" p "'\n") 1))
-      (#t (list (lit server)
-                (list (lit serve) key addr port dir (Opts on? o "-R") (not (Opts on? o "-F")) pidfile (not (Opts on? o "-j")) (not (Opts on? o "-k")) (Opts on? o "-a") (%limits o)
-                      (not (Opts on? o "-s")) (not (Opts on? o "-E")))
-                0)))))
-
-; The key generator's line as what to do, in dropbearkey's order of
-; checks: (keygen (generate FILE COMMENT) 0) or (keygen (print FILE
-; COMMENT) 0), or what it says and its status.  The type defaults to
-; ed25519, as Dropbear's does.
-(def %keygen-plan
-  (fn (_ o decl)
-    (def file (if (Opts on? o "-f") (Opts value o "-f") ()))
-    (def type (if (Opts on? o "-t") (Opts value o "-t") "ed25519"))
-    (def comment (if (Opts on? o "-C") (Opts value o "-C") ()))
-    (def bits (if (Opts on? o "-s") (%int-or-nil (Opts value o "-s")) 256))
-    (match
-      ((null? file) (list (lit keygen) (Str8 append "Must specify a key filename\n" (Opts usage decl)) 1))
-      ((Opts on? o "-y") (list (lit keygen) (list (lit print) file comment) 0))
-      ((List any? (fn (_ t) (str=? t type)) (list "rsa" "dss" "ecdsa"))
-        (list (lit keygen) (Str8 append "x-ssh: key type '" type "' is not served yet\n") 1))
-      ((not (str=? type "ed25519"))
-        (list (lit keygen) (Str8 append "Unknown key type '" type "'\n" (Opts usage decl)) 1))
-      ((null? bits) (list (lit keygen) "Bits must be an integer\n" 1))
-      ((not (= bits 256)) (list (lit keygen) "Ed25519 keys have a fixed size of 256 bits\n" 1))
-      (#t (list (lit keygen) (list (lit generate) file comment) 0)))))
-
-; A decimal's value, or () when the text is not all digits.
-(def %int-or-nil
-  (fn (_ t)
-    (def n (Str8 length t))
-    (def digit?
-      (fn (_ i)
-        (def c ((prim-ref (lit str) (lit byte-ref)) t i))
-        (if (>= c #\0) (<= c #\9) #f)))
-    (if (if (> n 0) ((fn (self i) (if (= i n) #t (if (digit? i) (self (+ i 1)) #f))) 0) #f)
-      (%int t)
-      ())))
-
-; The client's line as what to do: (client (exec HOST PORT USER KEY COMMAND
-; TRACE ACCEPT) 0), the host operand's [user@]host[/port] split, -l and -p
-; winning over it, the command the operands after it joined by spaces.
-(def %client-plan
-  (fn (_ o)
-    (def target (first (Opts operands o)))
-    (def at (Str8 index-of "@" target))
-    (def host-port (if (null? at) target (Str8 sub (+ at 1) (- (Str8 length target) at 1) target)))
-    (def slash (Str8 index-of "/" host-port))
-    (def host (if (null? slash) host-port (Str8 sub 0 slash host-port)))
-    (def port-text (if (null? slash) () (Str8 sub (+ slash 1) (- (Str8 length host-port) slash 1) host-port)))
-    (def user (match ((Opts on? o "-l") (Opts value o "-l"))
-                     ((null? at) (Sys getenv "USER"))
-                     (#t (Str8 sub 0 at target))))
-    (def port (match ((Opts on? o "-p") (%int (Opts value o "-p")))
-                     ((null? port-text) 22)
-                     (#t (%int port-text))))
-    (def key (if (Opts on? o "-i") (Opts value o "-i") ()))
-    (def command (Str8 join " " (rest (Opts operands o))))
-    (def forwards (List map (fn (_ s) (%forward-spec s (Opts on? o "-g"))) (Opts values o "-L")))
-    (def remotes (List map (fn (_ s) (%forward-spec s (Opts on? o "-g"))) (Opts values o "-R")))
-    (def bad (List find (fn (_ f) (null? (rest f))) (List append forwards remotes)))
-    (def netcat (if (Opts on? o "-B") (%endpoint (Opts value o "-B")) #f))
-    (match
-      ((not (null? bad)) (list (lit client) (Str8 append "Bad TCP forward '" (first bad) "'\n") 1))
-      ((null? netcat) (list (lit client) (Str8 append "Bad -B endpoint '" (Opts value o "-B") "'\n") 1))
-      ((if (if (Opts on? o "-N") #t netcat) #f (= (Str8 length command) 0))
-        (list (lit client) "x-ssh: a command is required; no shell yet\n" 1))
-      (#t (list (lit client)
-                (list (lit exec) host port user key (if (if (Opts on? o "-N") #t netcat) () command)
-                      (Opts on? o "-v") (Opts on? o "-y") (List map rest forwards) (List map rest remotes)
-                      (if netcat netcat ()) (%limits o))
-                0)))))
-
-; -K and -I as (KEEPALIVE . IDLE) seconds, 0 for never or when not given.
-(def %limits
-  (fn (_ o)
-    (def %secs (fn (_ flag) (if (Opts on? o flag) ((fn (_ n) (if (null? n) 0 n)) (%int-or-nil (Opts value o flag))) 0)))
-    (pair (%secs "-K") (%secs "-I"))))
-
-; A -B endpoint host:port as (HOST . PORT), or () for a bad one; #f for none.
-(def %endpoint
-  (fn (_ s)
-    (def colon (Str8 index-of ":" s))
-    (def port (if (null? colon) () (%int-or-nil (Str8 sub (+ colon 1) (- (Str8 length s) colon 1) s))))
-    (if (if (null? colon) #t (if (null? port) #t (= colon 0))) () (pair (Str8 sub 0 colon s) port))))
-
-; A -L spec as (SPEC . (ADDRESS PORT HOST PORT)), Dropbear's shape:
-; [listenaddress:]listenport:remotehost:remoteport, the address
-; "localhost" unless given, or () for every interface under -g; a bad
-; one as (SPEC).
-(def %forward-spec
-  (fn (_ s any)
-    (def parts (Str8 split ":" s))
-    (def n (List length parts))
-    (def listen (if (= n 4) (first parts) (if any () "localhost")))
-    (def lport (if (if (= n 3) #t (= n 4)) (%int-or-nil (List ref (- n 3) parts)) ()))
-    (def rport (if (if (= n 3) #t (= n 4)) (%int-or-nil (List ref (- n 1) parts)) ()))
-    (if (if (null? lport) #t (null? rport))
-      (list s)
-      (list s listen lport (List ref (- n 2) parts) rport))))
-
-(def %int (fn (_ t) ((prim-ref (lit convert) (lit to)) t (Type named INTEGER) 10)))
-
 ; A plan done: text to standard error and the status, or what it names
-; run -- the client's exec, or the key generator's generate or print.
+; run.
 (def ssh-main
   (fn (_ ops)
     (def plan (ssh-plan ops))
@@ -289,24 +260,13 @@
     (if (pair? what)
       (Sys exit
         (match
-          ((eq? (first what) (lit exec))
-            (ssh-client-run (List ref 1 what) (List ref 2 what) (List ref 3 what) (List ref 4 what)
-                            (List ref 5 what) (List ref 6 what) (List ref 7 what) (List ref 8 what) (List ref 9 what) (List ref 10 what)
-                            (List ref 11 what)))
-          ((eq? (first what) (lit generate)) (ssh-keygen-generate (List ref 1 what) (List ref 2 what)))
+          ((eq? (first plan) (lit client)) (ssh-client-main (rest what)))
+          ((eq? (first plan) (lit server)) (ssh-server-main (rest what)))
+          ((eq? (first plan) (lit keygen)) (ssh-keygen-main what))
           ((eq? (first what) (lit to)) (ssh-scp-remote #t (List ref 1 what) (List ref 2 what) (List ref 3 what)))
           ((eq? (first what) (lit from)) (ssh-scp-remote #f (List ref 1 what) (List ref 2 what) (List ref 3 what)))
-          ((eq? (first what) (lit copy))
-            (ssh-scp-client (List ref 1 what) (List ref 2 what) (List ref 3 what) (List ref 4 what)
-                            (List ref 5 what) (List ref 6 what)))
-          ((eq? (first what) (lit serve))
-            (ssh-serve (List ref 1 what) (List ref 2 what) (List ref 3 what) (List ref 4 what)
-                       (List ref 5 what) (List ref 6 what) (List ref 7 what) (List ref 8 what) (List ref 9 what) (List ref 10 what)
-                       (List ref 11 what) (List ref 12 what) (List ref 13 what)))
-          ((eq? (first what) (lit convert))
-            (ssh-convert (List ref 1 what) (List ref 2 what) (List ref 3 what) (List ref 4 what)))
-          (#t (ssh-keygen-print (List ref 1 what) (List ref 2 what)))))
+          (#t (ssh-scp-client (List ref 1 what) (List ref 2 what) (List ref 3 what) (List ref 4 what) (List ref 5 what)))))
       (do (File write 2 what (%byte-len what))
           (Sys exit (first (rest (rest plan))))))))
 
-(provide ssh/cli ssh-programs ssh-program ssh-plan ssh-main)
+(provide ssh/cli ssh-programs ssh-program ssh-plan ssh-main ssh-destination)

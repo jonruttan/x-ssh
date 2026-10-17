@@ -1,4 +1,4 @@
-; # x-ssh -- SSH on x-lang, after Dropbear
+; # x-ssh -- SSH on x-lang
 ;
 ; ## tests/harness.x -- what the spec harness adds to the dialect
 ;

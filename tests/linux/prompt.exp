@@ -1,16 +1,25 @@
 #!/usr/bin/expect -f
-# prompt.exp PORT -- x-ssh's client asking for a password at the terminal:
-# a wrong one, asked again, then the right one; neither echoed; the
-# command's output and exit status.
+# prompt.exp PORT -- x-ssh's client at the terminal: a new host asked
+# about and trusted; a wrong password, asked again, then the right one;
+# neither echoed; the command's output and exit status.
 set port [lindex $argv 0]
 set timeout 120
 log_user 0
-spawn env HOME=/tmp/prompt-home $env(X) -l ssh -- dbclient -y -p $port -l root 127.0.0.1 "echo typed-ok; exit 5"
+spawn env HOME=/tmp/prompt-home $env(X) -l ssh -- ssh -F none -p $port -l root 127.0.0.1 "echo typed-ok; exit 5"
+expect {
+	-ex {Are you sure you want to continue connecting (yes/no/[fingerprint])? } {}
+	timeout { puts "FAIL: no question about the new host"; exit 1 }
+}
+send "yes\r"
 expect {
 	"root@127.0.0.1's password: " {}
 	timeout { puts "FAIL: no first prompt"; exit 1 }
 }
 send "px\r"
+expect {
+	"Permission denied, please try again." {}
+	timeout { puts "FAIL: no word of the wrong password"; exit 1 }
+}
 expect {
 	"root@127.0.0.1's password: " {}
 	timeout { puts "FAIL: no second prompt after a wrong password"; exit 1 }

@@ -1,4 +1,4 @@
-; # x-ssh -- SSH on x-lang, after Dropbear
+; # x-ssh -- SSH on x-lang
 ;
 ; ## ssh/bytes.x -- the wire's encodings
 ;

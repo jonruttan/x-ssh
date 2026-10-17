@@ -1,4 +1,4 @@
-; # x-ssh -- SSH on x-lang, after Dropbear
+; # x-ssh -- SSH on x-lang
 ;
 ; ## ssh/keys.x -- key files
 ;
@@ -43,26 +43,30 @@
       (List filter (fn (_ l) (if (= (Str8 length l) 0) #f (not (str=? (Str8 sub 0 1 l) "-"))))
         (Str8 split "\n" text)))))
 
-; The 32-byte seed of an unencrypted ssh-ed25519 key file's text.
-(def ssh-seed-of-key-text
+; An unencrypted ssh-ed25519 key file's text as (SEED . COMMENT), the
+; seed 32 bytes.
+(def %openssh-key
   (fn (_ text)
     (def raw (%bytes->str (Base64 decode-bytes (%body text))))
     (def in (ssh-in (first raw) 15 (- (rest raw) 15)))
     (def cipher (ssh-get-text in))
-    (unless (str=? cipher "none") (Err raise 'value "ssh: the key is encrypted, and a passphrase is not served yet" ()))
+    (unless (str=? cipher "none") (Err raise 'value "the key is encrypted, and a passphrase is not served yet" ()))
     (ssh-get-text in)
     (ssh-get-text in)
     (def nkeys (ssh-get-uint32 in))
-    (unless (= nkeys 1) (Err raise 'value "ssh: a key file with other than one key" ()))
+    (unless (= nkeys 1) (Err raise 'value "a key file with other than one key" ()))
     (ssh-get-string in)
     ; the private section, read in place: past its two check ints
     (def pr (ssh-get-string in))
     (def pin (ssh-in (first raw) (+ (first pr) 8) (- (rest pr) 8)))
     (def ktype (ssh-get-text pin))
-    (unless (str=? ktype "ssh-ed25519") (Err raise 'value (Str8 append "ssh: a key of a type not served: " ktype) ()))
+    (unless (str=? ktype "ssh-ed25519") (Err raise 'value (Str8 append "a key of a type not served: " ktype) ()))
     (ssh-get-string pin)
     (def sk (ssh-get-string pin))
-    (ssh-copy (first raw) (first sk) 32)))
+    (pair (ssh-copy (first raw) (first sk) 32) (ssh-get-text pin))))
+
+; The 32-byte seed of an unencrypted ssh-ed25519 key file's text.
+(def ssh-seed-of-key-text (fn (_ text) (first (%openssh-key text))))
 
 ; A key file's bytes, NULs and all: (BUF . LEN).  A key file is small;
 ; one read of a buffer past any key's size takes it whole.
@@ -107,4 +111,26 @@
           (pair seed (Ed25519 public seed)))
       (ssh-key-of-dropbear-bytes (first r) (rest r)))))
 
-(provide ssh/keys ssh-seed-of-key-text ssh-seed-of-key-file ssh-key-of-dropbear-bytes ssh-key-of-file)
+; A key file's comment: OpenSSH's file keeps one; Dropbear's has none, "".
+(def ssh-key-comment-of-file
+  (fn (_ path)
+    (def r (%file-bytes path))
+    (if (if (>= (rest r) 5) (str=? (Str8 sub 0 5 (first r)) "-----") #f)
+      (rest (%openssh-key (ssh-copy (first r) 0 (rest r))))
+      "")))
+
+; A public line, `ssh-ed25519 BASE64 [COMMENT]`, as (PUB . COMMENT).
+(def ssh-key-of-public-line
+  (fn (_ line)
+    (def ws (List filter (fn (_ w) (> (Str8 length w) 0)) (Str8 split " " line)))
+    (unless (if (> (List length ws) 1) (str=? (first ws) "ssh-ed25519") #f)
+      (Err raise 'value "not an ssh-ed25519 public line" ()))
+    (def raw (%bytes->str (Base64 decode-bytes (List ref 1 ws))))
+    (def in (ssh-in (first raw) 0 (rest raw)))
+    (unless (str=? (ssh-get-text in) "ssh-ed25519") (Err raise 'value "not an ssh-ed25519 public line" ()))
+    (def k (ssh-get-string in))
+    (unless (= (rest k) 32) (Err raise 'value "an ssh-ed25519 key that is not 32 bytes" ()))
+    (pair (ssh-copy (first raw) (first k) 32) (Str8 join " " (List drop 2 ws)))))
+
+(provide ssh/keys ssh-seed-of-key-text ssh-seed-of-key-file ssh-key-of-dropbear-bytes ssh-key-of-file
+  ssh-key-comment-of-file ssh-key-of-public-line)

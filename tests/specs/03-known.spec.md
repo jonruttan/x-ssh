@@ -1,10 +1,10 @@
 # known_hosts
 # @weight 2
 
-What ssh/known writes and matches: a host's name as OpenSSH and
-Dropbear's client spell it, and an Ed25519 key's blob in base64 as
-`dropbearkey` writes it in a `.pub` file.  Reading and recording the
-file are proven live, by tests/oracle/dropbear.sh.
+What ssh/known writes and matches: a host's name as OpenSSH spells it,
+and an Ed25519 key's blob in base64 as a `.pub` line holds it.  Reading
+and recording the files, and ssh-keygen -F and -R over them, are proven
+live, by tests/oracle/client.sh.
 
 ## names
 
@@ -19,9 +19,9 @@ file are proven live, by tests/oracle/dropbear.sh.
 
 ## keys
 
-### a key's blob is what dropbearkey writes for it
+### a key's blob is what its .pub line holds
 
-The 32 bytes are those of a key whose `.pub` line Dropbear wrote as
+The 32 bytes are those of a key whose `.pub` line is
 `ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJMxrJbFYrb2hCCDvzVNWbN1TdsP/SQyU80/bLdTv9Oe`.
 
 ```ssh
@@ -31,3 +31,13 @@ The 32 bytes are those of a key whose `.pub` line Dropbear wrote as
 ```
 ---
     "AAAAC3NzaC1lZDI1NTE5AAAAIJMxrJbFYrb2hCCDvzVNWbN1TdsP/SQyU80/bLdTv9Oe"
+
+### an entry names a host among its comma list; comments and markers do not
+
+```ssh
+(def %kn-entry (eval (lit %entry) (module ssh/known)))
+(write (list (%kn-entry "a,[h]:2222 ssh-ed25519 AAAA" "[h]:2222") (%kn-entry "# h ssh-ed25519 AAAA" "h")
+             (%kn-entry "@revoked h ssh-ed25519 AAAA" "h") (%kn-entry "other ssh-ed25519 AAAA" "h")))
+```
+---
+    (("ssh-ed25519" "AAAA") () () ())

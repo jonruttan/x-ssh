@@ -1,9 +1,9 @@
-; # x-ssh -- SSH on x-lang, after Dropbear
+; # x-ssh -- SSH on x-lang
 ;
 ; ## run.x -- the entry
 ;
 ; @description SSH: `x -l ssh -- PROGRAM [ARGS]` runs the client, the
-;   server or a key tool, as Dropbear's multi-purpose binary does.
+;   server, the key tool or scp, by OpenSSH's names.
 ; @author [Jon Ruttan](jonruttan@gmail.com)
 ; @copyright 2026 Jon Ruttan
 ; @license MIT No Attribution (MIT-0)

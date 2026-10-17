@@ -1,0 +1,70 @@
+# ssh, the client's settings
+# @weight 1
+
+The client's settings, from configuration lines as OpenSSH reads them:
+what `ssh -G` prints.  Connecting under them -- the host key policy,
+each identity, passwords from the terminal or SSH_ASKPASS, forwards, the
+clocks and the environment sent -- is proven live by
+tests/oracle/client.sh and tests/oracle/server.sh.
+
+## settings
+
+### OpenSSH's defaults, for a host and a local user
+
+```ssh
+(import ssh/client ssh-client-settings)
+(def %cs (ssh-client-settings () "example.org" "jon"))
+(def %cg (fn (_ k) (rest (List find (fn (_ p) (eq? (first p) k)) %cs))))
+(write (List map %cg (list (lit hostname) (lit port) (lit user) (lit strict) (lit batch) (lit password) (lit prompts)
+                           (lit limits) (lit forwards) (lit level) (lit session) (lit command))))
+```
+---
+    ("example.org" 22 "jon" "ask" #f #t 3 (0 3 0) () "info" "default" ())
+
+### Hostname's %h, the first value holding, and forwards in either shape
+
+```ssh
+(import ssh/client ssh-client-settings)
+(import ssh/config ssh-config-options ssh-config-read)
+(def %cs (ssh-client-settings
+  (List append (ssh-config-options (list "LocalForward 8080:web:80" "Port 2200"))
+               (ssh-config-read "Host gw\n  Hostname %h.example.org\n  Port 22\n  LocalForward *:9000 db:5432\n  RemoteForward 7000 localhost:22\n  ServerAliveInterval 1m\n  StrictHostKeyChecking accept-new\n" "c" "gw" "jon" "jon" ""))
+  "gw" "jon"))
+(def %cg (fn (_ k) (rest (List find (fn (_ p) (eq? (first p) k)) %cs))))
+(write (List map %cg (list (lit hostname) (lit port) (lit forwards) (lit remotes) (lit limits) (lit strict))))
+```
+---
+    ("gw.example.org" 2200 (("localhost" 8080 "web" 80) (() 9000 "db" 5432)) (("localhost" 7000 "localhost" 22)) (60 3 0) "accept-new")
+
+### ClearAllForwardings clears them; GatewayPorts binds every interface
+
+```ssh
+(import ssh/client ssh-client-settings)
+(import ssh/config ssh-config-options)
+(def %cf (fn (_ opts) (rest (List find (fn (_ p) (eq? (first p) (lit forwards))) (ssh-client-settings (ssh-config-options opts) "h" "u")))))
+(write (list (%cf (list "ClearAllForwardings yes" "LocalForward 1:h:1")) (%cf (list "GatewayPorts yes" "LocalForward 1:h:1"))))
+```
+---
+    (() ((() 1 "h" 1)))
+
+### a value OpenSSH refuses is refused in its words
+
+```ssh
+(import ssh/client ssh-client-settings)
+(import ssh/config ssh-config-options)
+(write (List map (fn (_ o) (guard (e (e msg)) (ssh-client-settings (ssh-config-options (list o)) "h" "u")))
+  (list "Port 0" "StrictHostKeyChecking maybe" "LocalForward 2222:h" "SessionType subsystem")))
+```
+---
+    ("command-line: line 1: Badly formatted port number." "command-line: line 1: unsupported option \"maybe\"." "command-line: line 1: Bad local forwarding specification '2222:h'" "command-line: line 1: SessionType subsystem is not served")
+
+### identity files: the ones named, or ~/.ssh/id_ed25519 when none is; tokens expanded
+
+```ssh
+(import ssh/client ssh-client-settings)
+(import ssh/config ssh-config-options)
+(def %ci (fn (_ opts) (rest (List find (fn (_ p) (eq? (first p) (lit identities))) (ssh-client-settings (ssh-config-options opts) "h" "u")))))
+(write (list (%ci (list "IdentityFile /k/%r@%h" "User git")) (rest (first (%ci ())))))
+```
+---
+    ((("/k/git@h" . #t)) #f)

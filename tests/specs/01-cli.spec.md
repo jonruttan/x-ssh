@@ -1,20 +1,20 @@
 # @weight 1
 
-The command line.  As Dropbear's multi-purpose binary, the first operand
-names the program.  Each program's options are one declaration: what
---help prints and what its line is parsed against.  ssh-plan turns a line
-into (PROGRAM TEXT STATUS) without doing it.
+The command line.  The first operand names the program, by OpenSSH's
+name.  Each program's options are one declaration: what --help prints
+and what its line is parsed against.  ssh-plan turns a line into
+(PROGRAM WHAT STATUS) without doing it.
 
 ## programs
 
-### Dropbear's names, and their aliases
+### OpenSSH's names
 
 ```ssh
 (write (List map (fn (_ n) (if (null? (ssh-program n)) () (first (ssh-program n))))
-  (list "dropbear" "dbclient" "ssh" "dropbearkey" "ssh-keygen" "dropbearconvert" "scp" "sshd")))
+  (list "sshd" "ssh" "ssh-keygen" "scp" "dropbear" "dbclient")))
 ```
 ---
-    ('server 'client 'client 'keygen 'keygen 'convert 'scp ())
+    ('server 'client 'keygen 'scp () ())
 
 ### no program lists the programs, status 1
 
@@ -23,19 +23,18 @@ into (PROGRAM TEXT STATUS) without doing it.
 ```
 ---
 ```output
-x-ssh multi-purpose v0.1.0
-Run 'x -l ssh -- <command>' with one of the following commands.
-'dropbear' - the server
-'dbclient' or 'ssh' - the client
-'dropbearkey' or 'ssh-keygen' - the key generator
-'dropbearconvert' - the key converter
+x-ssh v0.1.0
+Run 'x -l ssh -- <program>' with one of these programs:
+'sshd' - the server
+'ssh' - the client
+'ssh-keygen' - the key tool
 'scp' - secure copy
 ```
 
 ### an unknown program lists them too
 
 ```ssh
-(write (List map (fn (_ l) (first (rest (rest (ssh-plan l))))) (list () (list "sshd"))))
+(write (List map (fn (_ l) (first (rest (rest (ssh-plan l))))) (list () (list "dropbear"))))
 ```
 ---
     (1 1)
@@ -45,41 +44,16 @@ Run 'x -l ssh -- <command>' with one of the following commands.
 ### --help prints the program's declaration, status 0
 
 ```ssh
-(display (first (rest (ssh-plan (list "dbclient" "--help")))))
+(def %hp (ssh-plan (list "ssh" "--help")))
+(write (list (first (Str8 split "\n" (first (rest %hp)))) (first (rest (rest %hp)))))
 ```
 ---
-```output
-Usage: dbclient [options] [user@]host[/port] [command]
-
-	-p port		Remote port
-	-i keyfile	The ssh-ed25519 key to authenticate with (OpenSSH format)
-	-l user		The user to log in as
-	-y		Accept and record the key of a host not in known_hosts
-	-L forward	Local port forwarding: [listenaddress:]listenport:remotehost:remoteport
-	-R forward	Remote port forwarding: [listenaddress:]listenport:remotehost:remoteport
-	-B endpoint	Netcat-alike forwarding to endhost:endport
-	-K secs		Seconds without traffic before a keepalive is asked; 0 is never, the default
-	-I secs		Seconds without data before the connection closes; 0 is never, the default
-	-N		Don't run a remote command
-	-g		Allow remote hosts to connect to forwarded ports
-	-v		Trace the connection on standard error
-	-V		Print the version
-```
-
-### -L forwards ride in the plan, -N drops the command; a bad forward is refused, status 1
-
-```ssh
-(write (list (first (rest (ssh-plan (list "dbclient" "-i" "k" "-N" "-L" "2222:h:22" "-L" "127.0.0.1:3333:h:80" "me@host"))))
-             (List ref 8 (first (rest (ssh-plan (list "dbclient" "-i" "k" "-g" "-L" "2222:h:22" "me@host" "true")))))
-             (List take 2 (ssh-plan (list "dbclient" "-i" "k" "-L" "2222:h" "host" "true")))))
-```
----
-    (('exec "host" 22 "me" "k" () #f #f (("localhost" 2222 "h" 22) ("127.0.0.1" 3333 "h" 80)) () () (0 . 0)) ((() 2222 "h" 22)) ('client "Bad TCP forward '2222:h'\n"))
+    ("Usage: ssh [options] destination [command]" 0)
 
 ### -V names the version, status 0
 
 ```ssh
-(write (ssh-plan (list "dbclient" "-V")))
+(write (ssh-plan (list "ssh" "-V")))
 ```
 ---
     ('client "x-ssh v0.1.0\n" 0)
@@ -87,65 +61,84 @@ Usage: dbclient [options] [user@]host[/port] [command]
 ### an option the program does not declare is refused, status 1
 
 ```ssh
-(def %sp (ssh-plan (list "dropbear" "-Q")))
+(def %sp (ssh-plan (list "sshd" "-Q")))
 (write (list (first %sp) (Str8 sub 0 17 (first (rest %sp))) (first (rest (rest %sp)))))
 ```
 ---
     ('server "Invalid option -Q" 1)
 
-### scp's line plans a copy: the operands, the ssh program, its port and key
+## the client
+
+### its flags become the configuration lines they stand for, then -o's, then the destination's
 
 ```ssh
-(write (ssh-plan (list "scp" "-p" "-P" "2222" "-i" "k" "a" "b" "h:dir")))
+(write (first (rest (ssh-plan (list "ssh" "-p" "2222" "-i" "k" "-l" "me" "-N" "-g" "-L" "8080:h:80" "-R" "9:h:9"
+                                    "-o" "ServerAliveInterval=5" "-v" "you@host")))))
 ```
 ---
-    ('scp ('copy ("a" "b" "h:dir") "ssh" "2222" "k" #t #f) 0)
+    ('exec "host" () ("User \"me\"" "Port 2222" "IdentityFile \"k\"" "LocalForward 8080:h:80" "RemoteForward 9:h:9" "GatewayPorts yes" "SessionType none" "LogLevel DEBUG1" "ServerAliveInterval=5" "User \"you\"") () () #f)
 
-### -t and -f are the remote ends; -r rides along to either
+### the command is the operands after the destination, joined
 
 ```ssh
-(write (List map (fn (_ l) (first (rest (ssh-plan l))))
-  (list (list "scp" "-t" "dir") (list "scp" "-rf" "a" "b") (list "scp" "-r" "d" "h:e"))))
+(write (List take 2 (rest (first (rest (ssh-plan (list "ssh" "host" "echo" "hi" "there")))))))
 ```
 ---
-    (('to ("dir") #f #f) ('from ("a" "b") #f #t) ('copy ("d" "h:e") "ssh" () () #f #t))
+    ("host" "echo hi there")
 
-### dropbearconvert's line plans a conversion; a bad type says so, status 1
+### an ssh:// destination carries its user and port; -W, -F and -G ride along
 
 ```ssh
-(write (list (ssh-plan (list "dropbearconvert" "openssh" "dropbear" "a" "b"))
-             (List take 2 (ssh-plan (list "dropbearconvert" "openssh" "pem" "a" "b")))
-             (first (rest (rest (ssh-plan (list "dropbearconvert" "openssh" "dropbear" "a")))))))
+(write (first (rest (ssh-plan (list "ssh" "-F" "none" "-W" "git.example:9418" "-G" "ssh://git@example.org:2200")))))
 ```
 ---
-    (('convert ('convert "openssh" "dropbear" "a" "b") 0) ('convert "Invalid output key type\nUsage: dropbearconvert <inputtype> <outputtype> <inputfile> <outputfile>\n") 1)
+    ('exec "example.org" () ("User \"git\"" "Port 2200") "none" "git.example:9418" #t)
 
-### -R forwards ride in the plan after the -L ones, with the same shape
+### no destination is the usage, status 255
 
 ```ssh
-(write (List ref 9 (first (rest (ssh-plan (list "dbclient" "-i" "k" "-N" "-R" "8080:localhost:80" "-R" "0.0.0.0:2222:h:22" "me@host"))))))
+(write (first (rest (rest (ssh-plan (list "ssh" "-v"))))))
 ```
 ---
-    (("localhost" 8080 "localhost" 80) ("0.0.0.0" 2222 "h" 22))
+    255
 
-### -B plans a netcat channel in a command's place; a bad endpoint is refused, status 1
+## the server
+
+### its flags become configuration lines ahead of the file's; -d is debug, foreground and standard error
 
 ```ssh
-(write (list (List ref 5 (first (rest (ssh-plan (list "dbclient" "-i" "k" "-B" "git.example:9418" "me@host" "ignored")))))
-             (List ref 10 (first (rest (ssh-plan (list "dbclient" "-i" "k" "-B" "git.example:9418" "me@host")))))
-             (List take 2 (ssh-plan (list "dbclient" "-i" "k" "-B" "nowhere" "host")))))
+(write (first (rest (ssh-plan (list "sshd" "-d" "-f" "/dev/null" "-h" "hk" "-p" "2222" "-o" "PermitRootLogin=yes")))))
 ```
 ---
-    (() ("git.example" . 9418) ('client "Bad -B endpoint 'nowhere'\n"))
+    ('serve "/dev/null" ("LogLevel DEBUG1" "PermitRootLogin=yes" "HostKey \"hk\"" "Port 2222") (#t #t #t () #f #f))
 
-### -K and -I ride as seconds, 0 for never
+### the defaults: /etc/ssh/sshd_config, detached, syslog; -D -e -E -t -T
 
 ```ssh
-(write (list (List ref 11 (first (rest (ssh-plan (list "dbclient" "-i" "k" "-K" "30" "-I" "600" "me@host" "true")))))
-             (List ref 11 (first (rest (ssh-plan (list "dbclient" "-i" "k" "me@host" "true")))))))
+(write (list (first (rest (ssh-plan (list "sshd"))))
+             (List ref 3 (first (rest (ssh-plan (list "sshd" "-D" "-e" "-E" "log" "-t" "-T")))))))
 ```
 ---
-    ((30 . 600) (0 . 0))
+    (('serve "/etc/ssh/sshd_config" () (#f #f #f () #f #f)) (#t #f #t "log" #t #t))
+
+## scp
+
+### a copy: the operands, the ssh program, and what it is given, OpenSSH's set first
+
+```ssh
+(write (ssh-plan (list "scp" "-p" "-P" "2222" "-i" "k" "-o" "BatchMode=yes" "a" "b" "h:dir")))
+```
+---
+    ('scp ('copy ("a" "b" "h:dir") "ssh" ("-x" "-oPermitLocalCommand=no" "-oClearAllForwardings=yes" "-oRemoteCommand=none" "-oRequestTTY=no" "-oForwardAgent=no" "-o" "BatchMode=yes" "-p" "2222" "-i" "k") #t #f) 0)
+
+### -t and -f are the remote ends; -r rides along to either; -s is refused
+
+```ssh
+(write (list (first (rest (ssh-plan (list "scp" "-t" "dir")))) (first (rest (ssh-plan (list "scp" "-rf" "a" "b"))))
+             (first (rest (rest (ssh-plan (list "scp" "-s" "a" "h:b")))))))
+```
+---
+    (('to ("dir") #f #f) ('from ("a" "b") #f #t) 1)
 
 ## main
 
@@ -159,4 +152,3 @@ reaches for, from inside the module, as main sees them.
 ```
 ---
     (#t #t)
-

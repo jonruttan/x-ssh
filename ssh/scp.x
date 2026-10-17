@@ -1,4 +1,4 @@
-; # x-ssh -- SSH on x-lang, after Dropbear
+; # x-ssh -- SSH on x-lang
 ;
 ; ## ssh/scp.x -- scp: files copied over the ssh program's pipes
 ;
@@ -6,8 +6,8 @@
 ; @copyright 2026 Jon Ruttan
 ; @license MIT No Attribution (MIT-0)
 ;
-; Dropbear's scp is OpenSSH's classic one, and so is this: the client
-; runs `PROGRAM [-p PORT] [-i KEY] [-l USER] HOST "scp -t PATH"` (or -f to
+; OpenSSH's classic scp, the protocol `scp -O` speaks: the client
+; runs `PROGRAM [OPTIONS] [-l USER] -- HOST "scp -t PATH"` (or -f to
 ; fetch), PROGRAM the ssh client (-S, default ssh), and speaks the scp
 ; protocol over its pipes with the scp at the far end.  The protocol, a
 ; file at a time: the sink says it is ready with a zero byte; the source
@@ -18,7 +18,7 @@
 ; under -p, acknowledged, and set on what follows it once that is
 ; written.  Under -r a directory is `D<mode> 0 <name>\n`, its entries,
 ; then `E\n`, each acknowledged; without -r a directory is refused at
-; either end, as Dropbear refuses it.
+; either end, as OpenSSH's refuses it.
 ;
 ; As the remote end (-t, -f) the protocol is on this process's standard
 ; input, which the platform keeps on fd 3, and its standard output.
@@ -315,16 +315,15 @@
     (list pid (rest a) (first b))))
 
 (def %program-argv
-  (fn (_ program port key user host command)
+  (fn (_ program args user host command)
     (List append (list program)
-      (if (null? port) () (list "-p" port))
-      (if (null? key) () (list "-i" key))
+      args
       (if (null? user) () (list "-l" user))
-      (list host command))))
+      (list "--" host command))))
 
 ; The copy a client line asks for; answers the exit status.
 (def ssh-scp-client
-  (fn (_ operands program port key preserve recursive)
+  (fn (_ operands program args preserve recursive)
     (def target (List ref (- (List length operands) 1) operands))
     (def sources (List take (- (List length operands) 1) operands))
     (def t (%remote target))
@@ -333,7 +332,7 @@
       ((not (null? t))
         (if (List any? (fn (_ s) (not (null? (%remote s)))) sources)
           (do (%say "scp: copies between two remote hosts are not served yet\n") 1)
-          (do (def kid (%spawn (%program-argv program port key (first t) (List ref 1 t)
+          (do (def kid (%spawn (%program-argv program args (first t) (List ref 1 t)
                                 (Str8 append "scp" flags " -t " (%quote (List ref 2 t))))))
               (def errs (guard (e 1)
                           (if (%response (List ref 2 kid)) (%source (List ref 2 kid) (List ref 1 kid) sources preserve recursive) 1)))
@@ -346,7 +345,7 @@
         (do (def s (%remote (first sources)))
             (if (null? s)
               (do (%say "scp: a local copy is cp's\n") 1)
-              (do (def kid (%spawn (%program-argv program port key (first s) (List ref 1 s)
+              (do (def kid (%spawn (%program-argv program args (first s) (List ref 1 s)
                                     (Str8 append "scp" flags " -f " (%quote (List ref 2 s))))))
                   (def errs (guard (e 1) (%sink (List ref 2 kid) (List ref 1 kid) target recursive)))
                   (Sys close (List ref 1 kid)) (Sys close (List ref 2 kid))

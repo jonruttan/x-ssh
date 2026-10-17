@@ -1,22 +1,22 @@
 # x-ssh
 
-SSH on x-lang, after Dropbear, as a lang bundle: the client, the server
-and the key tools.
+SSH on x-lang, as a lang bundle: OpenSSH's client, server and key tool,
+and scp.
 
     x -l ssh -- PROGRAM [ARGS]
 
-As Dropbear's multi-purpose binary, the first operand names the program:
+The first operand names the program, by OpenSSH's name:
 
-    dropbear                    the server
-    dbclient, ssh               the client
-    dropbearkey, ssh-keygen     the key generator
-    dropbearconvert             the key converter
-    scp                         secure copy
+    sshd          the server
+    ssh           the client
+    ssh-keygen    the key tool
+    scp           secure copy
 
-The reference is Dropbear itself: its client and server are what this
-bundle's are tested against.  The ciphers, digests and key exchange are
-x-lang codecs, written in x and compiled, so the bundle runs where nothing
-but the kernel and x are installed (x-os).
+Each takes OpenSSH's options and reads OpenSSH's configuration files.
+The ciphers, digests and key exchange are x-lang codecs, written in x
+and compiled, so the bundle runs where nothing but the kernel and x are
+installed (x-os).  OpenSSH's and Dropbear's clients and servers are what
+it is tested against.
 
 ## Served
 
@@ -24,56 +24,64 @@ Every end speaks curve25519-sha256, ssh-ed25519 and
 chacha20-poly1305@openssh.com, with publickey and password authentication
 and one command a connection.
 
-- `dbclient`: a command run on a host, its output and exit status, with
-  the client's standard input carried to it.  `-i` names an OpenSSH or
-  Dropbear ssh-ed25519 key, tried first; then a password, from
-  `DROPBEAR_PASSWORD` as Dropbear's client takes it, or asked for at the
-  terminal with echo off, three times.  `-l`
-  the user, `-p` the port; hosts are
-  checked against `~/.ssh/known_hosts`, `-y` accepting and recording a
-  new one.  `-L [address:]port:host:port` carries each connection to a
-  local port through the server to `host:port`; `-R` the same shape asks
-  the server to listen, its connections carried here to `host:port`
-  (`-g` on every interface, `-N` runs no command); `-B host:port` is
-  Dropbear's netcat mode, the client's own input and output carried
-  through the server to `host:port`, as git's or ssh's ProxyCommand
-  wants.  `-K secs` asks a keepalive after that long without traffic and
-  gives the connection up after three times that without an answer;
-  `-I secs` closes it after that long without data.  `-v` traces the
-  connection, with CPU milliseconds a step.
-- `dropbear`: the server: `-r` its host key (default
-  `/etc/dropbear/dropbear_ed25519_host_key`), made there under `-R` when
-  the file is missing; `-p` where it listens, `-D` the directory of the
-  `authorized_keys` it admits; the user's password is checked against
-  `/etc/shadow` with crypt(3)'s DES, `$1$`, `$5$` or `$6$`, unless `-s`
-  refuses passwords.  Without `-F` it forks into the background
-  as daemon(3) has it, writing `-P`'s pidfile (default
-  `/var/run/dropbear.pid`).  It logs to syslog, as `dropbear` in the
-  authpriv facility, or to standard error under `-E` or where no log
-  daemon listens.  Each connection is served by a forked
-  child; the command runs under the user's shell, with its standard
-  input, output and error on the channel; a client's `-L` forwards are
-  served as `direct-tcpip` channels unless `-j` refuses them, and its
-  `-R` forwards listened for, on localhost unless `-a` allows the address
-  asked, unless `-k` refuses them; `-K` and `-I` are the client's
-  keepalive and idle timeout from this end.  `git clone` over it works.
-- `dropbearkey`: `-t ed25519 -f FILE` makes a key in Dropbear's format;
-  `-y` prints a key's public line and fingerprint.
-- `dropbearconvert`: `openssh|dropbear openssh|dropbear IN OUT` writes an
-  ssh-ed25519 key read in one format in the other, with Dropbear's
-  messages.
-- `scp`: files to and from a host, either end.  As the client it spawns
-  the ssh program (`-S`, default `ssh`; `-P` and `-i` are passed on) and
-  speaks the protocol over its pipes, `-r` walking directories and `-p`
-  sending times.  As the remote end (`-t`, `-f`, `-d`) it is what an
-  OpenSSH `scp -O` reaches; a received time is set on the file or
-  directory it precedes.
+- `ssh`: a command run on a host, its output and exit status, with the
+  client's standard input carried to it.  The configuration is
+  ssh_config(5)'s: `-o` options, then `~/.ssh/config` (or `-F`'s file),
+  then `/etc/ssh/ssh_config`, the first value holding, with `Host` and
+  `Match` blocks and `Include`.  Each flag stands for its keyword: `-p`
+  Port, `-l` User, `-i` IdentityFile, `-L` LocalForward, `-R`
+  RemoteForward, `-g` GatewayPorts, `-N` SessionType none, `-n` StdinNull,
+  `-q` and `-v` LogLevel; `-W host:port` carries standard input and
+  output through the server, as a ProxyCommand wants; `-G` prints the
+  settings in force.  Served keywords: Hostname, Port, User,
+  IdentityFile (`~/.ssh/id_ed25519` by default; OpenSSH's or Dropbear's
+  key files), StrictHostKeyChecking, UserKnownHostsFile,
+  GlobalKnownHostsFile, HostKeyAlias, BatchMode, PasswordAuthentication,
+  PubkeyAuthentication, NumberOfPasswordPrompts, LocalForward,
+  RemoteForward, GatewayPorts, ClearAllForwardings, ServerAliveInterval,
+  ServerAliveCountMax, ChannelTimeout (`global=`), SendEnv, SetEnv,
+  RemoteCommand, SessionType, StdinNull, LogLevel, IgnoreUnknown.  A new
+  host is asked about at the terminal under StrictHostKeyChecking ask,
+  as OpenSSH asks; a changed key is always refused.  A password is asked
+  at the terminal with echo off, or of SSH_ASKPASS as
+  SSH_ASKPASS_REQUIRE says.
+- `sshd`: the server, for the user it runs as.  The configuration is
+  sshd_config(5)'s: `-o` options, then `/etc/ssh/sshd_config` (or `-f`'s
+  file), with `Include`; `-h` adds a HostKey, `-p` a Port in place of the
+  file's.  Served keywords: Port, ListenAddress, HostKey (an ssh-ed25519
+  key, OpenSSH's or Dropbear's file), PidFile, AuthorizedKeysFile,
+  PasswordAuthentication (checked against `/etc/shadow` with crypt(3)'s
+  DES, `$1$`, `$5$` or `$6$`), PubkeyAuthentication,
+  PermitEmptyPasswords, PermitRootLogin, MaxAuthTries,
+  AllowTcpForwarding, DisableForwarding, GatewayPorts,
+  ClientAliveInterval, ClientAliveCountMax, ChannelTimeout (`global=`),
+  AcceptEnv, SyslogFacility, LogLevel.  A keyword that would restrict who
+  gets in -- AllowUsers, Match, ForceCommand and the like -- is refused
+  rather than passed over; an algorithm list that leaves out the one
+  served is refused.  Without `-D` it detaches, writing its PidFile; the
+  log goes to syslog as `sshd`, or to standard error under `-e`, to a
+  file under `-E`; `-d` serves one connection in the foreground; `-t`
+  tests the configuration and `-T` prints it.  Each connection is served
+  by a forked child; the command runs under the user's shell.  `git
+  clone` over it works.
+- `ssh-keygen`: `-t ed25519 [-f FILE] [-C comment] [-N '']` makes a key
+  in OpenSSH's format and says so with its fingerprint and randomart;
+  `-y` prints a key file's public line, `-l` its fingerprint (`-v` its
+  randomart); `-p` rewrites a key file in OpenSSH's format, which turns
+  a Dropbear key into one; `-A` makes the host key a server reads by
+  default; `-F` and `-R` find and remove a host in known_hosts.
+- `scp`: files to and from a host, either end, in the original protocol
+  (`-O`).  As the client it spawns the ssh program (`-S`, default `ssh`)
+  with OpenSSH's options and passes on `-P`, `-i`, `-o`, `-F` and `-v`,
+  `-r` walking directories and `-p` sending times.  As the remote end
+  (`-t`, `-f`, `-d`) it is what an OpenSSH `scp -O` reaches.
 - `-V` on each, and `--help` from its option declaration.
 
-Not served yet: other ciphers and key types, encrypted key files,
-agents.
+Not served yet: other ciphers and key types, passphrases on key files,
+agents, terminals and shells, SFTP, other users than the one a server
+runs as.
 
-The oracles in `tests/oracle/` are the live tests: `dropbear.sh` drives
+The oracles in `tests/oracle/` are the live tests: `client.sh` drives
 the client against a built Dropbear, `server.sh` drives the server with
 Dropbear's and OpenSSH's clients, and `scp.sh` runs scp from either end.
 Each takes a built Dropbear's directory.
@@ -99,14 +107,14 @@ Set `X=/path/to/x` to use a particular x.
     ssh/bytes.x       the wire's encodings
     ssh/transport.x   the transport layer, from either end: kex, the cipher
     ssh/session.x     the connection protocol, the client's side
-    ssh/client.x      the client: one command on a host
-    ssh/server.x      the server: commands run for authenticated keys
+    ssh/config.x      ssh_config and sshd_config, as OpenSSH reads them
+    ssh/client.x      the client: settings, host keys, authentication, one command
+    ssh/server.x      the server: settings, authentication, commands, forwards
     ssh/keys.x        key files, OpenSSH's and Dropbear's
     ssh/known.x       known_hosts
-    ssh/keygen.x      dropbearkey
-    ssh/convert.x     dropbearconvert
+    ssh/keygen.x      ssh-keygen
     ssh/scp.x         scp, either end
-    ssh/cli.x         the command line: ssh-argv, ssh-program, ssh-plan, ssh-main
+    ssh/cli.x         the command line: ssh-programs, ssh-plan, ssh-main
     tests/            the spec suite and its runner, gate, harness and oracles
 
 ## Licence

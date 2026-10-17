@@ -1,4 +1,4 @@
-; # x-ssh -- SSH on x-lang, after Dropbear
+; # x-ssh -- SSH on x-lang
 ;
 ; ## ssh/session.x -- the connection protocol: the client's channels
 ;
@@ -64,19 +64,19 @@
 (def %oset! (prim-ref (lit obj) (lit set!)))
 (def %make-str (prim-ref (lit str) (lit make)))
 
-; The clocks Dropbear's -K and -I read, seconds since the epoch: 1 the
-; last packet sent, 2 the last received, 3 the last carrying data
-; either way, 4 the last keepalive asked.  A keepalive is asked after
-; -K seconds without sending or receiving; the connection is given up
-; after three times that without receiving anything; -I seconds without
-; data either way is the idle timeout.  One connection a process.
+; The clocks ServerAliveInterval and ChannelTimeout read, seconds since
+; the epoch: 1 the last packet sent, 2 the last received, 3 the last
+; carrying data either way, 4 the last keepalive asked.  A keepalive is
+; asked after the interval without sending or receiving; the connection
+; is given up after ServerAliveCountMax intervals without receiving
+; anything; the global ChannelTimeout without data either way closes
+; it.  One connection a process.
 (def %SENT 1) (def %RECV 2) (def %DATA 3) (def %ASKED 4)
 (def %clock (Vector make 4 0))
-(def %KEEPALIVE-LIMIT 3)
 
 (def %clocks-start! (fn (_) (def now (Sys now)) (%oset! %clock %SENT now) (%oset! %clock %RECV now) (%oset! %clock %DATA now) (%oset! %clock %ASKED now)))
 
-; A keepalive asked: Dropbear's global request, wanting the answer that
+; A keepalive asked: OpenSSH's global request, wanting the answer that
 ; counts as the other end alive.
 (def %keepalive!
   (fn (_ c)
@@ -87,35 +87,35 @@
     (%oset! %clock %ASKED (Sys now))))
 
 ; How long a wait may last before a clock wants looking at, in
-; milliseconds, or -1 for no limit: limits is (KEEPALIVE . IDLE), 0 for
-; never.
+; milliseconds, or -1 for no limit: limits is (INTERVAL COUNT IDLE), an
+; interval or idle time of 0 for never.
 (def %wait-ms
   (fn (_ limits)
     (def now (Sys now))
-    (def k (first limits)) (def i (rest limits))
+    (def k (first limits)) (def n (List ref 1 limits)) (def i (List ref 2 limits))
     (def dues
       (List append
         (if (> k 0) (list (- (+ (%oref %clock %SENT) k) now) (- (+ (%oref %clock %RECV) k) now)
-                          (- (+ (%oref %clock %RECV) (* k %KEEPALIVE-LIMIT)) now)) ())
+                          (- (+ (%oref %clock %RECV) (* k n)) now)) ())
         (if (> i 0) (list (- (+ (%oref %clock %DATA) i) now)) ())))
     (if (null? dues) -1
       (do (def least (List fold (fn (_ a b) (if (< a b) a b)) (first dues) (rest dues)))
           (if (< least 0) 0 (* 1000 least))))))
 
 ; The clocks read: a keepalive asked when due, the connection given up
-; or closed when a limit has passed, as Dropbear says it.
+; or closed when a limit has passed; the error's message names which.
 (def %clocks!
   (fn (_ c limits)
     (def now (Sys now))
-    (def k (first limits)) (def i (rest limits))
+    (def k (first limits)) (def n (List ref 1 limits)) (def i (List ref 2 limits))
     (when (> k 0)
-      (do (when (>= (- now (%oref %clock %RECV)) (* k %KEEPALIVE-LIMIT))
-            (Err raise 'io "ssh: Keepalive timeout" ()))
+      (do (when (>= (- now (%oref %clock %RECV)) (* k n))
+            (Err raise 'io "keepalive" ()))
           (when (if (>= (- now (%oref %clock %SENT)) k) #t
                   (if (>= (- now (%oref %clock %RECV)) k) (>= (- now (%oref %clock %ASKED)) k) #f))
             (%keepalive! c))))
     (when (if (> i 0) (>= (- now (%oref %clock %DATA)) i) #f)
-      (Err raise 'io "ssh: Idle timeout" ()))))
+      (Err raise 'io "idle" ()))))
 
 ; A channel's state, in a vector: 1 our channel number, 2 the server's,
 ; 3 how many bytes it will take from us (its window), 4 the most a packet
@@ -135,7 +135,7 @@
 ; HOST PORT), 7 those whose request the server has yet to answer, in
 ; the order asked.
 (def %CHANNELS 1) (def %NEXT 2) (def %MOVED 3) (def %LISTENERS 4) (def %SESSION 5)
-(def %REMOTES 6) (def %ASKED 7)
+(def %REMOTES 6) (def %ASKED 7) (def %ENV 8)
 (def %rn (fn (_ run i) (%oref run i)))
 (def %rn! (fn (_ run i v) (%oset! run i v)))
 
@@ -216,7 +216,7 @@
     (ssh-put-uint32 open (rest peer))
     (%send c open)))
 
-; Dropbear's -B: a direct-tcpip channel to a host and port whose two
+; -W: a direct-tcpip channel to a host and port whose two
 ; ways are this process's own input and output, the loop's to end as a
 ; session's is.
 (def %open-netcat!
@@ -231,7 +231,7 @@
     (%send c open)))
 
 ; A remote forward asked of the server: tcpip-forward for its address
-; and port, the address "" for every interface, as Dropbear asks.
+; and port, the address "" for every interface, as OpenSSH asks.
 (def %ask-remote!
   (fn (_ c run remote)
     (def req (%packet-of ssh-msg-global-request))
@@ -243,7 +243,7 @@
     (%rn! run %ASKED (List append (%rn run %ASKED) (list remote)))))
 
 ; The server's answer to the oldest request still open: a refusal said
-; as Dropbear says it.
+; as OpenSSH says it.
 (def %answered!
   (fn (_ run ok)
     (def asked (%rn run %ASKED))
@@ -350,7 +350,19 @@
             (%ch! ch %WINDOW (ssh-get-uint32 in))
             (%ch! ch %MAX (ssh-get-uint32 in))
             (when (eq? (%ch ch %KIND) (lit session))
-              (do (def req (%packet-of %msg-channel-request))
+              (do ; the environment first, each variable a request
+                  ; wanting no answer: a server may refuse any of them
+                  (List for-each
+                    (fn (_ v)
+                      (def e (%packet-of %msg-channel-request))
+                      (ssh-put-uint32 e (%ch ch %SERVER))
+                      (ssh-put-text e "env")
+                      (ssh-put-bool e #f)
+                      (ssh-put-text e (first v))
+                      (ssh-put-text e (rest v))
+                      (%send c e))
+                    (%rn run %ENV))
+                  (def req (%packet-of %msg-channel-request))
                   (ssh-put-uint32 req (%ch ch %SERVER))
                   (ssh-put-text req "exec")
                   (ssh-put-bool req #t)
@@ -415,17 +427,17 @@
 ; one, its connections carried to HOST:PORT through the server; and each
 ; remote (ADDRESS PORT HOST PORT) asked of the server, ADDRESS () for
 ; every one, the connections it opens carried to HOST:PORT from here;
-; and netcat (HOST . PORT) or (), Dropbear's -B: a direct-tcpip channel to
+; and netcat (HOST . PORT) or (), -W's: a direct-tcpip channel to
 ; HOST:PORT whose two ways are input and on-out, in a session's place.
 ; Runs until the session channel closes, or, with no command, until the
 ; connection ends.  Answers the exit status, or () when the server gave
 ; none.
 (def ssh-session-run!
-  (fn (_ c command input on-out on-err forwards remotes netcat limits)
-    (def run (Vector make 7 ()))
+  (fn (_ c command input on-out on-err forwards remotes netcat limits env)
+    (def run (Vector make 8 ()))
     (%clocks-start!)
     (%rn! run %CHANNELS ()) (%rn! run %NEXT 0) (%rn! run %MOVED 0)
-    (%rn! run %REMOTES remotes) (%rn! run %ASKED ())
+    (%rn! run %REMOTES remotes) (%rn! run %ASKED ()) (%rn! run %ENV env)
     (%rn! run %LISTENERS
       (List map (fn (_ f) (list (if (null? (first f)) (Socket tcp-listen (List ref 1 f))
                                   (Socket tcp-listen-on (first f) (List ref 1 f)))

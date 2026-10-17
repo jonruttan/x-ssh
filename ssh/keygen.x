@@ -1,36 +1,45 @@
-; # x-ssh -- SSH on x-lang, after Dropbear
+; # x-ssh -- SSH on x-lang
 ;
-; ## ssh/keygen.x -- dropbearkey: making a key and showing one
+; ## ssh/keygen.x -- ssh-keygen: keys made, shown and rewritten
 ;
 ; @author [Jon Ruttan](jonruttan@gmail.com)
 ; @copyright 2026 Jon Ruttan
 ; @license MIT No Attribution (MIT-0)
 ;
-; `dropbearkey -t ed25519 -f FILE` makes an Ed25519 key from 32 random
-; bytes and writes it in Dropbear's own format -- string "ssh-ed25519",
-; then a string of the 32-byte secret and the 32-byte public key -- with
-; FILE.pub beside it, the public line OpenSSH's authorized_keys and
-; known_hosts take.  `dropbearkey -y -f FILE` shows an existing key's.
-; Either prints what Dropbear prints: the public line, then the key's
-; fingerprint, SHA256 of its blob in unpadded base64.  Neither file is
-; ever written over; both are made readable by their owner alone.
+; What OpenSSH's ssh-keygen does with an ed25519 key: make one from 32
+; random bytes and write it in OpenSSH's private key format, FILE.pub
+; beside it the public line authorized_keys and known_hosts take, then
+; say so with its fingerprint -- SHA256 of the key's blob in unpadded
+; base64 -- and its randomart; print a key file's public line (-y) or
+; fingerprint (-l); rewrite one (-p), which turns a Dropbear key file into
+; OpenSSH's; make the host keys a server wants (-A); and find or remove a
+; host in known_hosts (-F, -R).  Passphrases are not served yet: an empty
+; one is the only kind.
 
 (module ssh/keygen)
 
+(import x/type/vector)
 (import x/sys/file)
 (import x/sys/posix)
 (import x/codec/hex)
 (import x/codec/base64)
 (import x/codec/sha256)
 (import x/codec/ed25519)
-(import ssh/bytes ssh-out ssh-put-text ssh-put-string ssh-put-uint32 ssh-put-bytes ssh-out-run)
+(import x/repl/term)
+(import ssh/bytes ssh-out ssh-put-byte ssh-put-text ssh-put-string ssh-put-uint32 ssh-put-bytes ssh-out-run
+  ssh-in ssh-get-uint32)
 (import ssh/transport ssh-random)
-(import ssh/keys ssh-key-of-dropbear-bytes)
+(import ssh/keys ssh-key-of-file ssh-key-comment-of-file ssh-key-of-public-line)
+(import ssh/known ssh-known-find ssh-known-remove!)
 
 (def %byte-ref (prim-ref (lit str) (lit byte-ref)))
 (def %char->int (prim-ref (lit char) (lit ->int)))
 (def %byte-len (prim-ref (lit str) (lit byte-len)))
 (def %make-str (prim-ref (lit str) (lit make)))
+(def %oref (prim-ref (lit obj) (lit ref)))
+(def %oset! (prim-ref (lit obj) (lit set!)))
+(def %cvt (prim-ref (lit convert) (lit to)))
+(def %num (fn (_ n) (%cvt n (Type named STRING) 10)))
 
 (def %say (fn (_ fd text) (File write fd text (%byte-len text))))
 
@@ -47,83 +56,306 @@
     (ssh-put-string out pub 0 32)
     (ssh-out-run out)))
 
-; The public line: type, blob in base64, comment.
+; The public line: type, blob in base64, and the comment when there is one.
 (def ssh-key-public-line
   (fn (_ pub comment)
     (def b (%blob pub))
-    (Str8 append "ssh-ed25519 " (Base64 encode-bytes (%bytes (first b) (rest b))) " " comment)))
+    (Str8 append "ssh-ed25519 " (Base64 encode-bytes (%bytes (first b) (rest b)))
+                 (if (if (null? comment) #t (= (Str8 length comment) 0)) "" (Str8 append " " comment)))))
+
+; The blob's SHA256 digest, as bytes.
+(def %digest
+  (fn (_ pub) (def b (%blob pub)) (Hex decode-bytes (Sha256 hex-n (first b) (rest b)))))
 
 ; The fingerprint: "SHA256:" and the blob's digest in base64, unpadded.
 (def ssh-key-fingerprint
-  (fn (_ pub)
-    (def b (%blob pub))
-    (def d (Base64 encode-bytes (Hex decode-bytes (Sha256 hex-n (first b) (rest b)))))
-    (Str8 append "SHA256:" (Str8 sub 0 43 d))))
+  (fn (_ pub) (Str8 append "SHA256:" (Str8 sub 0 43 (Base64 encode-bytes (%digest pub))))))
 
-; The comment Dropbear gives a key it makes: user@host.
+; The digest's randomart, OpenSSH's drunken bishop: from the middle of a
+; 17 by 9 field, each byte's four 2-bit pairs, low first, step a
+; diagonal, each square visited counting up a symbol; S where it began, E
+; where it ended.
+(def ssh-key-randomart
+  (fn (_ pub)
+    (def w 17) (def h 9)
+    (def symbols " .o+=*BOX@%&#/^SE")
+    (def field (Vector make (* w h) 0))
+    (def at (fn (_ x y) (+ 1 x (* w y))))
+    (def clamp (fn (_ v hi) (if (< v 0) 0 (if (> v hi) hi v))))
+    (def end
+      (List fold
+        (fn (_ xy byte)
+          ((fn (self k b xy)
+             (if (= k 4) xy
+               (do (def x (clamp (+ (first xy) (if (= (& b 1) 0) -1 1)) (- w 1)))
+                   (def y (clamp (+ (rest xy) (if (= (& b 2) 0) -1 1)) (- h 1)))
+                   (when (< (%oref field (at x y)) 14) (%oset! field (at x y) (+ (%oref field (at x y)) 1)))
+                   (self (+ k 1) (/ (- b (& b 3)) 4) (pair x y)))))
+           0 byte xy))
+        (pair 8 4) (%digest pub)))
+    (%oset! field (at 8 4) 15)
+    (%oset! field (at (first end) (rest end)) 16)
+    (def border
+      (fn (_ title)
+        (def pad (/ (- w (Str8 length title) (& (- w (Str8 length title)) 1)) 2))
+        (Str8 append "+" (Str8 repeat pad "-") title (Str8 repeat (- w pad (Str8 length title)) "-") "+")))
+    (Str8 join "\n"
+      (List append
+        (list (border "[ED25519 256]"))
+        (List map (fn (_ y) (Str8 append "|" (Str8 join "" (List map (fn (_ x) (Str8 sub (%oref field (at x y)) 1 symbols)) (List range 0 w))) "|"))
+          (List range 0 h))
+        (list (border "[SHA256]") "")))))
+
+; A base64 text in lines of 70 columns, each ended.
+(def %lines
+  (fn (self s)
+    (if (<= (Str8 length s) 70) (Str8 append s "\n")
+      (Str8 append (Str8 sub 0 70 s) "\n" (self (Str8 sub 70 (- (Str8 length s) 70) s))))))
+
+; The key as an OpenSSH private key file's text, unencrypted: the
+; private section's two check ints one random number, its padding 1, 2,
+; 3 and on to a multiple of eight.
+(def ssh-key-openssh-text
+  (fn (_ seed pub comment)
+    (def b (%blob pub))
+    (def check (ssh-random 4))
+    (def pr (ssh-out))
+    (ssh-put-bytes pr check 0 4)
+    (ssh-put-bytes pr check 0 4)
+    (ssh-put-text pr "ssh-ed25519")
+    (ssh-put-string pr pub 0 32)
+    (ssh-put-uint32 pr 64)
+    (ssh-put-bytes pr seed 0 32)
+    (ssh-put-bytes pr pub 0 32)
+    (ssh-put-text pr (if (null? comment) "" comment))
+    ((fn (self i) (unless (= 0 (& (rest (ssh-out-run pr)) 7)) (do (ssh-put-byte pr i) (self (+ i 1))))) 1)
+    (def p (ssh-out-run pr))
+    (def out (ssh-out))
+    (ssh-put-bytes out "openssh-key-v1" 0 14)
+    (ssh-put-byte out 0)
+    (ssh-put-text out "none")
+    (ssh-put-text out "none")
+    (ssh-put-text out "")
+    (ssh-put-uint32 out 1)
+    (ssh-put-string out (first b) 0 (rest b))
+    (ssh-put-string out (first p) 0 (rest p))
+    (def r (ssh-out-run out))
+    (Str8 append "-----BEGIN OPENSSH PRIVATE KEY-----\n"
+                 (%lines (Base64 encode-bytes (%bytes (first r) (rest r))))
+                 "-----END OPENSSH PRIVATE KEY-----\n")))
+
+; text written to path with mode, made or truncated; #f when it cannot be.
+(def %write
+  (fn (_ path text mode)
+    (def fd (File open path (list (lit wronly) (lit creat) (lit trunc)) mode))
+    (if (< fd 0) #f
+      (do (File chmod path mode)
+          (def n (File write fd text (%byte-len text)))
+          (File close fd)
+          (= n (%byte-len text))))))
+
+; A key made and written to path, path.pub beside it: its public key, or
+; #f when a file could not be written.
+(def ssh-keygen-make
+  (fn (_ path comment)
+    (def seed (ssh-random 32))
+    (def pub (Ed25519 public seed))
+    (if (if (%write path (ssh-key-openssh-text seed pub comment) 384)
+          (%write (Str8 append path ".pub") (Str8 append (ssh-key-public-line pub comment) "\n") 420) #f)
+      pub #f)))
+
+; The comment OpenSSH gives a key it makes: user@host.
 (def %default-comment
   (fn (_)
     (def user (Sys getenv "USER"))
     (def node (List find (fn (_ p) (eq? (first p) (lit nodename))) (Sys uname)))
     (Str8 append (if (null? user) "" user) "@" (if (null? node) "" (rest node)))))
 
-; What dropbearkey prints for a key, to standard output.
-(def %show
-  (fn (_ pub comment)
-    (%say 1 (Str8 append "Public key portion is:\n" (ssh-key-public-line pub comment) "\n"
-                         "Fingerprint: " (ssh-key-fingerprint pub) "\n"))))
+; A line read from standard input -- the platform keeps it on fd 3 -- or
+; () at its end.
+(def %read-line
+  (fn (_)
+    (def one (%make-str 1))
+    ((fn (self acc)
+       (if (< (guard (e -1) (File read 3 one 1)) 1)
+         (if (null? acc) () (Str8 join "" (List reverse acc)))
+         (if (= (%char->int (%byte-ref one 0)) 10) (Str8 join "" (List reverse acc))
+           (self (pair (Str8 sub 0 1 one) acc)))))
+     ())))
 
-; A file made new, owner-only, holding n bytes of s; #f when it exists.
-(def %write-new
-  (fn (_ path s n)
-    (def fd (File open path (list (lit wronly) (lit creat) (lit excl)) 384))
-    (if (< fd 0) #f
-      (do (File write fd s n) (File close fd) #t))))
-
-; A key made and written new to path in Dropbear's format, owner-only;
-; answers its public key, or #f when the file could not be made.
-(def ssh-keygen-make
-  (fn (_ path)
-    (def seed (ssh-random 32))
-    (def pub (Ed25519 public seed))
-    (def file (ssh-out))
-    (ssh-put-text file "ssh-ed25519")
-    (ssh-put-uint32 file 64)
-    (ssh-put-bytes file seed 0 32)
-    (ssh-put-bytes file pub 0 32)
-    (def r (ssh-out-run file))
-    (if (%write-new path (first r) (rest r)) pub #f)))
-
-; A key made and written to path, path.pub beside it, and shown.  The
-; status: 0, or 1 when path is there already.
-(def ssh-keygen-generate
-  (fn (_ path comment)
-    (%say 2 "Generating 256 bit ed25519 key, this may take a while...\n")
-    (def pub (ssh-keygen-make path))
-    (def c (if (null? comment) (%default-comment) comment))
-    (if pub
-      (do (def line (Str8 append (ssh-key-public-line pub c) "\n"))
-          (unless (%write-new (Str8 append path ".pub") line (%byte-len line))
-            (%say 2 (Str8 append "Save public key to " path ".pub failed: File exists\n")))
-          (%show pub c)
-          0)
-      (do (%say 2 (Str8 append "Failed moving key file to " path ": File exists\n"
-                               "Failed to generate key.\n"))
-          1))))
-
-; An existing key's public line and fingerprint shown.  The status: 0, or
-; 1 when the file cannot be read or holds no key.
-(def ssh-keygen-print
-  (fn (_ path comment)
-    (def fd (File open path (lit rdonly)))
-    (if (< fd 0)
-      (do (%say 2 (Str8 append "Failed reading '" path "'\n")) 1)
-      (do (def buf (%make-str 16384))
-          (def n (File read fd buf 16384))
+; A passphrase asked at the terminal, echo off; "" when there is none.
+(def %secret
+  (fn (_ text)
+    (def fd (guard (e -1) (File open "/dev/tty" (lit rdwr))))
+    (if (< fd 0) ""
+      (do (def saved (Term raw-with-signals! fd))
+          (File write fd text (%byte-len text))
+          (def one (%make-str 1))
+          (def line
+            ((fn (self acc)
+               (if (< (guard (e -1) (File read fd one 1)) 1) (Str8 join "" (List reverse acc))
+                 (do (def b (%char->int (%byte-ref one 0)))
+                     (match ((if (= b 13) #t (= b 10)) (Str8 join "" (List reverse acc)))
+                            ((if (= b 127) #t (= b 8)) (self (if (null? acc) () (rest acc))))
+                            (#t (self (pair (Str8 sub 0 1 one) acc)))))))
+             ()))
+          (Term restore! fd saved)
+          (File write fd "\r\n" 2)
           (File close fd)
-          (def key (guard (e ()) (ssh-key-of-dropbear-bytes buf n)))
-          (if (null? key)
-            (do (%say 2 (Str8 append "Bad key in '" path "'\n")) 1)
-            (do (%show (rest key) (if (null? comment) (%default-comment) comment)) 0))))))
+          line))))
 
-(provide ssh/keygen ssh-keygen-make ssh-keygen-generate ssh-keygen-print ssh-key-public-line ssh-key-fingerprint)
+(def %home-key (fn (_) (Str8 append (Sys getenv "HOME") "/.ssh/id_ed25519")))
+
+; The file named, or the one asked for, ~/.ssh/id_ed25519 when the answer
+; is empty.
+(def %file
+  (fn (_ file question)
+    (if (not (null? file)) file
+      (do (%say 1 (Str8 append question " (" (%home-key) "): "))
+          (def a (%read-line))
+          (if (if (null? a) #t (= (Str8 length a) 0)) (%home-key) a)))))
+
+(def %no-passphrase "x-ssh: passphrases are not served yet; only an empty one is\n")
+
+; A key made: the file asked for when not named, one already there kept
+; unless the answer is y, the passphrase asked for when -N gives none.
+(def %generate
+  (fn (_ file comment passphrase quiet)
+    (unless quiet (%say 1 "Generating public/private ed25519 key pair.\n"))
+    (def path (%file file "Enter file in which to save the key"))
+    (def slash ((fn (self i) (if (< i 0) () (if (= (%byte-ref path i) #\/) i (self (- i 1))))) (- (Str8 length path) 1)))
+    (def dir (if (if (null? slash) #t (= slash 0)) () (Str8 sub 0 slash path)))
+    (when (if (null? file) (if (null? dir) #f (not (File exists? dir))) #f)
+      (do (File mkdir dir 448) (%say 1 (Str8 append "Created directory '" dir "'.\n"))))
+    (def overwrite
+      (if (not (File exists? path)) #t
+        (do (%say 1 (Str8 append path " already exists.\nOverwrite (y/n)? "))
+            (def a (%read-line))
+            (if (null? a) #f (if (> (Str8 length a) 0) (if (= (%byte-ref a 0) #\y) #t (= (%byte-ref a 0) #\Y)) #f)))))
+    (def pass (if (not (null? passphrase)) passphrase
+                (do (def a (%secret (Str8 append "Enter passphrase for \"" path "\" (empty for no passphrase): ")))
+                    (def b (if (= (Str8 length a) 0) "" (%secret "Enter same passphrase again: ")))
+                    (if (str=? a b) a #f))))
+    (def c (if (null? comment) (%default-comment) comment))
+    (match
+      ((not overwrite) 1)
+      ((not pass) (do (%say 2 "Passphrases do not match.  Try again.\n") 1))
+      ((> (Str8 length pass) 0) (do (%say 2 %no-passphrase) 1))
+      (#t
+        (do (def pub (ssh-keygen-make path c))
+            (if (not pub)
+              (do (%say 2 (Str8 append "Saving key \"" path "\" failed\n")) 1)
+              (do (unless quiet
+                    (%say 1 (Str8 append "Your identification has been saved in " path "\n"
+                                         "Your public key has been saved in " path ".pub\n"
+                                         "The key fingerprint is:\n" (ssh-key-fingerprint pub) " " c "\n"
+                                         "The key's randomart image is:\n" (ssh-key-randomart pub))))
+                  0)))))))
+
+; A key file read: (SEED-OR-() PUB COMMENT) -- a public line's file has
+; no seed -- or () when it holds no key this tool reads.
+(def %read-key
+  (fn (_ path)
+    (guard (e ())
+      (def text (File read-all path))
+      (if (if (> (Str8 length text) 12) (str=? (Str8 sub 0 12 text) "ssh-ed25519 ") #f)
+        ((fn (_ k) (list () (first k) (rest k))) (ssh-key-of-public-line (first (Str8 split "\n" text))))
+        (do (def key (ssh-key-of-file path))
+            (list (first key) (rest key) (ssh-key-comment-of-file path)))))))
+
+(def %missing (fn (_ path) (%say 2 (Str8 append path ": No such file or directory\n")) 255))
+
+; -y: the public line of a private key file.
+(def %public
+  (fn (_ file)
+    (def path (%file file "Enter file in which the key is"))
+    (if (not (File exists? path)) (%missing path)
+      (do (def key (%read-key path))
+          (if (if (null? key) #t (null? (first key)))
+            (do (%say 2 (Str8 append "Load key \"" path "\": invalid format\n")) 255)
+            (do (%say 1 (Str8 append (ssh-key-public-line (List ref 1 key) (List ref 2 key)) "\n")) 0))))))
+
+; -l: a key's size, fingerprint, comment and type; under -v its randomart.
+(def %fingerprint
+  (fn (_ file art)
+    (def path (%file file "Enter file in which the key is"))
+    (if (not (File exists? path)) (%missing path)
+      (do (def key (%read-key path))
+          (if (null? key)
+            (do (%say 2 (Str8 append path " is not a key file.\n")) 255)
+            (do (def c (List ref 2 key))
+                (%say 1 (Str8 append "256 " (ssh-key-fingerprint (List ref 1 key)) " "
+                                     (if (if (null? c) #t (= (Str8 length c) 0)) "no comment" c) " (ED25519)\n"
+                                     (if art (ssh-key-randomart (List ref 1 key)) "")))
+                0))))))
+
+; -p: the key rewritten in OpenSSH's format under the new passphrase.
+(def %passphrase
+  (fn (_ file old new)
+    (def path (%file file "Enter file in which the key is"))
+    (if (not (File exists? path)) (%missing path)
+      (do (def key (%read-key path))
+          (def pass (if (null? new)
+                      (do (def a (%secret "Enter new passphrase (empty for no passphrase): "))
+                          (def b (if (= (Str8 length a) 0) "" (%secret "Enter same passphrase again: ")))
+                          (if (str=? a b) a #f))
+                      new))
+          (match
+            ((if (null? key) #t (null? (first key))) (do (%say 2 (Str8 append "Load key \"" path "\": invalid format\n")) 255))
+            ((not pass) (do (%say 2 "Passphrases do not match.  Try again.\n") 255))
+            ((> (Str8 length pass) 0) (do (%say 2 %no-passphrase) 255))
+            (#t (do (def c (List ref 2 key))
+                    (%say 1 (Str8 append "Key has comment '" (if (null? c) "" c) "'\n"))
+                    (if (%write path (ssh-key-openssh-text (first key) (List ref 1 key) c) 384)
+                      (do (%say 1 "Your identification has been saved with the new passphrase.\n") 0)
+                      (do (%say 2 (Str8 append "Saving key \"" path "\" failed\n")) 255)))))))))
+
+; -A: each host key a server reads by default made where it is missing,
+; under a prefix directory when one is given: ed25519's, the one served.
+(def %hosts
+  (fn (_ prefix)
+    (def path (Str8 append (if (null? prefix) "" prefix) "/etc/ssh/ssh_host_ed25519_key"))
+    (if (File exists? path) 0
+      (do (%say 1 "ssh-keygen: generating new host keys: ED25519 ")
+          (def node (List find (fn (_ p) (eq? (first p) (lit nodename))) (Sys uname)))
+          (unless (ssh-keygen-make path (Str8 append "root@" (if (null? node) "" (rest node))))
+            (%say 2 (Str8 append "Could not save your private key in " path ": No such file or directory\n")))
+          (%say 1 "\n")
+          0))))
+
+(def %known-file (fn (_ file) (if (null? file) (Str8 append (Sys getenv "HOME") "/.ssh/known_hosts") file)))
+
+; -F: the lines of known_hosts naming a host; 1 when there are none.
+(def %find
+  (fn (_ host file)
+    (def found (ssh-known-find (%known-file file) host))
+    (List for-each (fn (_ l) (%say 1 (Str8 append "# Host " host " found: line " (%num (first l)) " \n" (rest l) "\n"))) found)
+    (if (null? found) 1 0)))
+
+; -R: the lines naming a host taken out of known_hosts, its old text kept.
+(def %remove
+  (fn (_ host file)
+    (def path (%known-file file))
+    (if (not (File exists? path)) (%missing path)
+      (do (def gone (ssh-known-remove! path host))
+          (if (null? gone)
+            (%say 2 (Str8 append "Host " host " not found in " path "\n"))
+            (do (List for-each (fn (_ n) (%say 1 (Str8 append "# Host " host " found: line " (%num n) "\n"))) gone)
+                (%say 1 (Str8 append path " updated.\nOriginal contents retained as " path ".old\n"))))
+          0))))
+
+; The key tool's plan done; the exit status.
+(def ssh-keygen-main
+  (fn (_ what)
+    (def a (fn (_ i) (List ref i what)))
+    (match
+      ((eq? (first what) (lit generate)) (%generate (a 1) (a 2) (a 3) (a 4)))
+      ((eq? (first what) (lit public)) (%public (a 1)))
+      ((eq? (first what) (lit fingerprint)) (%fingerprint (a 1) (a 2)))
+      ((eq? (first what) (lit passphrase)) (%passphrase (a 1) (a 2) (a 3)))
+      ((eq? (first what) (lit hosts)) (%hosts (a 1)))
+      ((eq? (first what) (lit find)) (%find (a 1) (a 2)))
+      (#t (%remove (a 1) (a 2))))))
+
+(provide ssh/keygen ssh-keygen-main ssh-keygen-make ssh-key-public-line ssh-key-fingerprint ssh-key-randomart
+  ssh-key-openssh-text)

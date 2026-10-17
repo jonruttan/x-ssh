@@ -11,7 +11,7 @@
 #              system's `scp -t` and `scp -f`
 #   many       two files into a directory, the remote end told -d
 #   times      -p carries the modification time
-#   ends       OpenSSH's `scp -O` to and from x-ssh's server, whose PATH
+#   ends       OpenSSH's `scp -O` to and from x-ssh's sshd, whose PATH
 #              finds x-ssh's scp: x-ssh's remote ends, -t and -f, -p keeping
 #              the time at the sink
 set -u
@@ -23,6 +23,7 @@ fx=$(mktemp -d "${TMPDIR:-/tmp}/x-ssh-scp.XXXXXX")
 # The launcher pipes the program into the engine, a child of its own,
 # so the server's pid is a shell's: the whole tree under it goes.
 kill_tree() {
+	[ -n "${1:-}" ] || return 0
 	for c in $(ps -axo pid,ppid | awk -v p="$1" '$2 == p { print $1 }'); do kill_tree "$c"; done
 	kill "$1" 2>/dev/null
 }
@@ -37,7 +38,7 @@ cp "$fx/userkey.pub" "$fx/authorized_keys"
 "$db/dropbear" -D "$fx" -p "127.0.0.1:$port" -r "$fx/hostkey" -F -s > "$fx/dropbear.log" 2>&1 &
 dbpid=$!
 # the ssh program x-ssh's scp spawns: x-ssh's client, the host accepted
-printf '#!/bin/sh\nHOME="%s" exec "%s" -l ssh -- dbclient -y "$@"\n' "$fx/home" "$X" > "$fx/bin/xssh"
+printf '#!/bin/sh\nHOME="%s" exec "%s" -l ssh -- ssh -F none -o StrictHostKeyChecking=accept-new "$@"\n' "$fx/home" "$X" > "$fx/bin/xssh"
 # the scp x-ssh's server finds on its PATH
 printf '#!/bin/sh\nexec "%s" -l ssh -- scp "$@"\n' "$X" > "$fx/bin/scp"
 chmod +x "$fx/bin/xssh" "$fx/bin/scp"
@@ -111,10 +112,11 @@ else
 fi
 
 # ends: x-ssh's server, its PATH finding x-ssh's scp
-PATH="$fx/bin:$PATH" "$X" -l ssh -- dropbear -F -E -r "$fx/hostkey" -p "127.0.0.1:$xport" -D "$fx" > "$fx/xserver.log" 2>&1 &
+PATH="$fx/bin:$PATH" "$X" -l ssh -- sshd -D -e -f /dev/null -h "$fx/hostkey" -o ListenAddress=127.0.0.1 -p "$xport" \
+	-o AuthorizedKeysFile="$fx/authorized_keys" -o PidFile=none > "$fx/xserver.log" 2>&1 &
 xpid=$!
 i=0
-while ! grep -q 'Not backgrounding' "$fx/xserver.log" 2>/dev/null; do
+while ! grep -q "Server listening on 127.0.0.1 port $xport." "$fx/xserver.log" 2>/dev/null; do
 	i=$((i + 1)); [ $i -lt 600 ] || break; sleep 1
 done
 oscp="scp -O -q -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -P $xport -i $fx/userkey"

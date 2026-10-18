@@ -63,6 +63,8 @@
 (def %oref (prim-ref (lit obj) (lit ref)))
 (def %oset! (prim-ref (lit obj) (lit set!)))
 (def %make-str (prim-ref (lit str) (lit make)))
+(def %str->ptr (prim-ref (lit str) (lit ->ptr)))
+(def %pset1 (prim-ref (lit ptr) (lit set!)))
 
 ; The clocks ServerAliveInterval and ChannelTimeout read, seconds since
 ; the epoch: 1 the last packet sent, 2 the last received, 3 the last
@@ -133,9 +135,12 @@
 ; bytes moved since the last collect, 4 the listeners as (FD HOST PORT),
 ; 5 the session channel or (), 6 the remote forwards as (ADDRESS PORT
 ; HOST PORT), 7 those whose request the server has yet to answer, in
-; the order asked.
+; the order asked, 8 the environment sent, 9 the terminal asked for, as
+; (TERM WINDOW), WINDOW a function answering (COLUMNS . ROWS), or (), 10
+; the window last sent, 11 where the escape character stands: 1 at a
+; line's start, 2 just after a tilde there, 0 elsewhere.
 (def %CHANNELS 1) (def %NEXT 2) (def %MOVED 3) (def %LISTENERS 4) (def %SESSION 5)
-(def %REMOTES 6) (def %ASKED 7) (def %ENV 8)
+(def %REMOTES 6) (def %ASKED 7) (def %ENV 8) (def %TTY 9) (def %SIZE 10) (def %ESC 11)
 (def %rn (fn (_ run i) (%oref run i)))
 (def %rn! (fn (_ run i v) (%oset! run i v)))
 
@@ -293,12 +298,68 @@
 
 ; One read of a channel's input sent as its data: as much as is there,
 ; the window and the packet size allow; a read of nothing is its end.
+; Typed bytes through OpenSSH's escapes, at a line's start: ~. ends the
+; connection, ~~ is one tilde, a tilde before anything else is itself.
+; Answers (BUF . N), or raises "escape" for ~.
+(def %escape
+  (fn (_ run buf got)
+    (def out (%make-str (+ (* got 2) 1)))
+    (def p (%str->ptr out))
+    (def byte (fn (_ i) ((prim-ref (lit char) (lit ->int)) ((prim-ref (lit str) (lit byte-ref)) buf i))))
+    (def n
+      ((fn (self i n state)
+         (if (= i got) (do (%rn! run %ESC state) n)
+           (do (def b (byte i))
+               (def line? (if (= b 13) #t (= b 10)))
+               (match
+                 ((= state 2)
+                   (match
+                     ((= b 46) (Err raise 'io "escape" ()))
+                     ((= b 126) (do (%pset1 p n 126 1) (self (+ i 1) (+ n 1) 0)))
+                     (#t (do (%pset1 p n 126 1) (%pset1 p (+ n 1) b 1) (self (+ i 1) (+ n 2) (if line? 1 0))))))
+                 ((if (= state 1) (= b 126) #f) (self (+ i 1) n 2))
+                 (#t (do (%pset1 p n b 1) (self (+ i 1) (+ n 1) (if line? 1 0))))))))
+       0 0 (%rn run %ESC)))
+    (pair out n)))
+
+; How long the poll may wait: the clocks' limit, and on a terminal half a
+; second at most, so a resized window is seen -- a closure cannot be a
+; SIGWINCH handler.
+(def %poll-ms
+  (fn (_ run limits)
+    (def w (%wait-ms limits))
+    (if (null? (%rn run %TTY)) w (if (if (< w 0) #t (< 500 w)) 500 w))))
+
+; A terminal's window as it is now, sent as window-change when it moved.
+(def %resized!
+  (fn (_ c run)
+    (def session (%rn run %SESSION))
+    (unless (if (null? (%rn run %TTY)) #t (if (null? session) #t (null? (%ch session %SERVER))))
+      (do (def now ((List ref 1 (%rn run %TTY))))
+          (unless (if (= (first now) (first (%rn run %SIZE))) (= (rest now) (rest (%rn run %SIZE))) #f)
+            (do (def p (%packet-of %msg-channel-request))
+                (ssh-put-uint32 p (%ch session %SERVER))
+                (ssh-put-text p "window-change")
+                (ssh-put-bool p #f)
+                (ssh-put-uint32 p (first now))
+                (ssh-put-uint32 p (rest now))
+                (ssh-put-uint32 p 0)
+                (ssh-put-uint32 p 0)
+                (%send c p)
+                (%rn! run %SIZE now)))))))
+
 (def %pump!
   (fn (_ c run ch)
     (def n (%min %chunk (%min (%ch ch %WINDOW) (- (%ch ch %MAX) 64))))
-    (def buf (%make-str n))
-    (def got (File read (%ch ch %INPUT) buf n))
-    (if (< got 1)
+    ; a held tilde comes out with the next byte, so a terminal reads one short
+    (def raw (%make-str n))
+    (def read (File read (%ch ch %INPUT) raw (if (null? (%rn run %TTY)) n (- n 1))))
+    (def typed (if (if (< read 1) #f (if (null? (%rn run %TTY)) #f (eq? (%ch ch %KIND) (lit session))))
+                 (%escape run raw read)
+                 (pair raw read)))
+    (def buf (first typed))
+    (def got (rest typed))
+    (if (< read 1)
       (%input-done! c ch)
       (do (def data (%packet-of %msg-channel-data))
           (ssh-put-uint32 data (%ch ch %SERVER))
@@ -362,11 +423,29 @@
                       (ssh-put-text e (rest v))
                       (%send c e))
                     (%rn run %ENV))
+                  ; a terminal (RFC 4254 6.2), wanting no answer, as
+                  ; OpenSSH's -t: TERM, the window in characters and
+                  ; pixels, and the modes, none but the end marker
+                  (unless (null? (%rn run %TTY))
+                    (do (def p (%packet-of %msg-channel-request))
+                        (def size (%rn run %SIZE))
+                        (ssh-put-uint32 p (%ch ch %SERVER))
+                        (ssh-put-text p "pty-req")
+                        (ssh-put-bool p #f)
+                        (ssh-put-text p (first (%rn run %TTY)))
+                        (ssh-put-uint32 p (first size))
+                        (ssh-put-uint32 p (rest size))
+                        (ssh-put-uint32 p 0)
+                        (ssh-put-uint32 p 0)
+                        (ssh-put-uint32 p 1)
+                        (ssh-put-byte p 0)
+                        (%send c p)))
                   (def req (%packet-of %msg-channel-request))
+                  (def shell? (eq? (%ch ch %COMMAND) (lit shell)))
                   (ssh-put-uint32 req (%ch ch %SERVER))
-                  (ssh-put-text req "exec")
+                  (ssh-put-text req (if shell? "shell" "exec"))
                   (ssh-put-bool req #t)
-                  (ssh-put-text req (%ch ch %COMMAND))
+                  (unless shell? (ssh-put-text req (%ch ch %COMMAND)))
                   (%send c req)
                   (when (null? (%ch ch %INPUT)) (%input-done! c ch))))))
       ((= t %msg-channel-open-failure)
@@ -433,11 +512,12 @@
 ; connection ends.  Answers the exit status, or () when the server gave
 ; none.
 (def ssh-session-run!
-  (fn (_ c command input on-out on-err forwards remotes netcat limits env)
-    (def run (Vector make 8 ()))
+  (fn (_ c command input on-out on-err forwards remotes netcat limits env tty)
+    (def run (Vector make 11 ()))
     (%clocks-start!)
     (%rn! run %CHANNELS ()) (%rn! run %NEXT 0) (%rn! run %MOVED 0)
     (%rn! run %REMOTES remotes) (%rn! run %ASKED ()) (%rn! run %ENV env)
+    (%rn! run %TTY tty) (%rn! run %SIZE (if (null? tty) () ((List ref 1 tty)))) (%rn! run %ESC 1)
     (%rn! run %LISTENERS
       (List map (fn (_ f) (list (if (null? (first f)) (Socket tcp-listen (List ref 1 f))
                                   (Socket tcp-listen-on (first f) (List ref 1 f)))
@@ -456,7 +536,7 @@
                      (Sys poll (List append (list (pair sock (list (lit in))))
                                             (List map (fn (_ l) (pair (first l) (list (lit in)))) (%rn run %LISTENERS))
                                             (List map (fn (_ ch) (pair (%ch ch %INPUT) (list (lit in)))) inputs))
-                               (%wait-ms limits)))
+                               (%poll-ms run limits)))
                    (List for-each
                      (fn (_ l) (when (%ready? ready (first l))
                                  (%open-forward! c run (Socket accept (first l)) (List ref 1 l) (List ref 2 l))))
@@ -465,7 +545,8 @@
                      (fn (_ ch) (when (%ready? ready (%ch ch %INPUT)) (%pump! c run ch)))
                      inputs)
                    (when (%ready? ready sock) (%handle! c run))
-                   (%clocks! c limits)))
+                   (%clocks! c limits)
+                   (%resized! c run)))
              (when (> (%rn run %MOVED) %collect-every)
                (do (Heap collect) (%rn! run %MOVED 0)))
              (self)))))

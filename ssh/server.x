@@ -39,6 +39,7 @@
 (import x/codec/crypt)
 (import x/sys/syslog)
 (import ssh/keygen ssh-key-fingerprint)
+(import ssh/pty ssh-pty-open ssh-pty-window! ssh-pty-attach!)
 (import ssh/config ssh-config-read ssh-config-options ssh-config-first ssh-config-all ssh-config-faults
   ssh-config-time ssh-config-patterns? ssh-config-sshd-keywords)
 
@@ -55,7 +56,10 @@
 (def %get (fn (_ s k) (rest (List find (fn (_ p) (eq? (first p) k)) s))))
 
 ; An error's message: an Err's own, or a word for what the engine raised.
-(def %message (fn (_ e) (guard (e2 "an internal error") (e msg))))
+(def %message
+  (fn (_ e)
+    (guard (e2 "an internal error")
+      (if (Err engine? e) (Str8 append (Err %str (Err code-of e)) ": " (Err %str (Err subject-of e))) (e msg)))))
 
 ; --- the log ---------------------------------------------------------------
 
@@ -478,23 +482,36 @@
 
 ; --- the command, on three pipes ------------------------------------------
 
-; The command run in the user's shell, its standard input, output and
-; error each a pipe: (PID IN OUT ERR), IN the end we write, OUT and ERR
-; the ends we read.
+; The command run in the user's shell, or the shell itself when command
+; is (), in the user's home directory as OpenSSH's sessions start: on
+; three pipes, (PID IN OUT ERR), IN the end we write, OUT and ERR the
+; ends we read; or on the session's terminal, its master both IN and OUT
+; and ERR (), the shell interactive since its input is a terminal, TERM
+; and the window set as the client gave them.
 (def %spawn
-  (fn (_ command sock env)
-    (def i (Sys pipe)) (def o (Sys pipe)) (def e (Sys pipe))
+  (fn (_ command sock env pty term home)
+    (def pipes (if (null? pty) (list (Sys pipe) (Sys pipe) (Sys pipe)) ()))
     (def pid (Sys fork))
     (when (= pid 0)
-      (Sys dup2 (first i) 0) (Sys dup2 (rest o) 1) (Sys dup2 (rest e) 2)
-      (List for-each (fn (_ fd) (Sys close fd))
-        (list (first i) (rest i) (first o) (rest o) (first e) (rest e) sock))
+      (if (null? pty)
+        (do (def i (first pipes)) (def o (List ref 1 pipes)) (def e (List ref 2 pipes))
+            (Sys dup2 (first i) 0) (Sys dup2 (rest o) 1) (Sys dup2 (rest e) 2)
+            (List for-each (fn (_ fd) (Sys close fd))
+              (list (first i) (rest i) (first o) (rest o) (first e) (rest e))))
+        (do (Sys close (first pty))
+            (ssh-pty-attach! (rest pty) (List ref 1 term) (List ref 2 term))
+            (Sys setenv "TERM" (first term))))
+      (Sys close sock)
       (List for-each (fn (_ v) (Sys setenv (first v) (rest v))) env)
-      (def shell (Sys getenv "SHELL"))
-      (Sys exec (if (if (null? shell) #t (= (Str8 length shell) 0)) "/bin/sh" shell) (list "-c" command))
+      (guard (e ()) (Sys chdir home))
+      (def shell ((fn (_ s) (if (if (null? s) #t (= (Str8 length s) 0)) "/bin/sh" s)) (Sys getenv "SHELL")))
+      (Sys exec shell (if (null? command) () (list "-c" command)))
       (Sys exit 127))
-    (Sys close (first i)) (Sys close (rest o)) (Sys close (rest e))
-    (list pid (rest i) (first o) (first e))))
+    (if (null? pty)
+      (do (def i (first pipes)) (def o (List ref 1 pipes)) (def e (List ref 2 pipes))
+          (Sys close (first i)) (Sys close (rest o)) (Sys close (rest e))
+          (list pid (rest i) (first o) (first e)))
+      (list pid (first pty) (first pty) ()))))
 
 ; --- the clocks ------------------------------------------------------------
 ;
@@ -559,9 +576,12 @@
 ; as (PID IN OUT ERR) or (), 7 whether OUT and 8 whether ERR are still
 ; open (a forward's OUT: whether its connection is still read), 9 a
 ; forward's connection, 10 whether the client has closed the
-; channel, 11 whether we have, 12 whether the client has sent EOF.
+; channel, 11 whether we have, 12 whether the client has sent EOF, 13 a
+; session's terminal as (MASTER . SLAVE-PATH) or (), 14 its TERM and window
+; as (TERM COLUMNS ROWS).
 (def %PEER 1) (def %OURS 2) (def %WINDOW 3) (def %MAX 4) (def %KIND 5) (def %CHILD 6)
 (def %OUT 7) (def %ERR 8) (def %FD 9) (def %PEER-CLOSED 10) (def %CLOSED 11) (def %PEER-EOF 12)
+(def %PTY 13) (def %TERM 14)
 (def %ch (fn (_ ch i) (%oref ch i)))
 (def %ch! (fn (_ ch i v) (%oset! ch i v)))
 
@@ -583,7 +603,7 @@
 ; A channel added to the table, numbered next.
 (def %channel!
   (fn (_ run kind peer window max)
-    (def ch (Vector make 12 ()))
+    (def ch (Vector make 14 ()))
     (%ch! ch %PEER peer) (%ch! ch %OURS (%rn run %NEXT))
     (%rn! run %NEXT (+ (%rn run %NEXT) 1))
     (%ch! ch %WINDOW window) (%ch! ch %MAX max) (%ch! ch %KIND kind)
@@ -802,13 +822,38 @@
         (do (def name (ssh-get-text in))
             (def want-reply (ssh-get-bool in))
             (def fresh (if (eq? (%ch ch %KIND) (lit session)) (null? (%ch ch %CHILD)) #f))
+            (def start!
+              (fn (_ command)
+                (def pty (%ch ch %PTY))
+                (%ch! ch %CHILD (%spawn command sock (%rn run %ENV) pty (%ch ch %TERM) (%home (%me))))
+                (%ch! ch %OUT #t) (%ch! ch %ERR (null? pty))
+                (%reply c ch want-reply #t)))
             (match
               ((if fresh (str=? name "exec") #f)
                 (do (def command (ssh-get-text in))
                     (%debug (Str8 append "exec: " command))
-                    (%ch! ch %CHILD (%spawn command sock (%rn run %ENV)))
-                    (%ch! ch %OUT #t) (%ch! ch %ERR #t)
-                    (%reply c ch want-reply #t)))
+                    (start! command)))
+              ((if fresh (str=? name "shell") #f)
+                (do (%debug (if (null? (%ch ch %PTY)) "shell" (Str8 append "shell on " (rest (%ch ch %PTY)))))
+                    (start! ())))
+              ; a terminal for the session (RFC 4254 6.2): TERM, the window
+              ; in characters, then in pixels, and the modes, which are
+              ; the terminal's own defaults here
+              ((if fresh (if (str=? name "pty-req") (null? (%ch ch %PTY)) #f) #f)
+                (do (def term (ssh-get-text in))
+                    (def cols (ssh-get-uint32 in))
+                    (def rows (ssh-get-uint32 in))
+                    (def pty (ssh-pty-open))
+                    (unless (null? pty)
+                      (do (%ch! ch %PTY pty)
+                          (%ch! ch %TERM (list term cols rows))))
+                    (%debug (if (null? pty) "pty-req refused: no pseudo-terminal" (Str8 append "pty-req " term " on " (rest pty))))
+                    (%reply c ch want-reply (not (null? pty)))))
+              ((str=? name "window-change")
+                (do (def cols (ssh-get-uint32 in))
+                    (def rows (ssh-get-uint32 in))
+                    (unless (null? (%ch ch %PTY)) (ssh-pty-window! (first (%ch ch %PTY)) cols rows))
+                    (%reply c ch want-reply (not (null? (%ch ch %PTY))))))
               ; a variable kept for the command when AcceptEnv's
               ; patterns take its name
               ((if fresh (str=? name "env") #f)
@@ -832,8 +877,11 @@
             (%send c adj)
             (%moved! run (rest r))))
       ((= t %msg-channel-eof)
+        ; a session's input ends with its pipe closed; a terminal's is
+        ; left open, as OpenSSH leaves it: closing the master would end the
+        ; session under the shell
         (if (eq? (%ch ch %KIND) (lit session))
-          (unless (null? (%ch ch %CHILD)) (Sys close (List ref 1 (%ch ch %CHILD))))
+          (unless (if (null? (%ch ch %CHILD)) #t (not (null? (%ch ch %PTY)))) (Sys close (List ref 1 (%ch ch %CHILD))))
           (do (guard (e ()) (Socket shutdown (%ch ch %FD) (lit write)))
               (%ch! ch %PEER-EOF #t)
               (unless (%ch ch %OUT) (%close! c ch)))))
@@ -978,7 +1026,7 @@
       (do (def done (Str8 append "Disconnected from user " user " " from))
           (%log (guard (e (match ((str=? (%message e) "keepalive") (Str8 append "Timeout, client not responding from user " user " " from))
                                  ((str=? (%message e) "idle") (Str8 append done ": the channels were idle past ChannelTimeout"))
-                                 (#t done)))
+                                 (#t (Str8 append done ": " (%message e)))))
                   (%serve-session c fd s)
                   done))))
     (Socket close fd)))

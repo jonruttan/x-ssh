@@ -22,10 +22,15 @@ it is tested against.
 
 Every end speaks curve25519-sha256, ssh-ed25519 and
 chacha20-poly1305@openssh.com, with publickey and password authentication
-and one command a connection.
+and one session a connection: a command, or a shell on a terminal.
 
-- `ssh`: a command run on a host, its output and exit status, with the
-  client's standard input carried to it.  The configuration is
+- `ssh`: a command run on a host, or with none a shell, its output and
+  exit status, with the client's standard input carried to it.  A
+  terminal is asked for as RequestTTY says -- by default for a shell
+  when standard input is one, `-t` for a command too, `-T` never -- with
+  TERM and the window; the local terminal is raw for the session, a
+  resize is sent on, and `~.` at a line's start ends the connection.
+  The configuration is
   ssh_config(5)'s: `-o` options, then `~/.ssh/config` (or `-F`'s file),
   then `/etc/ssh/ssh_config`, the first value holding, with `Host` and
   `Match` blocks and `Include`.  Each flag stands for its keyword: `-p`
@@ -66,7 +71,10 @@ and one command a connection.
   log goes to syslog as `sshd`, or to standard error under `-e`, to a
   file under `-E`; `-d` serves one connection in the foreground; `-t`
   tests the configuration and `-T` prints it.  Each connection is served
-  by a forked child; the command runs under the user's shell.  `git
+  by a forked child, in the user's home directory; a command runs under
+  the user's shell, and a session that asks for a terminal gets a
+  pseudo-terminal with its TERM and window, resized as the client's
+  is, its shell interactive on it.  `git
   clone` over it works.
 - `ssh-keygen`: `-t ed25519 [-f FILE] [-C comment] [-N passphrase]`
   makes a key in OpenSSH's format, sealed under the passphrase as
@@ -85,8 +93,8 @@ and one command a connection.
   (`-t`, `-f`, `-d`) it is what an OpenSSH `scp -O` reaches.
 - `-V` on each, and `--help` from its option declaration.
 
-Not served yet: other ciphers and key types, agents, terminals and
-shells, SFTP, other users than the one a server runs as.
+Not served yet: other ciphers and key types, agents, SFTP, terminal
+modes from pty-req, other users than the one a server runs as.
 
 The oracles in `tests/oracle/` are the live tests: `client.sh` drives
 the client against a built Dropbear, `server.sh` drives the server with

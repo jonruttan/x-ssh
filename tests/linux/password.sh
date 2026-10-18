@@ -1,7 +1,7 @@
 #!/bin/sh
 # # x-ssh -- SSH on x-lang
 #
-# ## tests/linux/password.sh -- password logins, as root in the container
+# ## tests/linux/password.sh -- password logins and a shell, as root in the container
 #
 # A user is made with a known password, its SHA-512 crypt in /etc/shadow
 # ("pw", x-lang's Crypt example), and the x-ssh sshd started as root, the
@@ -12,6 +12,8 @@
 #   ssh        OpenSSH's client, the password by SSH_ASKPASS
 #   x-ssh      x-ssh's own client, the password by SSH_ASKPASS, no key
 #   wrong      a wrong password is refused, status 255, and logged
+#   shell      x-ssh at a terminal (expect), by root's key: a shell on a
+#              pseudo-terminal, its window and a resize, its exit status, ~.
 #   prompt     x-ssh's client asks at the terminal (expect): whether to
 #              trust the new host, then the password, again after a wrong
 #              one, echoing neither
@@ -47,7 +49,7 @@ fail() { echo "FAIL: $1" >&2; cat "$fx/client.err" >&2; tail -5 "$fx/server.log"
 # standard error unless the caller says otherwise.
 start() {
 	port=$1; log=$2; shift 2
-	USER=root "$X" -l ssh -- sshd -D -f /dev/null -h "$fx/hostkey" -o ListenAddress=127.0.0.1 -p "$port" -o PidFile=none "$@" > "$log" 2>&1 &
+	USER=root SHELL=/bin/sh "$X" -l ssh -- sshd -D -f /dev/null -h "$fx/hostkey" -o ListenAddress=127.0.0.1 -p "$port" -o PidFile=none "$@" > "$log" 2>&1 &
 }
 started() {
 	i=0
@@ -98,6 +100,16 @@ if [ "$status" = 255 ] && grep -q "Failed password for root from 127.0.0.1 port 
 	echo "ok: wrong -- a wrong password is refused and logged"
 else
 	fail "wrong: status $status"
+fi
+
+# shell: x-ssh at a terminal (expect), by root's key: a shell on the
+# server's pseudo-terminal, its window and a resize, its exit status, ~.
+"$X" -l ssh -- ssh-keygen -q -t ed25519 -N '' -f "$fx/userkey" > /dev/null 2>&1
+mkdir -p /root/.ssh /tmp/shell-home && cp "$fx/userkey.pub" /root/.ssh/authorized_keys
+if expect tests/oracle/shell.exp "$port" "$fx/userkey" root /tmp/shell-home > "$fx/shell.out" 2>&1 && grep -qx ok "$fx/shell.out"; then
+	echo "ok: shell -- x-ssh at a terminal: a shell, its window and a resize, its exit status, and ~."
+else
+	fail "shell: $(cat "$fx/shell.out")"
 fi
 
 # prompt

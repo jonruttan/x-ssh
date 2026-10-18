@@ -1,0 +1,56 @@
+#!/usr/bin/expect -f
+# shell.exp PORT KEY USER HOME -- x-ssh's client at a terminal, logged in
+# to a shell: the window it sends, a resize carried as window-change, the
+# shell's exit status, and the ~. escape.  The server runs /bin/sh.
+set port [lindex $argv 0]
+set key [lindex $argv 1]
+set user [lindex $argv 2]
+set home [lindex $argv 3]
+set timeout 120
+log_user 0
+proc login {} {
+	global port key user home env spawn_id spawn_out
+	spawn env HOME=$home TERM=xterm-x-ssh $env(X) -l ssh -- ssh -F none -o StrictHostKeyChecking=accept-new \
+		-p $port -i $key -l $user 127.0.0.1
+	stty rows 33 columns 101 < $spawn_out(slave,name)
+	send "PS1='xp> '\r"
+	expect {
+		"xp> " {}
+		timeout { puts "FAIL: no prompt"; exit 1 }
+	}
+}
+
+login
+send "stty size; echo term=\$TERM\r"
+expect {
+	-re {33 101.*term=xterm-x-ssh} {}
+	timeout { puts "FAIL: the window or TERM did not arrive"; exit 1 }
+}
+expect "xp> "
+stty rows 40 columns 120 < $spawn_out(slave,name)
+sleep 2
+send "stty size\r"
+expect {
+	"40 120" {}
+	timeout { puts "FAIL: the resize did not arrive"; exit 1 }
+}
+expect "xp> "
+send "exit 7\r"
+expect {
+	"Connection to 127.0.0.1 closed." {}
+	timeout { puts "FAIL: no word of the closed connection"; exit 1 }
+}
+expect eof
+set status [lindex [wait] 3]
+if {$status != 7} { puts "FAIL: exit status $status"; exit 1 }
+
+login
+send "\r~."
+expect {
+	"Connection to 127.0.0.1 closed." {}
+	timeout { puts "FAIL: ~. did not end the connection"; exit 1 }
+}
+expect eof
+set status [lindex [wait] 3]
+if {$status != 255} { puts "FAIL: ~. gave status $status"; exit 1 }
+puts "ok"

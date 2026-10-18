@@ -20,6 +20,7 @@
 (import x/sys/socket)
 (import x/sys/file)
 (import x/sys/posix)
+(import x/repl/term)
 (import ssh/ask ssh-ask-tty ssh-ask-secret)
 (import ssh/bytes ssh-copy)
 (import ssh/transport ssh-open ssh-host-key ssh-engines! ssh-exchange-versions! ssh-kex!
@@ -59,7 +60,10 @@
 (def %get (fn (_ s k) (rest (List find (fn (_ p) (eq? (first p) k)) s))))
 
 ; An error's message: an Err's own, or a word for what the engine raised.
-(def %message (fn (_ e) (guard (e2 "an internal error") (e msg))))
+(def %message
+  (fn (_ e)
+    (guard (e2 "an internal error")
+      (if (Err engine? e) (Str8 append (Err %str (Err code-of e)) ": " (Err %str (Err subject-of e))) (e msg)))))
 
 ; The user this client runs as: USER, or the passwd entry of its uid.
 (def %me
@@ -208,7 +212,8 @@
           (pair (lit level) (%choice lines "loglevel" (list "quiet" "fatal" "error" "info" "verbose" "debug" "debug1" "debug2" "debug3") "info"))
           (pair (lit session) session)
           (pair (lit command) ((fn (_ c) (if (str=? (Str8 downcase c) "none") () c)) (%one lines "remotecommand" "none")))
-          (pair (lit stdin-null) (%yes? lines "stdinnull" #f)))))
+          (pair (lit stdin-null) (%yes? lines "stdinnull" #f))
+          (pair (lit tty) (%choice lines "requesttty" (list "no" "yes" "force" "auto") "auto")))))
 
 ; The settings as -G prints them, a keyword and its value a line.
 (def %print
@@ -240,7 +245,8 @@
           (List map (fn (_ e) (Str8 append "setenv " e)) (%get s (lit setenv)))
           (list (Str8 append "loglevel " (Str8 upcase (%get s (lit level))))
                 (Str8 append "sessiontype " (%get s (lit session)))
-                (Str8 append "stdinnull " (yn (%get s (lit stdin-null)))))
+                (Str8 append "stdinnull " (yn (%get s (lit stdin-null))))
+                (Str8 append "requesttty " (%get s (lit tty))))
           (if (null? (%get s (lit command))) () (list (Str8 append "remotecommand " (%get s (lit command)))))
           (if (null? (%get s (lit alias))) () (list (Str8 append "hostkeyalias " (%get s (lit alias))))))))))
 
@@ -251,6 +257,16 @@
 ; in batch mode.
 (def %ask-secret (fn (_ s text) (if (%get s (lit batch)) () (ssh-ask-secret text #f))))
 
+; The terminal's window as (COLUMNS . ROWS): what the terminal reports,
+; else COLUMNS and LINES, else 80 by 24, as OpenSSH's -tt sends it.  Term
+; window's own fallback to the environment never takes on v0.33.0.
+(def %window
+  (fn (_ fd)
+    (def m (Term measure fd))
+    (def env (fn (_ name d) ((fn (_ v) (if (null? v) d ((fn (_ n) (if (if (null? n) #t (< n 1)) d n)) (%int-or-nil v)))) (Sys getenv name))))
+    (if (null? m) (pair (env "COLUMNS" 80) (env "LINES" 24)) m)))
+
+; --- the host key ----------------------------------------------------------
 
 (def %verification-failed (fn (_) (%say 2 "Host key verification failed.\n") #f))
 
@@ -438,21 +454,47 @@
                     (Socket close fd)
                     255)
                 (do (unless (null? tr) (tr (Str8 append "Authenticated to " host " ([" addr "]:" (%num port) ").")))
-                    (def status
-                      (ssh-session-run! c command
-                        (if (if (%get s (lit stdin-null)) #t (if (null? command) (null? stdio) #f)) () %stdin)
-                        (fn (_ buf start len) (File write 1 (ssh-copy buf start len) len))
-                        (fn (_ buf start len) (File write 2 (ssh-copy buf start len) len))
-                        (List map (fn (_ f) (pair (if (null? (first f)) () (%address (first f))) (rest f))) (%get s (lit forwards)))
-                        (%get s (lit remotes))
-                        (if (null? stdio) () (pair (%address (first stdio)) (rest stdio)))
-                        (%get s (lit limits))
-                        (%environment s)))
-                    (ssh-disconnect! c)
+                    ; a terminal as RequestTTY says: force always, yes
+                    ; when standard input is one, auto for a shell on one
+                    (def local-tty (Sys isatty %stdin))
+                    (def want (%get s (lit tty)))
+                    (def tty?
+                      (match ((str=? want "force") #t)
+                             ((str=? want "no") #f)
+                             ((not (null? stdio)) #f)
+                             ((str=? want "yes") local-tty)
+                             (#t (if (eq? command (lit shell)) local-tty #f))))
+                    (when (if (str=? want "yes") (if (not local-tty) (not quiet) #f) #f)
+                      (%say 2 "Pseudo-terminal will not be allocated because stdin is not a terminal.\r\n"))
+                    (def term ((fn (_ t) (if (null? t) "" t)) (Sys getenv "TERM")))
+                    (def saved (if (if tty? local-tty #f) (Term raw! %stdin) ()))
+                    (def outcome
+                      (guard (e (pair (lit failed) (%message e)))
+                        (pair (lit status)
+                          (ssh-session-run! c command
+                            (if (if (%get s (lit stdin-null)) #t (if (null? command) (null? stdio) #f)) () %stdin)
+                            (fn (_ buf start len) (File write 1 (ssh-copy buf start len) len))
+                            (fn (_ buf start len) (File write 2 (ssh-copy buf start len) len))
+                            (List map (fn (_ f) (pair (if (null? (first f)) () (%address (first f))) (rest f))) (%get s (lit forwards)))
+                            (%get s (lit remotes))
+                            (if (null? stdio) () (pair (%address (first stdio)) (rest stdio)))
+                            (%get s (lit limits))
+                            (%environment s)
+                            (if tty? (list term (fn (_) (%window %stdin))) ())))))
+                    (unless (null? saved) (Term restore! %stdin saved))
+                    (guard (e2 ()) (ssh-disconnect! c))
                     (Socket close fd)
-                    (def code (if (null? status) 0 status))
-                    (unless (null? tr) (tr (Str8 append "Exit status " (%num code))))
-                    code))))))))
+                    (def closed (Str8 append "Connection to " host " closed.\n"))
+                    (match
+                      ((eq? (first outcome) (lit status))
+                        (do (when (if tty? (not quiet) #f) (%say 2 closed))
+                            (def code (if (null? (rest outcome)) 0 (rest outcome)))
+                            (unless (null? tr) (tr (Str8 append "Exit status " (%num code))))
+                            code))
+                      ((str=? (rest outcome) "escape") (do (%say 2 closed) 255))
+                      ((str=? (rest outcome) "keepalive") (do (%say 2 (Str8 append "Timeout, server " host " not responding.\n")) 255))
+                      ((str=? (rest outcome) "idle") (do (%say 2 (Str8 append "Connection to " host " closed: the channels were idle past ChannelTimeout.\n")) 255))
+                      (#t (do (%say 2 (Str8 append (rest outcome) "\n")) 255)))))))))))
 
 ; The client's plan done: (HOST COMMAND OPTIONS CONFIG STDIO PRINT).
 ; The configuration settled -- the options, the user's file (-F's, or
@@ -490,13 +532,16 @@
                             (if (if (null? i) #t (null? p)) (Err raise 'value "stdio forward specification must be host:port" ())
                               (pair (Str8 sub 0 i w) p)))
                           (List ref 4 plan))))
+            ; the command: none under SessionType none, the one given or
+            ; RemoteCommand's, or else the user's shell -- unless -W
+            ; carries the session's place
             (def command (match ((str=? (%get s (lit session)) "none") ())
                                 ((not (null? (List ref 1 plan))) (List ref 1 plan))
-                                (#t (%get s (lit command)))))
-            (match
-              ((List ref 5 plan) (do (%say 1 (%print s)) 0))
-              ((if (null? command) (if (null? stdio) (not (str=? (%get s (lit session)) "none")) #f) #f)
-                (do (%say 2 "ssh: no command given, and a shell is not served yet\n") 255))
-              (#t (%run s command stdio))))))))
+                                ((not (null? (%get s (lit command)))) (%get s (lit command)))
+                                ((null? stdio) (lit shell))
+                                (#t ())))
+            (if (List ref 5 plan)
+              (do (%say 1 (%print s)) 0)
+              (%run s command stdio)))))))
 
 (provide ssh/client ssh-client-main ssh-client-settings)

@@ -18,6 +18,9 @@
 #   x-ssh     x-ssh's own client, with the Dropbear-format key
 #   refused   a key not in authorized_keys is refused
 #   input     200000 random bytes through `cksum` on the server's side
+#   terminal  OpenSSH's -tt and x-ssh's RequestTTY force get a terminal, its
+#             window and TERM; x-ssh at a terminal under expect (shell.exp):
+#             a shell, a resize, its exit status, and the ~. escape
 #   env       OpenSSH's SetEnv and x-ssh's SendEnv reach the command for
 #             a variable AcceptEnv takes, and not for one it does not
 #   git       `git clone` over OpenSSH's client from the server's
@@ -74,7 +77,7 @@ started() {
 		sleep 1
 	done
 }
-sshd -D -e -p "$port" -o LogLevel=DEBUG1 -o AcceptEnv='XSSH_*' > "$fx/server.log" 2>&1 &
+SHELL=/bin/sh sshd -D -e -p "$port" -o LogLevel=DEBUG1 -o AcceptEnv='XSSH_*' > "$fx/server.log" 2>&1 &
 srvpid=$!
 # the listener builds the curves' engines before it listens
 started "$fx/server.log" "$port"
@@ -147,6 +150,25 @@ if [ "$out" = "from-openssh/none" ] && [ "$out2" = "from-x-ssh" ]; then
 	echo "ok: env -- AcceptEnv takes what it names from either client, and nothing else"
 else
 	fail "env: OpenSSH's '$out', x-ssh's '$out2'"
+fi
+
+# terminal: OpenSSH's -tt gets a terminal on the server, TERM carried;
+# x-ssh's RequestTTY force sends its window, from COLUMNS and LINES where
+# standard input is no terminal; and x-ssh at a terminal (expect): a
+# shell, its window and a resize, its exit status, and ~.
+out=$(TERM=xterm-x-ssh $ossh -tt -i "$fx/osshkey" "$user@127.0.0.1" 'tty; echo "term=$TERM"' < /dev/null 2> "$fx/client.err" | tr -d '\r')
+out2=$(env COLUMNS=101 LINES=33 TERM=xterm-x-ssh HOME="$fx/home" "$X" -l ssh -- ssh -F none -o StrictHostKeyChecking=accept-new -q -p "$port" -i "$fx/dbkey" -l "$user" \
+	-o RequestTTY=force 127.0.0.1 'stty size; echo "term=$TERM"' < /dev/null 2> "$fx/client.err" | tr -d '\r')
+if printf '%s\n' "$out" | grep -q '^/dev/' && printf '%s\n' "$out" | grep -qx 'term=xterm-x-ssh' \
+	&& printf '%s\n' "$out2" | grep -qx '33 101' && printf '%s\n' "$out2" | grep -qx 'term=xterm-x-ssh'; then
+	echo "ok: terminal -- OpenSSH's -tt and x-ssh's RequestTTY force get a terminal, window and TERM"
+else
+	fail "terminal: OpenSSH's '$out', x-ssh's '$out2'"
+fi
+if expect "$(dirname "$0")/shell.exp" "$port" "$fx/dbkey" "$user" "$fx/home" > "$fx/shell.out" 2>&1 && grep -qx ok "$fx/shell.out"; then
+	echo "ok: shell -- x-ssh at a terminal: a shell, its window and a resize, its exit status, and ~."
+else
+	fail "shell: $(cat "$fx/shell.out")"
 fi
 
 # git

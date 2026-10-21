@@ -1100,6 +1100,12 @@
     (unless foreground (%quiet!))
     ; the engines, built once: each connection's process inherits them
     (ssh-engines! ())
+    ; and the heap collected before the first fork: x collects only when
+    ; asked, so the boot's and the engines' garbage -- some 43 million
+    ; objects from source -- would go to every connection's process,
+    ; whose first collect marks and sweeps all of it, writing to every
+    ; page it shares with this one: a copy of the whole heap a connection
+    (Heap collect)
     (def chld (%signal-number "CHLD"))
     (unless (if debug #t (null? chld)) (Sys signal chld (Sys sig-ign)))
     ((fn (self)

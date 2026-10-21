@@ -34,7 +34,7 @@
   ssh-send-packet! ssh-next-packet! ssh-expect! ssh-msg-service-request ssh-msg-service-accept
   ssh-msg-userauth-request ssh-msg-userauth-failure ssh-msg-userauth-success ssh-msg-disconnect
   ssh-msg-global-request ssh-msg-request-success ssh-msg-request-failure)
-(import ssh/keys ssh-key-of-file)
+(import ssh/keys ssh-key-of-file ssh-key-wrong-passphrase)
 (import x/codec/ed25519)
 (import x/codec/crypt)
 (import x/sys/syslog)
@@ -952,12 +952,18 @@
 
 ; The host key: the first of the HostKey files that reads as an
 ; ssh-ed25519 key.  A named file that does not read is logged; the
-; default names of the types not served are passed over when absent.
+; default names of the types not served are passed over when absent.  A
+; key sealed under a passphrase is opened with none, as OpenSSH's sshd
+; opens it, and so refused, in its words.
 (def %host-key
   (fn (_ s)
     ((fn (self paths)
        (if (null? paths) ()
-         (do (def key (guard (e ()) (ssh-key-of-file (first paths))))
+         (do (def key (guard (e (do (when (str=? (guard (e2 "") (e msg)) ssh-key-wrong-passphrase)
+                                      (%log-at "error" (Str8 append "Unable to load host key \"" (first paths) "\": "
+                                                                    ssh-key-wrong-passphrase)))
+                                    ()))
+                        (ssh-key-of-file (first paths))))
              (when (if (null? key) (if (%get s (lit hostkeys-given)) #t (File exists? (first paths))) #f)
                (%log-at "error" (Str8 append "Unable to load host key: " (first paths))))
              (if (null? key) (self (rest paths)) key))))
@@ -1068,13 +1074,17 @@
             255))
       ((null? s) 255)
       (#t
-        (do (%oset! %log-to 1 (not (if stderr #t (not (null? logfile)))))
-            (%oset! %log-to 3 (Str8 ->sym (%get s (lit facility))))
+        (do (%oset! %log-to 3 (Str8 ->sym (%get s (lit facility))))
             (%oset! %log-to 4 (%rank (%get s (lit level))))
             (unless (null? logfile)
               ((fn (_ fd) (if (< fd 0) (say (Str8 append "Couldn't open logfile " logfile)) (%oset! %log-to 2 fd)))
                (File open logfile (list (lit wronly) (lit creat) (lit append)) 420)))
+            ; the host keys are loaded before the log moves to syslog, as
+            ; OpenSSH's sshd loads them: what does not load is said on
+            ; standard error, or -E's file
+            (%oset! %log-to 1 #f)
             (def key (%host-key s))
+            (%oset! %log-to 1 (not (if stderr #t (not (null? logfile)))))
             (match
               ((List ref 5 mode) (do (File write 1 (%print s) (%byte-len (%print s))) 0))
               ((null? key) (do (say "sshd: no hostkeys available -- exiting.") 1))

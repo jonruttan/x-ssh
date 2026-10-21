@@ -35,10 +35,12 @@
 #             client ending on its own ChannelTimeout, and a server with a
 #             ChannelTimeout closing an idle client
 #   test      -t passes a sound configuration and refuses AllowUsers
+#   sealed    a host key under a passphrase refused as OpenSSH's sshd refuses
+#             it (sshd -t, beside the system's /usr/sbin/sshd)
 #   background  ssh-keygen -A makes the host key; a server started without
 #             -D returns at once, writes its PidFile and serves dbclient
 #
-# The clients and git are the oracles.
+# The clients, git and the system's sshd are the oracles.
 set -u
 db=${1:?a built Dropbear directory}
 port=${2:-22322}
@@ -301,6 +303,20 @@ if [ "$good" = 0 ] && [ "$bad" = 255 ] && grep -q 'allowusers is not served' "$f
 	echo "ok: test -- -t passes a sound configuration and refuses AllowUsers"
 else
 	fail "test: -t gave $good, with AllowUsers $bad"; cat "$fx/test.out" "$fx/test.bad" >&2
+fi
+
+# sealed: a host key under a passphrase refused as OpenSSH's sshd refuses
+# it, in its words and with its status (its log ends a line CR LF on
+# standard error, x-ssh's LF)
+ssh-keygen -q -t ed25519 -N 'host sealed' -f "$fx/sealedhost"
+"$X" -l ssh -- sshd -t -f /dev/null -h "$fx/sealedhost" > "$fx/sealed.ours" 2>&1; s=$?
+ours="$(tr -d '\r' < "$fx/sealed.ours") status $s"
+/usr/sbin/sshd -t -f /dev/null -h "$fx/sealedhost" > "$fx/sealed.theirs" 2>&1; s=$?
+theirs="$(tr -d '\r' < "$fx/sealed.theirs") status $s"
+if [ -n "$ours" ] && [ "$ours" = "$theirs" ]; then
+	echo "ok: sealed -- a host key under a passphrase is refused as OpenSSH's sshd refuses it"
+else
+	fail "sealed: x-ssh said '$ours', OpenSSH '$theirs'"
 fi
 
 # background: ssh-keygen -A making the host key under a prefix, a server

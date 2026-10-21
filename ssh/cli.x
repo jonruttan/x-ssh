@@ -26,6 +26,7 @@
 
 (def %byte-len (prim-ref (lit str) (lit byte-len)))
 (def %byte-ref (prim-ref (lit str) (lit byte-ref)))
+(def %cvt (prim-ref (lit convert) (lit to)))
 
 (def %version-row (Opts flag "-V" "Print the version"))
 
@@ -71,6 +72,7 @@
             %version-row))
     (%row (lit keygen) "ssh-keygen" "the key tool" "[options]"
       (list (Opts flag "-A" "Make each missing host key in /etc/ssh, or under -f's prefix")
+            (Opts arg "-a" "rounds" "Rounds of bcrypt-pbkdf sealing a key under a passphrase (default 16)")
             (Opts arg "-b" "bits" "Key size in bits; an ed25519 key's is fixed")
             (Opts arg "-C" "comment" "The key's comment")
             (Opts arg "-F" "hostname" "Find hostname in known_hosts")
@@ -212,17 +214,23 @@
     (def file (%value o "-f"))
     (def type (if (Opts on? o "-t") (Str8 downcase (Opts value o "-t")) "ed25519"))
     (def plan (fn (_ what) (list (lit keygen) what 0)))
+    (def a (%value o "-a"))
+    (def n (if (null? a) 0 (Str8 length a)))
+    (def digits? ((fn (self i) (if (= i n) (> n 0) (if (if (>= (%byte-ref a i) #\0) (<= (%byte-ref a i) #\9) #f) (self (+ i 1)) #f))) 0))
+    (def rounds (match ((null? a) 16) (digits? (%cvt a (Type named INTEGER) 10)) (#t ())))
     (match
+      ((null? rounds) (list (lit keygen) (Str8 append "Invalid number: " a " (invalid)\n") 255))
+      ((< rounds 1) (list (lit keygen) (Str8 append "Invalid number: " a " (too small)\n") 255))
       ((Opts on? o "-A") (plan (list (lit hosts) file)))
       ((Opts on? o "-R") (plan (list (lit remove) (Opts value o "-R") file)))
       ((Opts on? o "-F") (plan (list (lit find) (Opts value o "-F") file)))
       ((Opts on? o "-y") (plan (list (lit public) file (%value o "-P"))))
       ((Opts on? o "-l") (plan (list (lit fingerprint) file (Opts on? o "-v"))))
-      ((Opts on? o "-p") (plan (list (lit passphrase) file (%value o "-P") (%value o "-N"))))
+      ((Opts on? o "-p") (plan (list (lit passphrase) file (%value o "-P") (%value o "-N") rounds)))
       ((List any? (fn (_ t) (str=? t type)) (list "rsa" "dsa" "ecdsa" "ecdsa-sk" "ed25519-sk"))
         (list (lit keygen) (Str8 append "x-ssh: key type " type " is not served yet\n") 1))
       ((not (str=? type "ed25519")) (list (lit keygen) (Str8 append "unknown key type " type "\n") 1))
-      (#t (plan (list (lit generate) file (%value o "-C") (%value o "-N") (Opts on? o "-q")))))))
+      (#t (plan (list (lit generate) file (%value o "-C") (%value o "-N") (Opts on? o "-q") rounds))))))
 
 ; scp's line: (scp (to OPERANDS PRESERVE RECURSIVE) 0) or (scp (from
 ; OPERANDS PRESERVE RECURSIVE) 0) for the remote ends, (scp (copy

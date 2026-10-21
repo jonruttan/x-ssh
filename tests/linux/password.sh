@@ -17,6 +17,10 @@
 #   prompt     x-ssh's client asks at the terminal (expect): whether to
 #              trust the new host, then the password, again after a wrong
 #              one, echoing neither
+#   passphrase x-ssh's client asks a sealed key's passphrase at the terminal
+#              (expect), again after a wrong one, echoing neither; its
+#              ssh-keygen -y and -p ask theirs, and OpenSSH's ssh-keygen
+#              opens the key -p sealed
 #   syslog     a server without -e logs to busybox's syslogd, as sshd in
 #              the auth facility
 #   root       under PermitRootLogin's default root's password is refused,
@@ -115,6 +119,17 @@ if expect tests/linux/prompt.exp "$port" > "$fx/prompt.out" 2>&1 && grep -qx ok 
 else
 	fail "prompt: $(cat "$fx/prompt.out")"
 fi
+
+# passphrase: a key sealed by x-ssh's ssh-keygen, root's authorized key
+"$X" -l ssh -- ssh-keygen -q -t ed25519 -N 'sealed pw' -C sealed -f "$fx/sealed" > /dev/null 2>&1
+mkdir -p /root/.ssh && cp "$fx/sealed.pub" /root/.ssh/authorized_keys
+if expect tests/linux/passphrase.exp "$port" "$fx/sealed" > "$fx/passphrase.out" 2>&1 && grep -qx ok "$fx/passphrase.out" \
+	&& [ "$(ssh-keygen -y -P 'new pw' -f "$fx/sealed" 2>/dev/null)" = "$(cat "$fx/sealed.pub")" ]; then
+	echo "ok: passphrase -- x-ssh asks a sealed key's passphrase, again after a wrong one, echoing neither; ssh-keygen -y and -p ask theirs, and OpenSSH's opens the key -p sealed"
+else
+	fail "passphrase: $(cat "$fx/passphrase.out")"
+fi
+rm -f /root/.ssh/authorized_keys
 
 # syslog: a server without -e logs to busybox's syslogd, as sshd, auth
 syslogd -O "$fx/messages"

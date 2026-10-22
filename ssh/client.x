@@ -257,15 +257,6 @@
 ; in batch mode.
 (def %ask-secret (fn (_ s text) (if (%get s (lit batch)) () (ssh-ask-secret text #f))))
 
-; The terminal's window as (COLUMNS . ROWS): what the terminal reports,
-; else COLUMNS and LINES, else 80 by 24, as OpenSSH's -tt sends it.  Term
-; window's own fallback to the environment never takes on v0.33.0.
-(def %window
-  (fn (_ fd)
-    (def m (Term measure fd))
-    (def env (fn (_ name d) ((fn (_ v) (if (null? v) d ((fn (_ n) (if (if (null? n) #t (< n 1)) d n)) (%int-or-nil v)))) (Sys getenv name))))
-    (if (null? m) (pair (env "COLUMNS" 80) (env "LINES" 24)) m)))
-
 ; --- the host key ----------------------------------------------------------
 
 (def %verification-failed (fn (_) (%say 2 "Host key verification failed.\n") #f))
@@ -480,7 +471,7 @@
                             (if (null? stdio) () (pair (%address (first stdio)) (rest stdio)))
                             (%get s (lit limits))
                             (%environment s)
-                            (if tty? (list term (fn (_) (%window %stdin))) ())))))
+                            (if tty? (list term (fn (_) (Term window %stdin))) ())))))
                     (unless (null? saved) (Term restore! %stdin saved))
                     (guard (e2 ()) (ssh-disconnect! c))
                     (Socket close fd)

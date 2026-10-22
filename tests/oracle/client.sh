@@ -26,6 +26,9 @@
 #            ssh-keygen; x-ssh's -y, -l and -p say what OpenSSH's do of
 #            a key OpenSSH sealed; a sealed key authenticates the client,
 #            its passphrase by SSH_ASKPASS once the server would take it
+#   host keys  a Dropbear with an RSA host key, then an ECDSA one: each
+#            checked and recorded in known_hosts under its type
+#   key types  ssh-keygen -l -v on RSA and ECDSA keys, as OpenSSH's
 #   rewrite  ssh-keygen -p turns Dropbear's host key into a file
 #            OpenSSH's ssh-keygen reads as the key dropbearkey shows
 #   known    ssh-keygen -F and -R on a known_hosts, as OpenSSH's do them
@@ -219,6 +222,42 @@ if [ "$out" = "sealed key" ] && [ "$asked" = "Enter passphrase for key '$fx/xsea
 	echo "ok: sealed -- a sealed key authenticates the client, asked for once the server would take it, never in batch mode"
 else
 	fail "sealed: the client said '$out', asked '$asked', batch status $bstatus"
+fi
+
+# host key types: a Dropbear with an RSA host key alone, then one with an
+# ECDSA P-256 key alone; x-ssh's client checks each signature and records
+# each key under its type, as Dropbear's own key files spell them
+for t in rsa:ssh-rsa ecdsa:ecdsa-sha2-nistp256; do
+	kind=${t%%:*}; type=${t##*:}
+	tport=$((port + 40))
+	"$db/dropbearkey" -t $kind -f "$fx/host-$kind" > /dev/null 2>&1
+	mkdir -p "$fx/types-$kind"
+	"$db/dropbear" -D "$fx" -p "127.0.0.1:$tport" -r "$fx/host-$kind" -F -s > "$fx/dropbear-$kind.log" 2>&1 &
+	tpid=$!
+	sleep 1
+	out=$(HOME="$fx/types-$kind" "$X" -l ssh -- ssh -F none -o StrictHostKeyChecking=accept-new -p "$tport" -i "$fx/userkey" -l "$user" \
+		127.0.0.1 "echo by $kind" < /dev/null 2> "$fx/client.err")
+	status=$?
+	kill $tpid 2>/dev/null; wait $tpid 2>/dev/null
+	want=$("$db/dropbearkey" -y -f "$fx/host-$kind" 2>/dev/null | grep "^$type " | cut -d' ' -f1-2)
+	line=$(cut -d' ' -f2-3 "$fx/types-$kind/.ssh/known_hosts" 2>/dev/null)
+	if [ "$out" = "by $kind" ] && [ "$status" = 0 ] && [ -n "$want" ] && [ "$line" = "$want" ]; then
+		echo "ok: host keys -- a $type host key checked and recorded"
+	else
+		fail "host keys: $type, output '$out' status $status, known_hosts '$line', the key '$want'"
+	fi
+done
+
+# key types: x-ssh's ssh-keygen -l -v on RSA and ECDSA public keys, as
+# OpenSSH's says them, randomart and all
+ssh-keygen -q -t rsa -b 3072 -N '' -C rsa-key -f "$fx/rsa-key"
+ssh-keygen -q -t ecdsa -b 384 -N '' -C ecdsa-key -f "$fx/ecdsa-key"
+ours=$("$X" -l ssh -- ssh-keygen -l -v -f "$fx/rsa-key.pub" 2> "$fx/client.err"; "$X" -l ssh -- ssh-keygen -l -v -f "$fx/ecdsa-key.pub" 2>> "$fx/client.err")
+theirs=$(ssh-keygen -l -v -f "$fx/rsa-key.pub"; ssh-keygen -l -v -f "$fx/ecdsa-key.pub")
+if [ -n "$ours" ] && [ "$ours" = "$theirs" ]; then
+	echo "ok: key types -- ssh-keygen -l -v on RSA and ECDSA keys as OpenSSH's"
+else
+	fail "key types: x-ssh '$ours', OpenSSH '$theirs'"
 fi
 
 # rewrite: -p turns Dropbear's key file into OpenSSH's

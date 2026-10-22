@@ -36,6 +36,7 @@
 (import ssh/bytes ssh-out ssh-put-byte ssh-put-bool ssh-put-uint32 ssh-put-bytes ssh-put-string ssh-put-text ssh-put-mpint ssh-put-names ssh-out-run
   ssh-in ssh-in-left ssh-in-buf ssh-get-byte ssh-get-bool ssh-get-uint32 ssh-get-string ssh-get-bytes ssh-get-text ssh-get-names
   ssh-copy ssh-join ssh-same-bytes?)
+(import ssh/pubkey ssh-pubkey-of ssh-pubkey-verify? ssh-pubkey-type ssh-pubkey-base64)
 
 (def %oref (prim-ref (lit obj) (lit ref)))
 (def %oset! (prim-ref (lit obj) (lit set!)))
@@ -301,18 +302,20 @@
 ; --- the key exchange (7), curve25519-sha256 (RFC 8731) --------------------
 
 (def %kex-names (list "curve25519-sha256" "curve25519-sha256@libssh.org"))
-(def %hostkey-names (list "ssh-ed25519"))
+; The host key algorithms this end checks, as a client offers them unless
+; known_hosts says which it already knows the host by.
+(def ssh-hostkey-names (list "ssh-ed25519" "ecdsa-sha2-nistp256" "ecdsa-sha2-nistp384" "rsa-sha2-512" "rsa-sha2-256"))
 (def %cipher-names (list "chacha20-poly1305@openssh.com"))
 (def %mac-names (list "hmac-sha2-256"))
 (def %comp-names (list "none"))
 
 (def %kexinit
-  (fn (_)
+  (fn (_ hostkeys)
     (def out (ssh-out))
     (ssh-put-byte out ssh-msg-kexinit)
     (ssh-put-bytes out (ssh-random 16) 0 16)
     (ssh-put-names out %kex-names)
-    (ssh-put-names out %hostkey-names)
+    (ssh-put-names out hostkeys)
     (ssh-put-names out %cipher-names) (ssh-put-names out %cipher-names)
     (ssh-put-names out %mac-names) (ssh-put-names out %mac-names)
     (ssh-put-names out %comp-names) (ssh-put-names out %comp-names)
@@ -328,11 +331,12 @@
     (List find (fn (_ n) (List any? (fn (_ m) (str=? m n)) server)) client)))
 
 ; The peer's KEXINIT read: each list must share a name with ours.  The
-; client's list leads, whichever side reads it.  Answers (WRONG-GUESS .
-; CHOSEN): whether a guessed packet that must be discarded follows, and
-; the kex, host key and two cipher names agreed.
+; client's list leads, whichever side reads it.  Answers (WRONG-GUESS
+; CHOSEN EXT): whether a guessed packet that must be discarded follows,
+; the kex, host key and two cipher names agreed, then whether the
+; client asked for extension negotiation (RFC 8308).
 (def %read-kexinit
-  (fn (_ c p server?)
+  (fn (_ c p server? hostkeys)
     (def in (ssh-in (first p) 17 (- (rest p) 17)))
     (def kex (ssh-get-names in))
     (def hk (ssh-get-names in))
@@ -340,7 +344,7 @@
     (def m1 (ssh-get-names in)) (def m2 (ssh-get-names in))
     (def z1 (ssh-get-names in)) (def z2 (ssh-get-names in))
     (def pick (fn (_ ours theirs) (if server? (%agree theirs ours) (%agree ours theirs))))
-    (def chosen (list (pick %kex-names kex) (pick %hostkey-names hk)
+    (def chosen (list (pick %kex-names kex) (pick hostkeys hk)
                       (pick %cipher-names c2s) (pick %cipher-names s2c)))
     (when (List any? null? chosen)
       (Err raise 'value "ssh: the peer offers none of our algorithms" ()))
@@ -355,7 +359,7 @@
       (if follows
         (if (str=? (first kex) (first chosen)) (not (str=? (first hk) (first (rest chosen)))) #t)
         #f))
-    (pair wrong-guess chosen)))
+    (list wrong-guess chosen (List any? (fn (_ n) (str=? n "ext-info-c")) kex))))
 
 ; SHA-256 of what an OUT holds, as 32 bytes.
 (def %sha256-out
@@ -383,12 +387,13 @@
 ; The whole exchange: KEXINIT both ways, our ephemeral key out, the
 ; server's back with its host key and signature over the exchange hash,
 ; the hash checked, NEWKEYS both ways, and the keys in place after.
+; hostkeys are the host key algorithms offered, in the order preferred.
 (def ssh-kex!
-  (fn (_ c)
-    (def ic (%kexinit))
+  (fn (_ c hostkeys)
+    (def ic (%kexinit hostkeys))
     (ssh-send-packet! c (first ic) (rest ic))
     (def is (ssh-expect! c ssh-msg-kexinit "KEXINIT"))
-    (%read-kexinit c is #f)
+    (%read-kexinit c is #f hostkeys)
     (def k (ssh-random 32))
     (def qc (X25519 base k))
     (def init (ssh-out))
@@ -401,12 +406,9 @@
     (def in (ssh-in (first reply) 1 (- (rest reply) 1)))
     (def ks-run (ssh-get-string in))
     (def qs (ssh-get-bytes in))
-    (def sig (ssh-get-bytes in))
-    ; the host key blob: string "ssh-ed25519", string the 32 bytes
-    (def kin (ssh-in (first reply) (first ks-run) (rest ks-run)))
-    (def ktype (ssh-get-text kin))
-    (unless (str=? ktype "ssh-ed25519") (Err raise 'value (Str8 append "ssh: host key of a type not served: " ktype) ()))
-    (def hostkey (ssh-get-bytes kin))
+    (def sig-run (ssh-get-string in))
+    ; the host key, of any type served
+    (def hostkey (ssh-pubkey-of (first reply) (first ks-run) (rest ks-run)))
     (def shared (X25519 scalarmult k qs))
     (when (not (List any? (fn (_ i) (not (= (%byte shared i) 0))) (list 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31)))
       (Err raise 'value "ssh: the shared secret is zero" ()))
@@ -421,13 +423,10 @@
     (ssh-put-string hin qs 0 32)
     (ssh-put-mpint hin shared 0 32)
     (def h (%sha256-out hin))
-    ; the signature blob: string "ssh-ed25519", string the 64 bytes
-    (def sin (ssh-in sig 0 (+ 4 11 4 64)))
-    (def stype (ssh-get-text sin))
-    (def sig64 (ssh-get-bytes sin))
-    (unless (if (str=? stype "ssh-ed25519") (Ed25519 verify hostkey sig64 h 0 32) #f)
+    ; the signature blob, by the host key over the exchange hash
+    (unless (ssh-pubkey-verify? hostkey (list (first reply) (first sig-run) (rest sig-run)) (list h 0 32))
       (Err raise 'value "ssh: the host key's signature does not check" ()))
-    (ssh-trace c (Str8 append "host key ssh-ed25519 " (Hex encode hostkey)))
+    (ssh-trace c (Str8 append "host key " (ssh-pubkey-type hostkey) " " (ssh-pubkey-base64 hostkey)))
     (%slot! c 9 hostkey)
     (when (null? (%slot c 7)) (%slot! c 7 h))
     (def nk (ssh-out))
@@ -451,10 +450,10 @@
 ; are the host key's halves.
 (def ssh-kex-server!
   (fn (_ c seed pub)
-    (def is (%kexinit))
+    (def is (%kexinit (list "ssh-ed25519")))
     (ssh-send-packet! c (first is) (rest is))
     (def ic (ssh-expect! c ssh-msg-kexinit "KEXINIT"))
-    (def agreed (%read-kexinit c ic #t))
+    (def agreed (%read-kexinit c ic #t (list "ssh-ed25519")))
     ; a client that guessed another exchange sent its packet already
     (when (first agreed) (ssh-next-packet! c))
     (def init (ssh-expect! c ssh-msg-kex-ecdh-init "KEX_ECDH_INIT"))
@@ -502,6 +501,17 @@
     (%slot! c 5 (%derive kmp h 68 (%slot c 7)))
     (%slot! c 6 (%derive kmp h 67 (%slot c 7)))
     (ssh-trace c "keys in place")
+    ; a client that asked for extensions is told the signature algorithms
+    ; its key may sign with (RFC 8308 3.1): OpenSSH's signs with an RSA key
+    ; as rsa-sha2-256 or -512 only when the server names them
+    (when (List ref 2 agreed)
+      (do (def ext (ssh-out))
+          (ssh-put-byte ext ssh-msg-ext-info)
+          (ssh-put-uint32 ext 1)
+          (ssh-put-text ext "server-sig-algs")
+          (ssh-put-names ext ssh-hostkey-names)
+          (def er (ssh-out-run ext))
+          (ssh-send-packet! c (first er) (rest er))))
     c))
 
 ; --- authentication (RFC 4252), publickey with ssh-ed25519 ---------------
@@ -609,7 +619,7 @@
     (ssh-send-packet! c (first rr) (rest rr))
     (%auth-answer c)))
 
-(provide ssh/transport ssh-version-string ssh-open ssh-fd ssh-session-id ssh-host-key ssh-pending? ssh-random ssh-engines!
+(provide ssh/transport ssh-version-string ssh-open ssh-fd ssh-session-id ssh-host-key ssh-hostkey-names ssh-pending? ssh-random ssh-engines!
   ssh-exchange-versions! ssh-send-packet! ssh-recv-packet! ssh-next-packet! ssh-expect! ssh-kex! ssh-kex-server! ssh-auth-service! ssh-auth-publickey-query! ssh-auth-publickey! ssh-auth-password!
   ssh-msg-disconnect ssh-msg-global-request ssh-msg-request-success ssh-msg-request-failure ssh-msg-service-request ssh-msg-service-accept
   ssh-msg-userauth-request ssh-msg-userauth-failure ssh-msg-userauth-success ssh-trace)

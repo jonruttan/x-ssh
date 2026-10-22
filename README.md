@@ -20,9 +20,13 @@ it is tested against.
 
 ## Served
 
-Every end speaks curve25519-sha256, ssh-ed25519 and
-chacha20-poly1305@openssh.com, with publickey and password authentication
-and one session a connection: a command, or a shell on a terminal.
+Every end speaks curve25519-sha256 and chacha20-poly1305@openssh.com,
+with publickey and password authentication and one session a
+connection: a command, or a shell on a terminal.  Keys and signatures:
+ssh-ed25519 everywhere; a client checks RSA (rsa-sha2-256 and -512) and
+ECDSA (nistp256, nistp384) host keys too, and a server takes RSA and
+ECDSA user keys -- making those keys, and signing with them, are not
+served yet.
 
 - `ssh`: a command run on a host, or with none a shell, its output and
   exit status, with the client's standard input carried to it.  A
@@ -59,7 +63,8 @@ and one session a connection: a command, or a shell on a terminal.
   file's.  Served keywords: Port, ListenAddress, HostKey (an ssh-ed25519
   key, OpenSSH's or Dropbear's file; one under a passphrase is refused,
   as OpenSSH's sshd refuses it), PidFile, AuthorizedKeysFile,
-  PasswordAuthentication (checked against `/etc/shadow` with crypt(3)'s
+  PubkeyAcceptedAlgorithms, PasswordAuthentication (checked against
+  `/etc/shadow` with crypt(3)'s
   DES, `$1$`, `$5$` or `$6$`), PubkeyAuthentication,
   PermitEmptyPasswords, PermitRootLogin, MaxAuthTries,
   AllowTcpForwarding, DisableForwarding, GatewayPorts,
@@ -93,7 +98,9 @@ and one session a connection: a command, or a shell on a terminal.
   (`-t`, `-f`, `-d`) it is what an OpenSSH `scp -O` reaches.
 - `-V` on each, and `--help` from its option declaration.
 
-Not served yet: other ciphers and key types, agents, SFTP, terminal
+Not served yet: other ciphers, RSA and ECDSA keys of one's own (a
+client's identity, a server's host key, ssh-keygen -t rsa or ecdsa),
+P-521, agents, SFTP, terminal
 modes from pty-req, other users than the one a server runs as.
 
 The oracles in `tests/oracle/` are the live tests: `client.sh` drives

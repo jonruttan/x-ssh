@@ -9,8 +9,8 @@
 ; What OpenSSH's sshd does, for the user it runs as: settle the
 ; configuration -- the command line's options, then sshd_config, the
 ; first value holding -- listen, take each connection in a process of its
-; own, exchange keys under the host key, let the user in by an
-; ssh-ed25519 key in an authorized_keys file or by the password in the
+; own, exchange keys under the host key, let the user in by an Ed25519,
+; RSA or ECDSA key in an authorized_keys file or by the password in the
 ; shadow file, as PermitRootLogin and the rest allow, and run the
 ; command an "exec" asks for in the user's shell, its standard input the
 ; channel's data and its output the channel's, its exit status sent back.
@@ -38,7 +38,8 @@
 (import x/codec/ed25519)
 (import x/codec/crypt)
 (import x/sys/syslog)
-(import ssh/keygen ssh-key-fingerprint)
+(import ssh/keygen ssh-key-fingerprint ssh-blob-fingerprint)
+(import ssh/pubkey ssh-pubkey-of ssh-pubkey-type ssh-pubkey-label ssh-pubkey-blob ssh-pubkey-algorithms ssh-pubkey-verify?)
 (import ssh/pty ssh-pty-open ssh-pty-window! ssh-pty-attach!)
 (import ssh/config ssh-config-read ssh-config-options ssh-config-first ssh-config-all ssh-config-faults
   ssh-config-time ssh-config-patterns? ssh-config-sshd-keywords)
@@ -200,6 +201,23 @@
           (when (if (str=? c "-") named (if (if (str=? c "+") #f (not (str=? c "^"))) (not named) #f))
             (%bad l (Str8 append kw " leaves out " ours ", the one served")))))))
 
+; An algorithm list as a filter of ours: a plain list keeps what it
+; names, a `-` list drops what it names, `+` and `^` lists keep them all;
+; one that would keep none is refused.
+(def %algorithm-list
+  (fn (_ lines kw ours)
+    (def l (%line lines kw))
+    (if (null? l) ours
+      (do (def v (%arg l))
+          (def c (if (> (Str8 length v) 0) (Str8 sub 0 1 v) ""))
+          (def names (Str8 split "," (if (List any? (fn (_ p) (str=? p c)) (list "+" "-" "^")) (Str8 sub 1 (- (Str8 length v) 1) v) v)))
+          (def named? (fn (_ a) (List any? (fn (_ n) (ssh-config-patterns? (list n) a)) names)))
+          (def kept (match ((str=? c "-") (List filter (fn (_ a) (not (named? a))) ours))
+                           ((if (str=? c "+") #t (str=? c "^")) ours)
+                           (#t (List filter named? ours))))
+          (when (null? kept) (%bad l (Str8 append kw " leaves out every algorithm served")))
+          kept))))
+
 ; A ListenAddress as (ADDRESS . PORT), PORT () when it names none:
 ; host, host:port, [host]:port; 0.0.0.0 or :: is every address, ().
 (def %listen
@@ -234,7 +252,6 @@
     (%algorithms lines "ciphers" "chacha20-poly1305@openssh.com")
     (%algorithms lines "kexalgorithms" "curve25519-sha256")
     (%algorithms lines "hostkeyalgorithms" "ssh-ed25519")
-    (%algorithms lines "pubkeyacceptedalgorithms" "ssh-ed25519")
     (list (pair (lit ports) ports*)
           (pair (lit listen)
             (if (null? listens) (List map (fn (_ p) (pair () p)) ports*)
@@ -246,6 +263,8 @@
                                    (if (if (= (List length akf) 1) (str=? (Str8 downcase (first akf)) "none") #f) () akf)))
           (pair (lit password) (%yes? lines "passwordauthentication" #t))
           (pair (lit pubkey) (%yes? lines "pubkeyauthentication" #t))
+          (pair (lit pubkey-algs) (%algorithm-list lines "pubkeyacceptedalgorithms"
+                                    (list "ssh-ed25519" "ecdsa-sha2-nistp256" "ecdsa-sha2-nistp384" "rsa-sha2-512" "rsa-sha2-256")))
           (pair (lit empty) (%yes? lines "permitemptypasswords" #f))
           (pair (lit root) ((fn (_ v) (if (str=? v "without-password") "prohibit-password" v))
                              (%choice lines "permitrootlogin" (list "yes" "no" "prohibit-password" "without-password" "forced-commands-only") "prohibit-password")))
@@ -274,6 +293,7 @@
                 (Str8 append "authorizedkeysfile " (if (null? (%get s (lit authorized))) "none" (Str8 join " " (%get s (lit authorized)))))
                 (Str8 append "passwordauthentication " (yn (%get s (lit password))))
                 (Str8 append "pubkeyauthentication " (yn (%get s (lit pubkey))))
+                (Str8 append "pubkeyacceptedalgorithms " (Str8 join "," (%get s (lit pubkey-algs))))
                 (Str8 append "permitemptypasswords " (yn (%get s (lit empty))))
                 (Str8 append "permitrootlogin " (%get s (lit root)))
                 (Str8 append "allowtcpforwarding " (if (str=? (%get s (lit tcp)) "all") "yes" (%get s (lit tcp))))
@@ -299,9 +319,11 @@
         (if (if (> (Str8 length e) 0) (= (%byte-ref e 0) #\/) #f) e (Str8 append home "/" e)))
       names)))
 
-; The base64 key of every ssh-ed25519 line in the files, options or not.
+; The keys of the files, options or not, of every type served, as (TYPE
+; . BASE64).
 (def %authorized
   (fn (_ paths)
+    (def types (list "ssh-ed25519" "ssh-rsa" "ecdsa-sha2-nistp256" "ecdsa-sha2-nistp384" "ecdsa-sha2-nistp521"))
     (List flat-map
       (fn (_ path)
         (def text (guard (e ()) (File read-all path)))
@@ -311,12 +333,12 @@
               (def ws (List filter (fn (_ w) (> (Str8 length w) 0))
                         (Str8 split " " (Str8 join " " (Str8 split "\t" line)))))
               ; the key follows its type, wherever options put the type
-              (def at ((fn (self ws) (if (null? ws) () (if (str=? (first ws) "ssh-ed25519") ws (self (rest ws))))) ws))
-              (if (if (null? at) #t (null? (rest at))) () (list (first (rest at)))))
+              (def at ((fn (self ws) (if (null? ws) () (if (List any? (fn (_ t) (str=? t (first ws))) types) ws (self (rest ws))))) ws))
+              (if (if (null? at) #t (null? (rest at))) () (list (pair (first at) (first (rest at))))))
             (Str8 split "\n" text))))
       paths)))
 
-; --- authentication (RFC 4252): publickey with ssh-ed25519, and password ----
+; --- authentication (RFC 4252): publickey, Ed25519, RSA or ECDSA, and password
 
 ; The methods a failure offers.
 (def %failure
@@ -448,8 +470,17 @@
                (def alg (ssh-get-text in))
                (def blob (ssh-get-string in))
                (def b64 (Base64 encode-bytes (%bytes (ssh-in-buf in) (first blob) (rest blob))))
-               (def kin (ssh-in (ssh-in-buf in) (first blob) (rest blob)))
-               (def known (if root-key? (if (str=? alg "ssh-ed25519") (List any? (fn (_ k) (str=? k b64)) keys) #f) #f))
+               ; the key, of any type served, offered with an algorithm it
+               ; signs with and PubkeyAcceptedAlgorithms allows
+               (def key (guard (e ()) (ssh-pubkey-of (ssh-in-buf in) (first blob) (rest blob))))
+               (def known
+                 (if (if root-key? (not (null? key)) #f)
+                   (if (List any? (fn (_ a) (str=? a alg)) (ssh-pubkey-algorithms key))
+                     (if (List any? (fn (_ a) (str=? a alg)) (%get s (lit pubkey-algs)))
+                       (List any? (fn (_ k) (if (str=? (first k) (ssh-pubkey-type key)) (str=? (rest k) b64) #f)) keys)
+                       #f)
+                     #f)
+                   #f))
                (match
                  ((not known) (fail user #t))
                  ((not signed?)
@@ -459,20 +490,16 @@
                        (%send c ok)
                        (self failures)))
                  (#t
-                   (do (ssh-get-text kin)
-                       (def pub (ssh-get-bytes kin))
-                       (def sig (ssh-get-string in))
-                       (def sin2 (ssh-in (ssh-in-buf in) (first sig) (rest sig)))
-                       (ssh-get-text sin2)
-                       (def sig64 (ssh-get-bytes sin2))
+                   (do (def sig (ssh-get-string in))
                        ; what was signed: the session id as a string, then the
                        ; request up to the signature's own length field
                        (def data (ssh-out))
                        (ssh-put-string data (ssh-session-id c) 0 32)
                        (ssh-put-bytes data (first p) 0 (- (first sig) 4))
                        (def msg (ssh-out-run data))
-                       (def line (Str8 append " for " user " from " from " ssh2: ED25519 " (ssh-key-fingerprint pub)))
-                       (if (Ed25519 verify pub sig64 (first msg) 0 (rest msg))
+                       (def line (Str8 append " for " user " from " from " ssh2: " (ssh-pubkey-label key) " "
+                                              (ssh-blob-fingerprint (ssh-pubkey-blob key))))
+                       (if (ssh-pubkey-verify? key (list (first p) (first sig) (rest sig)) (list (first msg) 0 (rest msg)))
                          (do (%send c (%packet-of ssh-msg-userauth-success))
                              (%log (Str8 append "Accepted publickey" line))
                              user)

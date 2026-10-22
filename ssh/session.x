@@ -125,9 +125,10 @@
 ; ended, 6 the exit status, 7 whether the server has closed the channel,
 ; 8 what takes its data, 9 what takes its extended data or (), 10 its
 ; kind, session or forward, 11 a forward's connection, 12 the session's
-; command.
+; command, 13 the bytes taken from the server not yet given back.
 (def %OURS 1) (def %SERVER 2) (def %WINDOW 3) (def %MAX 4) (def %INPUT 5) (def %STATUS 6)
 (def %CLOSED 7) (def %OUT 8) (def %ERR 9) (def %KIND 10) (def %FD 11) (def %COMMAND 12)
+(def %OWED 13)
 (def %ch (fn (_ ch i) (%oref ch i)))
 (def %ch! (fn (_ ch i v) (%oset! ch i v)))
 
@@ -166,10 +167,10 @@
 ; A channel added to the table, numbered next.
 (def %channel!
   (fn (_ run kind input out err fd command)
-    (def ch (Vector make 12 ()))
+    (def ch (Vector make 13 ()))
     (%ch! ch %OURS (%rn run %NEXT))
     (%rn! run %NEXT (+ (%rn run %NEXT) 1))
-    (%ch! ch %WINDOW 0) (%ch! ch %MAX 32768) (%ch! ch %INPUT input) (%ch! ch %CLOSED #f)
+    (%ch! ch %WINDOW 0) (%ch! ch %MAX 32768) (%ch! ch %INPUT input) (%ch! ch %CLOSED #f) (%ch! ch %OWED 0)
     (%ch! ch %OUT out) (%ch! ch %ERR err) (%ch! ch %KIND kind) (%ch! ch %FD fd) (%ch! ch %COMMAND command)
     (%rn! run %CHANNELS (List append (%rn run %CHANNELS) (list ch)))
     ch))
@@ -464,13 +465,13 @@
       ((= t %msg-channel-data)
         (do (def r (ssh-get-string in))
             ((%ch ch %OUT) (ssh-in-buf in) (first r) (rest r))
-            (%refill c (%ch ch %SERVER) (rest r))
+            (%refill c ch (rest r))
             (%moved! run (rest r))))
       ((= t %msg-channel-extended-data)
         (do (ssh-get-uint32 in)
             (def r (ssh-get-string in))
             (unless (null? (%ch ch %ERR)) ((%ch ch %ERR) (ssh-in-buf in) (first r) (rest r)))
-            (%refill c (%ch ch %SERVER) (rest r))
+            (%refill c ch (rest r))
             (%moved! run (rest r))))
       ((= t %msg-channel-request)
         (do (def name (ssh-get-text in))
@@ -552,13 +553,18 @@
              (self)))))
     (if (null? (%rn run %SESSION)) () (%ch (%rn run %SESSION) %STATUS))))
 
-; The window given back as it is used: the server may keep sending.
+; The window given back once half of it is used, as OpenSSH gives it: the
+; server keeps sending, and a run of small packets costs no adjust each.
 (def %refill
-  (fn (_ c server n)
-    (def adj (%packet-of %msg-channel-window-adjust))
-    (ssh-put-uint32 adj server)
-    (ssh-put-uint32 adj n)
-    (%send c adj)))
+  (fn (_ c ch n)
+    (def owed (+ (%ch ch %OWED) n))
+    (if (< owed (>> %window 1))
+      (%ch! ch %OWED owed)
+      (do (def adj (%packet-of %msg-channel-window-adjust))
+          (ssh-put-uint32 adj (%ch ch %SERVER))
+          (ssh-put-uint32 adj owed)
+          (%send c adj)
+          (%ch! ch %OWED 0)))))
 
 ; A courteous end: DISCONNECT by application, before the socket closes.
 (def ssh-disconnect!

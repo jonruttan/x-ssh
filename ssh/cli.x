@@ -207,17 +207,25 @@
                       (Opts on? o "-G"))
                 0)))))
 
+; A count's digits as a number: () when they are not all digits.
+(def %count
+  (fn (_ a)
+    (def n (Str8 length a))
+    (def digits? ((fn (self i) (if (= i n) (> n 0) (if (if (>= (%byte-ref a i) #\0) (<= (%byte-ref a i) #\9) #f) (self (+ i 1)) #f))) 0))
+    (if digits? (%cvt a (Type named INTEGER) 10) ())))
+
 ; The key tool's line, as what to do: (keygen (ACTION ...) 0), the file
-; () when none is named, for the tool to ask.
+; () when none is named, for the tool to ask.  A key made is ed25519's,
+; or ecdsa's on -b 256, the default, or 384.
 (def %keygen-plan
   (fn (_ o decl)
     (def file (%value o "-f"))
     (def type (if (Opts on? o "-t") (Str8 downcase (Opts value o "-t")) "ed25519"))
     (def plan (fn (_ what) (list (lit keygen) what 0)))
     (def a (%value o "-a"))
-    (def n (if (null? a) 0 (Str8 length a)))
-    (def digits? ((fn (self i) (if (= i n) (> n 0) (if (if (>= (%byte-ref a i) #\0) (<= (%byte-ref a i) #\9) #f) (self (+ i 1)) #f))) 0))
-    (def rounds (match ((null? a) 16) (digits? (%cvt a (Type named INTEGER) 10)) (#t ())))
+    (def rounds (if (null? a) 16 (%count a)))
+    (def b (%value o "-b"))
+    (def bits (match ((null? b) 256) ((str=? type "ed25519") 256) (#t (%count b))))
     (match
       ((null? rounds) (list (lit keygen) (Str8 append "Invalid number: " a " (invalid)\n") 255))
       ((< rounds 1) (list (lit keygen) (Str8 append "Invalid number: " a " (too small)\n") 255))
@@ -227,10 +235,15 @@
       ((Opts on? o "-y") (plan (list (lit public) file (%value o "-P"))))
       ((Opts on? o "-l") (plan (list (lit fingerprint) file (Opts on? o "-v"))))
       ((Opts on? o "-p") (plan (list (lit passphrase) file (%value o "-P") (%value o "-N") rounds)))
-      ((List any? (fn (_ t) (str=? t type)) (list "rsa" "dsa" "ecdsa" "ecdsa-sk" "ed25519-sk"))
+      ((List any? (fn (_ t) (str=? t type)) (list "rsa" "dsa" "ecdsa-sk" "ed25519-sk"))
         (list (lit keygen) (Str8 append "x-ssh: key type " type " is not served yet\n") 1))
-      ((not (str=? type "ed25519")) (list (lit keygen) (Str8 append "unknown key type " type "\n") 1))
-      (#t (plan (list (lit generate) file (%value o "-C") (%value o "-N") (Opts on? o "-q") rounds))))))
+      ((not (if (str=? type "ed25519") #t (str=? type "ecdsa")))
+        (list (lit keygen) (Str8 append "unknown key type " type "\n") 1))
+      ((null? bits) (list (lit keygen) (Str8 append "Bits has bad value " b " (invalid)\r\n") 255))
+      ((= bits 521) (list (lit keygen) "x-ssh: ECDSA key length 521 is not served yet\n" 1))
+      ((not (if (= bits 256) #t (= bits 384)))
+        (list (lit keygen) "Invalid ECDSA key length: valid lengths are 256, 384 or 521 bits\r\n" 255))
+      (#t (plan (list (lit generate) file (%value o "-C") (%value o "-N") (Opts on? o "-q") rounds type bits))))))
 
 ; scp's line: (scp (to OPERANDS PRESERVE RECURSIVE) 0) or (scp (from
 ; OPERANDS PRESERVE RECURSIVE) 0) for the remote ends, (scp (copy

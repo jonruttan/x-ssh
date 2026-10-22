@@ -18,6 +18,8 @@
 #   x-ssh     x-ssh's own client, with the Dropbear-format key
 #   key types OpenSSH's client with an RSA key and an ECDSA P-384 key,
 #             each logged by its type and fingerprint
+#   host keys RSA and ECDSA host keys, each signature checked by OpenSSH's
+#             client held to its algorithm, and the ECDSA one by x-ssh's
 #   refused   a key not in authorized_keys is refused
 #   input     200000 random bytes through `cksum` on the server's side
 #   terminal  OpenSSH's -tt and x-ssh's RequestTTY force get a terminal, its
@@ -39,7 +41,7 @@
 #   test      -t passes a sound configuration and refuses AllowUsers
 #   sealed    a host key under a passphrase refused as OpenSSH's sshd refuses
 #             it (sshd -t, beside the system's /usr/sbin/sshd)
-#   background  ssh-keygen -A makes the host key; a server started without
+#   background  ssh-keygen -A makes the host keys; a server started without
 #             -D returns at once, writes its PidFile and serves dbclient
 #
 # The clients, git and the system's sshd are the oracles.
@@ -152,6 +154,39 @@ for k in rsa:RSA ecdsa:ECDSA; do
 		fail "key types: $label output '$out' status $status"
 	fi
 done
+
+# host keys: a server given RSA and ECDSA host keys besides its Ed25519
+# one; OpenSSH's client, held to one algorithm at a time and to a
+# known_hosts naming the keys, checks each signature, and x-ssh's client,
+# knowing only the ECDSA key, takes that one
+hport=$((port + 2))
+ssh-keygen -q -t rsa -b 3072 -N '' -C rsa-host -f "$fx/rsahost"
+ssh-keygen -q -t ecdsa -b 256 -N '' -C ecdsa-host -f "$fx/ecdsahost"
+for k in rsahost ecdsahost; do
+	printf '[127.0.0.1]:%s %s\n' "$hport" "$(cut -d' ' -f1-2 "$fx/$k.pub")"
+done > "$fx/hostkeys.known"
+SHELL=/bin/sh sshd -D -e -p "$hport" -h "$fx/rsahost" -h "$fx/ecdsahost" > "$fx/hostkeys.log" 2>&1 &
+hpid=$!
+started "$fx/hostkeys.log" "$hport"
+for alg in rsa-sha2-512 rsa-sha2-256 ecdsa-sha2-nistp256; do
+	out=$(ssh -q -F none -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$fx/hostkeys.known" \
+		-o HostKeyAlgorithms=$alg -p "$hport" -i "$fx/osshkey" "$user@127.0.0.1" "echo by $alg" < /dev/null 2> "$fx/client.err")
+	if [ "$out" = "by $alg" ]; then
+		echo "ok: host keys -- OpenSSH's client checked the server's $alg signature"
+	else
+		fail "host keys: $alg output '$out'"
+	fi
+done
+mkdir -p "$fx/hkhome/.ssh"
+grep ecdsa "$fx/hostkeys.known" > "$fx/hkhome/.ssh/known_hosts"
+out=$(HOME="$fx/hkhome" "$X" -l ssh -- ssh -F none -o StrictHostKeyChecking=yes -q -p "$hport" -i "$fx/dbkey" -l "$user" \
+	127.0.0.1 'echo by ecdsa' < /dev/null 2> "$fx/client.err")
+if [ "$out" = "by ecdsa" ]; then
+	echo "ok: host keys -- x-ssh's client, knowing the ECDSA key alone, checked it"
+else
+	fail "host keys: x-ssh's client said '$out'"
+fi
+kill_tree $hpid
 
 # input
 head -c 200000 /dev/urandom > "$fx/input"
@@ -340,12 +375,12 @@ else
 	fail "sealed: x-ssh said '$ours', OpenSSH '$theirs'"
 fi
 
-# background: ssh-keygen -A making the host key under a prefix, a server
+# background: ssh-keygen -A making the host keys under a prefix, a server
 # without -D returning at once with its PidFile written, serving dbclient
 bport=$((port + 1))
 mkdir -p "$fx/root/etc/ssh"
 "$X" -l ssh -- ssh-keygen -A -f "$fx/root" > "$fx/keygen.out" 2>&1
-"$X" -l ssh -- sshd -f /dev/null -h "$fx/root/etc/ssh/ssh_host_ed25519_key" -o ListenAddress=127.0.0.1 -p "$bport" \
+"$X" -l ssh -- sshd -f /dev/null -h "$fx/root/etc/ssh/ssh_host_ecdsa_key" -h "$fx/root/etc/ssh/ssh_host_ed25519_key" -o ListenAddress=127.0.0.1 -p "$bport" \
 	-o AuthorizedKeysFile="$fx/authorized_keys" -o PidFile="$fx/pid" > "$fx/bg.log" 2>&1
 status=$?
 i=0
@@ -354,9 +389,10 @@ bgpid=$(cat "$fx/pid" 2>/dev/null)
 out=$("$db/dbclient" -y -y -p "$bport" -i "$fx/dbkey" "$user@127.0.0.1" 'echo from the background; exit 5' < /dev/null 2> "$fx/client.err")
 bstatus=$?
 if [ "$status" = 0 ] && [ -n "$bgpid" ] && [ "$out" = "from the background" ] && [ "$bstatus" = 5 ] \
-	&& grep -q 'ssh-keygen: generating new host keys: ED25519' "$fx/keygen.out" \
+	&& grep -q 'ssh-keygen: generating new host keys: ECDSA ED25519 ' "$fx/keygen.out" \
+	&& ssh-keygen -l -f "$fx/root/etc/ssh/ssh_host_ecdsa_key" > /dev/null 2>&1 \
 	&& ssh-keygen -l -f "$fx/root/etc/ssh/ssh_host_ed25519_key" > /dev/null 2>&1; then
-	echo "ok: background -- ssh-keygen -A made the key; the server returned at once, wrote its pid and served"
+	echo "ok: background -- ssh-keygen -A made the keys; the server returned at once, wrote its pid and served"
 else
 	fail "background: status $status, pid '$bgpid', output '$out' status $bstatus"
 	cat "$fx/keygen.out" "$fx/bg.log" >&2

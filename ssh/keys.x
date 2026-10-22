@@ -25,7 +25,8 @@
 (import x/codec/ed25519)
 (import x/codec/aes)
 (import x/codec/bcrypt)
-(import ssh/bytes ssh-in ssh-get-uint32 ssh-get-string ssh-get-bytes ssh-get-text ssh-copy)
+(import ssh/bytes ssh-in ssh-get-uint32 ssh-get-string ssh-get-bytes ssh-get-text ssh-copy ssh-out ssh-put-text ssh-put-string ssh-out-run)
+(import ssh/pubkey ssh-pubkey-of ssh-pubkey-type)
 
 (def %oref (prim-ref (lit obj) (lit ref)))
 (def %make-str (prim-ref (lit str) (lit make)))
@@ -52,12 +53,16 @@
 ; What OpenSSH says of a sealed key given no passphrase or a wrong one.
 (def ssh-key-wrong-passphrase "incorrect passphrase supplied to decrypt private key")
 
+; The key types a key file is read for.
+(def %types (list "ssh-ed25519" "ssh-rsa" "ecdsa-sha2-nistp256" "ecdsa-sha2-nistp384"))
+
 ; The ciphers a key file is sealed with, and their key sizes; none's 0.
 (def %ciphers (list (pair "none" 0) (pair "aes128-ctr" 16) (pair "aes192-ctr" 24) (pair "aes256-ctr" 32)))
 
 ; An OpenSSH key file's text taken apart, nothing opened: (BUF CIPHER
-; KDF OPTIONS PUB PRIVATE), BUF the decoded bytes, OPTIONS and PRIVATE
-; regions of it as (START . LEN), PUB the 32-byte public key.
+; KDF OPTIONS PUB PRIVATE BLOB), BUF the decoded bytes, OPTIONS, PRIVATE
+; and BLOB regions of it as (START . LEN), BLOB the public key's, PUB an
+; Ed25519 key's 32 bytes or () for another type.
 (def %parts
   (fn (_ text)
     (def raw (%bytes->str (Base64 decode-bytes (%body text))))
@@ -70,10 +75,11 @@
     (def blob (ssh-get-string in))
     (def bin (ssh-in buf (first blob) (rest blob)))
     (def ktype (ssh-get-text bin))
-    (unless (str=? ktype "ssh-ed25519") (Err raise 'value (Str8 append "a key of a type not served: " ktype) ()))
-    (def pk (ssh-get-string bin))
+    (unless (List any? (fn (_ t) (str=? t ktype)) %types) (Err raise 'value (Str8 append "a key of a type not served: " ktype) ()))
+    (def ed? (str=? ktype "ssh-ed25519"))
+    (def pk (if ed? (ssh-get-string bin) (pair 0 32)))
     (unless (= (rest pk) 32) (Err raise 'value "an ssh-ed25519 key that is not 32 bytes" ()))
-    (list buf cipher kdf options (ssh-copy buf (first pk) 32) (ssh-get-string in))))
+    (list buf cipher kdf options (if ed? (ssh-copy buf (first pk) 32) ()) (ssh-get-string in) blob)))
 
 ; The private section's bytes, opened with the passphrase when sealed:
 ; (BUF . LEN).  No passphrase, or an empty one, opens no sealed key.
@@ -108,10 +114,73 @@
     (def pin (ssh-in (first p) 0 (rest p)))
     (unless (= (ssh-get-uint32 pin) (ssh-get-uint32 pin)) (Err raise 'value ssh-key-wrong-passphrase ()))
     (def ktype (ssh-get-text pin))
-    (unless (str=? ktype "ssh-ed25519") (Err raise 'value (Str8 append "a key of a type not served: " ktype) ()))
+    (unless (List any? (fn (_ t) (str=? t ktype)) %types) (Err raise 'value (Str8 append "a key of a type not served: " ktype) ()))
     (ssh-get-string pin)
     (def sk (ssh-get-string pin))
     (list (ssh-copy (first p) (first sk) 32) (List ref 4 parts) (ssh-get-text pin))))
+
+; An OpenSSH key file's text as an identity (ssh/pubkey's): Ed25519,
+; RSA or ECDSA, a sealed one opened with pass.  The private section
+; holds, after the check ints and the type: Ed25519's public key, its
+; secret and public again; RSA's mpint n, e, d, iqmp, p, q; ECDSA's
+; curve, point and mpint d.  Then the comment.
+(def ssh-key-identity-of-text
+  (fn (_ text pass)
+    (def parts (%parts text))
+    (def blob (List ref 6 parts))
+    (def key (ssh-pubkey-of (first parts) (first blob) (rest blob)))
+    (def p (%private parts pass))
+    (def pb (first p))
+    (def pin (ssh-in pb 0 (rest p)))
+    (unless (= (ssh-get-uint32 pin) (ssh-get-uint32 pin)) (Err raise 'value ssh-key-wrong-passphrase ()))
+    (def ktype (ssh-get-text pin))
+    (unless (str=? ktype (ssh-pubkey-type key)) (Err raise 'value "a key file whose halves are of two types" ()))
+    (def region (fn (_ r) (list pb (first r) (rest r))))
+    (def secret
+      (match
+        ((str=? ktype "ssh-ed25519") (do (ssh-get-string pin) (ssh-copy pb (first (ssh-get-string pin)) 32)))
+        ((str=? ktype "ssh-rsa")
+          (do (def n (ssh-get-string pin))
+              (def e (ssh-get-string pin))
+              (def d (ssh-get-string pin))
+              (def iqmp (ssh-get-string pin))
+              (def p (ssh-get-string pin))
+              (def q (ssh-get-string pin))
+              (list (region n) (region d) (region e) (region iqmp) (region p) (region q))))
+        (#t
+          (do (def curve (ssh-get-text pin))
+              (ssh-get-string pin)
+              (def d (ssh-get-string pin))
+              (list (if (str=? curve "nistp384") (lit p384) (lit p256)) (region d))))))
+    (list key secret (ssh-get-text pin))))
+
+; A key file read as an identity in either format: OpenSSH's, opened with
+; pass when sealed; Dropbear's, Ed25519's alone here, never sealed, with
+; no comment.
+(def ssh-identity-read-file
+  (fn (_ path pass)
+    (def r (%file-bytes path))
+    (if (if (>= (rest r) 5) (str=? (Str8 sub 0 5 (first r)) "-----") #f)
+      (ssh-key-identity-of-text (ssh-copy (first r) 0 (rest r)) pass)
+      ((fn (_ k) (list (%ed25519-pubkey (rest k)) (first k) "")) (ssh-key-of-dropbear-bytes (first r) (rest r))))))
+
+; An Ed25519 public key's 32 bytes as ssh/pubkey's key.
+(def %ed25519-pubkey
+  (fn (_ pub)
+    (def out (ssh-out))
+    (ssh-put-text out "ssh-ed25519")
+    (ssh-put-string out pub 0 32)
+    (def r (ssh-out-run out))
+    (ssh-pubkey-of (first r) 0 (rest r))))
+
+; A key file's public key, of any type, read without its passphrase.
+(def ssh-pubkey-of-key-file
+  (fn (_ path)
+    (def r (%file-bytes path))
+    (if (if (>= (rest r) 5) (str=? (Str8 sub 0 5 (first r)) "-----") #f)
+      ((fn (_ parts) ((fn (_ b) (ssh-pubkey-of (first parts) (first b) (rest b))) (List ref 6 parts)))
+       (%parts (ssh-copy (first r) 0 (rest r))))
+      (%ed25519-pubkey (rest (ssh-key-of-dropbear-bytes (first r) (rest r)))))))
 
 ; The 32-byte seed of an ssh-ed25519 key file's text, opened with the
 ; passphrase when one is given.
@@ -195,4 +264,5 @@
     (pair (ssh-copy (first raw) (first k) 32) (Str8 join " " (List drop 2 ws)))))
 
 (provide ssh/keys ssh-key-of-text ssh-seed-of-key-text ssh-seed-of-key-file ssh-key-of-dropbear-bytes ssh-key-of-file
-  ssh-key-comment-of-file ssh-key-read-file ssh-key-file-sealed? ssh-public-of-key-file ssh-key-of-public-line ssh-key-wrong-passphrase)
+  ssh-key-comment-of-file ssh-key-read-file ssh-key-file-sealed? ssh-public-of-key-file ssh-key-of-public-line ssh-key-wrong-passphrase
+  ssh-key-identity-of-text ssh-identity-read-file ssh-pubkey-of-key-file)

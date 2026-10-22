@@ -23,10 +23,8 @@ it is tested against.
 Every end speaks curve25519-sha256 and chacha20-poly1305@openssh.com,
 with publickey and password authentication and one session a
 connection: a command, or a shell on a terminal.  Keys and signatures:
-ssh-ed25519 everywhere; a client checks RSA (rsa-sha2-256 and -512) and
-ECDSA (nistp256, nistp384) host keys too, and a server takes RSA and
-ECDSA user keys -- making those keys, and signing with them, are not
-served yet.
+ssh-ed25519, RSA (rsa-sha2-256 and -512) and ECDSA (nistp256,
+nistp384), for host keys and user keys, at either end.
 
 - `ssh`: a command run on a host, or with none a shell, its output and
   exit status, with the client's standard input carried to it.  A
@@ -43,8 +41,9 @@ served yet.
   `-q` and `-v` LogLevel; `-W host:port` carries standard input and
   output through the server, as a ProxyCommand wants; `-G` prints the
   settings in force.  Served keywords: Hostname, Port, User,
-  IdentityFile (`~/.ssh/id_ed25519` by default; OpenSSH's or Dropbear's
-  key files, a key under a passphrase among them), StrictHostKeyChecking,
+  IdentityFile (`~/.ssh/id_rsa`, `id_ecdsa` and `id_ed25519` by default;
+  OpenSSH's or Dropbear's key files, a key under a passphrase among
+  them), StrictHostKeyChecking,
   UserKnownHostsFile,
   GlobalKnownHostsFile, HostKeyAlias, BatchMode, PasswordAuthentication,
   PubkeyAuthentication, NumberOfPasswordPrompts, LocalForward,
@@ -60,10 +59,11 @@ served yet.
 - `sshd`: the server, for the user it runs as.  The configuration is
   sshd_config(5)'s: `-o` options, then `/etc/ssh/sshd_config` (or `-f`'s
   file), with `Include`; `-h` adds a HostKey, `-p` a Port in place of the
-  file's.  Served keywords: Port, ListenAddress, HostKey (an ssh-ed25519
-  key, OpenSSH's or Dropbear's file; one under a passphrase is refused,
-  as OpenSSH's sshd refuses it), PidFile, AuthorizedKeysFile,
-  PubkeyAcceptedAlgorithms, PasswordAuthentication (checked against
+  file's.  Served keywords: Port, ListenAddress, HostKey (Ed25519, RSA
+  or ECDSA, one of each type, OpenSSH's or Dropbear's file; one under a
+  passphrase is refused, as OpenSSH's sshd refuses it), PidFile,
+  AuthorizedKeysFile, PubkeyAcceptedAlgorithms, HostKeyAlgorithms,
+  PasswordAuthentication (checked against
   `/etc/shadow` with crypt(3)'s
   DES, `$1$`, `$5$` or `$6$`), PubkeyAuthentication,
   PermitEmptyPasswords, PermitRootLogin, MaxAuthTries,
@@ -81,15 +81,16 @@ served yet.
   pseudo-terminal with its TERM and window, resized as the client's
   is, its shell interactive on it.  `git
   clone` over it works.
-- `ssh-keygen`: `-t ed25519 [-f FILE] [-C comment] [-N passphrase]`
-  makes a key in OpenSSH's format, sealed under the passphrase as
-  OpenSSH seals it (aes256-ctr under bcrypt-pbkdf, `-a` rounds, 16 by
-  default), and says so with its fingerprint and randomart; `-y`
-  prints a key file's public line, `-l` its fingerprint (`-v` its
-  randomart); `-p` rewrites a key file in OpenSSH's format under a new
-  passphrase or none (`-P` the old, `-N` the new, asked at the terminal
-  when not given), which turns a Dropbear key into one; `-A` makes the
-  host key a server reads by default; `-F` and `-R` find and remove a
+- `ssh-keygen`: `-t ed25519|ecdsa [-b 256|384] [-f FILE] [-C comment]
+  [-N passphrase]` makes a key in OpenSSH's format, sealed under the
+  passphrase as OpenSSH seals it (aes256-ctr under bcrypt-pbkdf, `-a`
+  rounds, 16 by default), and says so with its fingerprint and
+  randomart; `-y` prints a key file's public line, `-l` its fingerprint
+  (`-v` its randomart), for Ed25519, RSA and ECDSA keys; `-p` rewrites
+  a key file in OpenSSH's format under a new passphrase or none (`-P`
+  the old, `-N` the new, asked at the terminal when not given), which
+  turns a Dropbear key into one; `-A` makes the ECDSA and Ed25519 host
+  keys a server reads by default; `-F` and `-R` find and remove a
   host in known_hosts.
 - `scp`: files to and from a host, either end, in the original protocol
   (`-O`).  As the client it spawns the ssh program (`-S`, default `ssh`)
@@ -98,8 +99,7 @@ served yet.
   (`-t`, `-f`, `-d`) it is what an OpenSSH `scp -O` reaches.
 - `-V` on each, and `--help` from its option declaration.
 
-Not served yet: other ciphers, RSA and ECDSA keys of one's own (a
-client's identity, a server's host key, ssh-keygen -t rsa or ecdsa),
+Not served yet: other ciphers, making RSA keys (ssh-keygen -t rsa),
 P-521, agents, SFTP, terminal
 modes from pty-req, other users than the one a server runs as.
 

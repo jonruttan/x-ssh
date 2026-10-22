@@ -33,7 +33,7 @@
 (import x/codec/ed25519)
 (import x/codec/rsa)
 (import x/codec/ecdsa)
-(import ssh/bytes ssh-in ssh-get-text ssh-get-string ssh-get-bytes ssh-copy)
+(import ssh/bytes ssh-in ssh-get-text ssh-get-string ssh-get-bytes ssh-copy ssh-out ssh-put-text ssh-put-string ssh-put-mpint ssh-out-run)
 
 (def %byte-ref (prim-ref (lit str) (lit byte-ref)))
 (def %char->int (prim-ref (lit char) (lit ->int)))
@@ -134,6 +134,41 @@
                 ((str=? curve "nistp384") (Ecdsa verify (lit p384) (List ref 3 key) (%digest (lit sha384) data) (%region buf r) (%region buf t)))
                 (#t #f))))))))
 
+; --- identities: keys with their secret halves ----------------------------
+;
+; An identity is (KEY SECRET COMMENT): KEY the public key as above, SECRET
+; the Ed25519 key's 32-byte seed, an RSA key's (N D E IQMP P Q) or an ECDSA key's
+; (CURVE D), N and D regions, CURVE p256 or p384.
+
+(def ssh-identity-pubkey (fn (_ id) (first id)))
+(def ssh-identity-comment (fn (_ id) (List ref 2 id)))
+
+; A signature blob by an identity over data's region, with alg -- one of
+; (ssh-pubkey-algorithms of its key) -- as a region: string alg, string the
+; signature (RFC 8332 3; RFC 5656 3.1.2, mpint r and mpint s within).
+(def ssh-identity-sign
+  (fn (_ id data alg)
+    (def key (first id))
+    (def secret (List ref 1 id))
+    (def out (ssh-out))
+    (ssh-put-text out alg)
+    (match
+      ((eq? (first key) (lit ed25519))
+        (ssh-put-string out (Ed25519 sign secret (first data) (List ref 1 data) (List ref 2 data)) 0 64))
+      ((eq? (first key) (lit rsa))
+        (do (def hash (if (str=? alg "rsa-sha2-512") (lit sha512) (lit sha256)))
+            (def sig (Rsa sign-pkcs1 (first secret) (List ref 1 secret) hash (%digest hash data)))
+            (ssh-put-string out (first sig) (List ref 1 sig) (List ref 2 sig))))
+      (#t
+        (do (def curve (first secret))
+            (def rs (Ecdsa sign curve (List ref 1 secret) (%digest (if (eq? curve (lit p384)) (lit sha384) (lit sha256)) data)))
+            (def inner (ssh-out))
+            (ssh-put-mpint inner (first (first rs)) (List ref 1 (first rs)) (List ref 2 (first rs)))
+            ((fn (_ s) (ssh-put-mpint inner (first s) (List ref 1 s) (List ref 2 s))) (first (rest rs)))
+            (def ir (ssh-out-run inner))
+            (ssh-put-string out (first ir) 0 (rest ir)))))
+    ((fn (_ r) (list (first r) 0 (rest r))) (ssh-out-run out))))
+
 ; A key's blob in base64, as known_hosts and authorized_keys spell it.
 (def ssh-pubkey-base64
   (fn (_ key)
@@ -155,4 +190,4 @@
       (if (str=? (ssh-pubkey-type key) type) key ()))))
 
 (provide ssh/pubkey ssh-pubkey-of ssh-pubkey-of-line ssh-pubkey-blob ssh-pubkey-type ssh-pubkey-label ssh-pubkey-bits
-  ssh-pubkey-algorithms ssh-pubkey-verify? ssh-pubkey-base64)
+  ssh-pubkey-algorithms ssh-pubkey-verify? ssh-pubkey-base64 ssh-identity-pubkey ssh-identity-comment ssh-identity-sign)

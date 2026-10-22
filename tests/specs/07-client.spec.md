@@ -58,16 +58,17 @@ tests/oracle/client.sh and tests/oracle/server.sh.
 ---
     ("command-line: line 1: Badly formatted port number." "command-line: line 1: unsupported option \"maybe\"." "command-line: line 1: Bad local forwarding specification '2222:h'" "command-line: line 1: SessionType subsystem is not served")
 
-### identity files: the ones named, or ~/.ssh/id_ed25519 when none is; tokens expanded
+### identity files: the ones named, or ~/.ssh/id_rsa, id_ecdsa and id_ed25519 when none is; tokens expanded
 
 ```ssh
 (import ssh/client ssh-client-settings)
 (import ssh/config ssh-config-options)
 (def %ci (fn (_ opts) (rest (List find (fn (_ p) (eq? (first p) (lit identities))) (ssh-client-settings (ssh-config-options opts) "h" "u")))))
-(write (list (%ci (list "IdentityFile /k/%r@%h" "User git")) (rest (first (%ci ())))))
+(write (list (%ci (list "IdentityFile /k/%r@%h" "User git"))
+             (List map (fn (_ p) ((fn (_ s i) (pair (Str8 sub i (- (Str8 length s) i) s) (rest p))) (first p) (Str8 index-of "/.ssh/" (first p)))) (%ci ()))))
 ```
 ---
-    ((("/k/git@h" . #t)) #f)
+    ((("/k/git@h" . #t)) (("/.ssh/id_rsa" . #f) ("/.ssh/id_ecdsa" . #f) ("/.ssh/id_ed25519" . #f)))
 
 ## terminals
 

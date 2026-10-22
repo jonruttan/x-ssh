@@ -216,7 +216,8 @@
 
 ; The key tool's line, as what to do: (keygen (ACTION ...) 0), the file
 ; () when none is named, for the tool to ask.  A key made is ed25519's,
-; or ecdsa's on -b 256, the default, or 384.
+; ecdsa's on -b 256, the default, 384 or 521, or rsa's of -b 1024 to
+; 16384 bits, 3072 by default, as OpenSSH's ssh-keygen allows them.
 (def %keygen-plan
   (fn (_ o decl)
     (def file (%value o "-f"))
@@ -225,7 +226,7 @@
     (def a (%value o "-a"))
     (def rounds (if (null? a) 16 (%count a)))
     (def b (%value o "-b"))
-    (def bits (match ((null? b) 256) ((str=? type "ed25519") 256) (#t (%count b))))
+    (def bits (match ((str=? type "ed25519") 256) ((not (null? b)) (%count b)) ((str=? type "rsa") 3072) (#t 256)))
     (match
       ((null? rounds) (list (lit keygen) (Str8 append "Invalid number: " a " (invalid)\n") 255))
       ((< rounds 1) (list (lit keygen) (Str8 append "Invalid number: " a " (too small)\n") 255))
@@ -235,13 +236,14 @@
       ((Opts on? o "-y") (plan (list (lit public) file (%value o "-P"))))
       ((Opts on? o "-l") (plan (list (lit fingerprint) file (Opts on? o "-v"))))
       ((Opts on? o "-p") (plan (list (lit passphrase) file (%value o "-P") (%value o "-N") rounds)))
-      ((List any? (fn (_ t) (str=? t type)) (list "rsa" "dsa" "ecdsa-sk" "ed25519-sk"))
+      ((List any? (fn (_ t) (str=? t type)) (list "dsa" "ecdsa-sk" "ed25519-sk"))
         (list (lit keygen) (Str8 append "x-ssh: key type " type " is not served yet\n") 1))
-      ((not (if (str=? type "ed25519") #t (str=? type "ecdsa")))
+      ((not (List any? (fn (_ t) (str=? t type)) (list "ed25519" "ecdsa" "rsa")))
         (list (lit keygen) (Str8 append "unknown key type " type "\n") 1))
       ((null? bits) (list (lit keygen) (Str8 append "Bits has bad value " b " (invalid)\r\n") 255))
-      ((= bits 521) (list (lit keygen) "x-ssh: ECDSA key length 521 is not served yet\n" 1))
-      ((not (if (= bits 256) #t (= bits 384)))
+      ((if (str=? type "rsa") (< bits 1024) #f) (list (lit keygen) "Invalid RSA key length: minimum is 1024 bits\r\n" 255))
+      ((if (str=? type "rsa") (> bits 16384) #f) (list (lit keygen) "Invalid RSA key length: maximum is 16384 bits\r\n" 255))
+      ((if (str=? type "ecdsa") (not (List any? (fn (_ n) (= n bits)) (list 256 384 521))) #f)
         (list (lit keygen) "Invalid ECDSA key length: valid lengths are 256, 384 or 521 bits\r\n" 255))
       (#t (plan (list (lit generate) file (%value o "-C") (%value o "-N") (Opts on? o "-q") rounds type bits))))))
 

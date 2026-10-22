@@ -7,12 +7,12 @@
 ; @license MIT No Attribution (MIT-0)
 ;
 ; What OpenSSH's ssh-keygen does with a key: make an Ed25519 one from 32
-; random bytes, or an ECDSA one on P-256 or P-384, and write it in
-; OpenSSH's private key format, sealed under a passphrase when one is
-; given, FILE.pub beside it the public line authorized_keys and
-; known_hosts take, then say so with its fingerprint -- SHA256 of the
-; key's blob in unpadded base64 -- and its randomart; print a key file's
-; public line (-y) or fingerprint (-l), Ed25519's, RSA's or ECDSA's;
+; random bytes, an ECDSA one on P-256, P-384 or P-521, or an RSA one of
+; two random primes, and write it in OpenSSH's private key format,
+; sealed under a passphrase when one is given, FILE.pub beside it the
+; public line authorized_keys and known_hosts take, then say so with its
+; fingerprint -- SHA256 of the key's blob in unpadded base64 -- and its
+; randomart; print a key file's public line (-y) or fingerprint (-l);
 ; rewrite one under a new passphrase or none (-p), which turns a
 ; Dropbear key file into OpenSSH's; make the host keys a server wants
 ; (-A); and find or remove a host in known_hosts (-F, -R).
@@ -29,6 +29,7 @@
 (import x/codec/aes)
 (import x/codec/bcrypt)
 (import x/codec/ecdsa)
+(import x/codec/rsa)
 (import ssh/bytes ssh-out ssh-put-byte ssh-put-text ssh-put-string ssh-put-uint32 ssh-put-bytes ssh-put-mpint ssh-out-run
   ssh-in ssh-get-uint32 ssh-get-string ssh-get-text ssh-copy)
 (import ssh/transport ssh-random)
@@ -36,13 +37,15 @@
 (import ssh/keys ssh-key-file-sealed? ssh-identity-read-file ssh-pubkey-of-key-file
   ssh-key-wrong-passphrase)
 (import ssh/known ssh-known-find ssh-known-remove!)
-(import ssh/pubkey ssh-pubkey-of ssh-pubkey-of-line ssh-pubkey-blob ssh-pubkey-type ssh-pubkey-label ssh-pubkey-bits
+(import ssh/pubkey ssh-pubkey-of ssh-pubkey-of-line ssh-pubkey-blob ssh-pubkey-type ssh-pubkey-label ssh-pubkey-bits ssh-ecdsa-curve
   ssh-pubkey-base64 ssh-identity-pubkey ssh-identity-comment)
 
 (def %byte-ref (prim-ref (lit str) (lit byte-ref)))
 (def %char->int (prim-ref (lit char) (lit ->int)))
 (def %byte-len (prim-ref (lit str) (lit byte-len)))
 (def %make-str (prim-ref (lit str) (lit make)))
+(def %str->ptr (prim-ref (lit str) (lit ->ptr)))
+(def %pset (prim-ref (lit ptr) (lit set!)))
 (def %oref (prim-ref (lit obj) (lit ref)))
 (def %oset! (prim-ref (lit obj) (lit set!)))
 (def %cvt (prim-ref (lit convert) (lit to)))
@@ -229,26 +232,41 @@
           (File close fd)
           (= n (%byte-len text))))))
 
-; A new identity of a type: ed25519, from 32 random bytes; ecdsa on a
-; curve of bits 256 or 384, d random bytes of its length tried until one
-; lies in 1..n-1.
+; A new identity of a type: ed25519, from 32 random bytes; rsa of bits
+; bits, from x-lang's Rsa generate; ecdsa on a curve of bits 256, 384 or
+; 521, d random bytes of its length -- P-521's top byte cut to its one
+; bit -- tried until one lies in 1..n-1.
 (def ssh-identity-make
   (fn (_ type bits)
-    (if (str=? type "ed25519")
-      ((fn (_ seed) (list (%ed25519-key (Ed25519 public seed)) seed "")) (ssh-random 32))
-      (do (def curve (if (= bits 384) (lit p384) (lit p256)))
-          (def name (if (= bits 384) "nistp384" "nistp256"))
-          (def len (if (= bits 384) 48 32))
-          ((fn (self)
-             (def d (ssh-random len))
-             (def q (guard (e ()) (Ecdsa public curve (list d 0 len))))
-             (if (null? q) (self)
-               (do (def out (ssh-out))
-                   (ssh-put-text out (Str8 append "ecdsa-sha2-" name))
-                   (ssh-put-text out name)
-                   (ssh-put-string out (first q) (List ref 1 q) (List ref 2 q))
-                   (def r (ssh-out-run out))
-                   (list (ssh-pubkey-of (first r) 0 (rest r)) (list curve (list d 0 len)) "")))))))))
+    (match
+      ((str=? type "ed25519")
+        ((fn (_ seed) (list (%ed25519-key (Ed25519 public seed)) seed "")) (ssh-random 32)))
+      ((str=? type "rsa")
+        (do (def k (Rsa generate bits))
+            (def mp (fn (_ out r) (ssh-put-mpint out (first r) (List ref 1 r) (List ref 2 r))))
+            (def out (ssh-out))
+            (ssh-put-text out "ssh-rsa")
+            (mp out (List ref 1 k))
+            (mp out (first k))
+            (def r (ssh-out-run out))
+            (list (ssh-pubkey-of (first r) 0 (rest r))
+                  (list (first k) (List ref 2 k) (List ref 1 k) (List ref 3 k) (List ref 4 k) (List ref 5 k))
+                  "")))
+      (#t
+        (do (def name (Str8 append "nistp" (%num bits)))
+            (def curve (ssh-ecdsa-curve name))
+            (def len (match ((= bits 521) 66) ((= bits 384) 48) (#t 32)))
+            ((fn (self)
+               (def d (ssh-random len))
+               (when (= bits 521) (%pset (%str->ptr d) 0 (& (%char->int (%byte-ref d 0)) 1) 1))
+               (def q (guard (e ()) (Ecdsa public curve (list d 0 len))))
+               (if (null? q) (self)
+                 (do (def out (ssh-out))
+                     (ssh-put-text out (Str8 append "ecdsa-sha2-" name))
+                     (ssh-put-text out name)
+                     (ssh-put-string out (first q) (List ref 1 q) (List ref 2 q))
+                     (def r (ssh-out-run out))
+                     (list (ssh-pubkey-of (first r) 0 (rest r)) (list curve (list d 0 len)) ""))))))))))
 
 ; A key of a type made and written to path, sealed under lock (PASS
 ; ROUNDS) when one is given, path.pub beside it: its public key, or #f
@@ -288,7 +306,7 @@
 
 (def %message (fn (_ e) (guard (e2 "an internal error") (e msg))))
 
-; The default key file of a type: ~/.ssh/id_ed25519, ~/.ssh/id_ecdsa.
+; The default key file of a type: ~/.ssh/id_ed25519, id_ecdsa, id_rsa.
 (def %home-key (fn (_ type) (Str8 append (Sys getenv "HOME") "/.ssh/id_" type)))
 
 ; The file named, or the one asked for, the default when the answer is
@@ -426,15 +444,16 @@
                       (do (%say 2 (Str8 append "Saving key \"" path "\" failed\n")) 255))))))))))
 
 ; -A: each host key a server reads by default made where it is missing,
-; under a prefix directory when one is given: ECDSA's on P-256 and
-; Ed25519's, the types this tool makes, named in the order made.
+; under a prefix directory when one is given: RSA's of 3072 bits,
+; ECDSA's on P-256 and Ed25519's, named in the order made, as OpenSSH's
+; ssh-keygen makes them.
 (def %hosts
   (fn (_ prefix)
     (def node (List find (fn (_ p) (eq? (first p) (lit nodename))) (Sys uname)))
     (def comment (Str8 append "root@" (if (null? node) "" (rest node))))
     (def path (fn (_ name) (Str8 append (if (null? prefix) "" prefix) "/etc/ssh/ssh_host_" name "_key")))
     (def wanted (List filter (fn (_ t) (not (File exists? (path (first t)))))
-                  (list (list "ecdsa" "ECDSA" 256) (list "ed25519" "ED25519" 256))))
+                  (list (list "rsa" "RSA" 3072) (list "ecdsa" "ECDSA" 256) (list "ed25519" "ED25519" 256))))
     (unless (null? wanted)
       (do (%say 1 "ssh-keygen: generating new host keys:")
           (List for-each

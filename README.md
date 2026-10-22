@@ -23,8 +23,8 @@ it is tested against.
 Every end speaks curve25519-sha256 and chacha20-poly1305@openssh.com,
 with publickey and password authentication and one session a
 connection: a command, or a shell on a terminal.  Keys and signatures:
-ssh-ed25519, RSA (rsa-sha2-256 and -512) and ECDSA (nistp256,
-nistp384), for host keys and user keys, at either end.
+ssh-ed25519, RSA (rsa-sha2-256 and -512) and ECDSA (nistp256, nistp384,
+nistp521), for host keys and user keys, at either end.
 
 - `ssh`: a command run on a host, or with none a shell, its output and
   exit status, with the client's standard input carried to it.  A
@@ -81,16 +81,18 @@ nistp384), for host keys and user keys, at either end.
   pseudo-terminal with its TERM and window, resized as the client's
   is, its shell interactive on it.  `git
   clone` over it works.
-- `ssh-keygen`: `-t ed25519|ecdsa [-b 256|384] [-f FILE] [-C comment]
-  [-N passphrase]` makes a key in OpenSSH's format, sealed under the
-  passphrase as OpenSSH seals it (aes256-ctr under bcrypt-pbkdf, `-a`
+- `ssh-keygen`: `-t ed25519|ecdsa|rsa [-b bits] [-f FILE] [-C comment]
+  [-N passphrase]` makes a key in OpenSSH's format -- ECDSA on 256
+  bits, the default, 384 or 521, RSA on 3072, the default, or 1024 to
+  16384 -- sealed under the passphrase as OpenSSH seals it
+  (aes256-ctr under bcrypt-pbkdf, `-a`
   rounds, 16 by default), and says so with its fingerprint and
   randomart; `-y` prints a key file's public line, `-l` its fingerprint
   (`-v` its randomart), for Ed25519, RSA and ECDSA keys; `-p` rewrites
   a key file in OpenSSH's format under a new passphrase or none (`-P`
   the old, `-N` the new, asked at the terminal when not given), which
-  turns a Dropbear key into one; `-A` makes the ECDSA and Ed25519 host
-  keys a server reads by default; `-F` and `-R` find and remove a
+  turns a Dropbear key into one; `-A` makes the RSA, ECDSA and Ed25519
+  host keys a server reads by default; `-F` and `-R` find and remove a
   host in known_hosts.
 - `scp`: files to and from a host, either end, in the original protocol
   (`-O`).  As the client it spawns the ssh program (`-S`, default `ssh`)
@@ -99,8 +101,7 @@ nistp384), for host keys and user keys, at either end.
   (`-t`, `-f`, `-d`) it is what an OpenSSH `scp -O` reaches.
 - `-V` on each, and `--help` from its option declaration.
 
-Not served yet: other ciphers, making RSA keys (ssh-keygen -t rsa),
-P-521, agents, SFTP, terminal
+Not served yet: other ciphers, agents, SFTP, terminal
 modes from pty-req, other users than the one a server runs as.
 
 The oracles in `tests/oracle/` are the live tests: `client.sh` drives

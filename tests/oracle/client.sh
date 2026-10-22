@@ -29,9 +29,10 @@
 #   host keys  a Dropbear with an RSA host key, then an ECDSA one: each
 #            checked and recorded in known_hosts under its type
 #   key types  ssh-keygen -l -v on RSA and ECDSA keys, as OpenSSH's
-#   identities  ECDSA keys x-ssh makes, P-256 and P-384, read by OpenSSH's
-#            ssh-keygen; -y, -l -v and -p of OpenSSH's RSA and ECDSA keys
-#            as OpenSSH's; the client authenticated by RSA and ECDSA keys
+#   identities  ECDSA keys x-ssh makes, P-256, P-384 and P-521, and RSA,
+#            read by OpenSSH's ssh-keygen; -y, -l -v and -p of OpenSSH's
+#            RSA and ECDSA keys as OpenSSH's; the client authenticated by
+#            RSA and ECDSA keys
 #   rewrite  ssh-keygen -p turns Dropbear's host key into a file
 #            OpenSSH's ssh-keygen reads as the key dropbearkey shows
 #   known    ssh-keygen -F and -R on a known_hosts, as OpenSSH's do them
@@ -263,20 +264,21 @@ else
 	fail "key types: x-ssh '$ours', OpenSSH '$theirs'"
 fi
 
-# identities: ECDSA keys x-ssh's ssh-keygen makes, on P-256 and P-384,
-# read by OpenSSH's with the fingerprint and randomart x-ssh printed and
-# the public line it wrote
-for b in 256 384; do
-	"$X" -l ssh -- ssh-keygen -t ecdsa -b $b -N '' -C made-ecdsa -f "$fx/xecdsa$b" > "$fx/xecdsa.out" 2> "$fx/client.err"
+# identities: keys x-ssh's ssh-keygen makes -- ECDSA on P-256, P-384 and
+# P-521, RSA of 3072 bits, the default -- read by OpenSSH's with the
+# fingerprint and randomart x-ssh printed and the public line it wrote
+for t in ecdsa:256:ECDSA ecdsa:384:ECDSA ecdsa:521:ECDSA rsa:3072:RSA; do
+	kind=${t%%:*}; rest=${t#*:}; b=${rest%%:*}; label=${rest#*:}
+	"$X" -l ssh -- ssh-keygen -t $kind -b $b -N '' -C made-$kind -f "$fx/x$kind$b" > "$fx/xmade.out" 2> "$fx/client.err"
 	status=$?
-	ours=$(sed -n '/^The key fingerprint is:$/,$p' "$fx/xecdsa.out" | grep -v '^The key')
-	theirs=$(ssh-keygen -l -v -f "$fx/xecdsa$b" 2>> "$fx/client.err" | sed "s/^$b \(SHA256:[^ ]* made-ecdsa\) (ECDSA)$/\1/")
-	pub=$(cat "$fx/xecdsa$b.pub" 2>/dev/null)
-	theirpub=$(ssh-keygen -y -f "$fx/xecdsa$b" 2>/dev/null)
+	ours=$(sed -n '/^The key fingerprint is:$/,$p' "$fx/xmade.out" | grep -v '^The key')
+	theirs=$(ssh-keygen -l -v -f "$fx/x$kind$b" 2>> "$fx/client.err" | sed "s/^$b \(SHA256:[^ ]* made-$kind\) ($label)$/\1/")
+	pub=$(cat "$fx/x$kind$b.pub" 2>/dev/null)
+	theirpub=$(ssh-keygen -y -f "$fx/x$kind$b" 2>/dev/null)
 	if [ "$status" = 0 ] && [ -n "$ours" ] && [ "$ours" = "$theirs" ] && [ "$pub" = "$theirpub" ]; then
-		echo "ok: identities -- OpenSSH's ssh-keygen reads the ECDSA P-$b key x-ssh made"
+		echo "ok: identities -- OpenSSH's ssh-keygen reads the $label $b key x-ssh made"
 	else
-		fail "identities: P-$b status $status, x-ssh '$ours', ssh-keygen '$theirs', .pub '$pub' vs '$theirpub'"
+		fail "identities: $label $b status $status, x-ssh '$ours', ssh-keygen '$theirs', .pub '$pub' vs '$theirpub'"
 	fi
 done
 # x-ssh's -y and -l -v of OpenSSH's RSA and ECDSA private keys, and -p
@@ -302,9 +304,10 @@ OpenSSH said
 $theirs"
 fi
 # each authenticates the client: RSA by the rsa-sha2 Dropbear's
-# server-sig-algs names, ECDSA P-384 OpenSSH's and P-256 x-ssh's
-cat "$fx/rsa-key.pub" "$fx/ecdsa-key.pub" "$fx/xecdsa256.pub" >> "$fx/authorized_keys"
-for k in rsa-key ecdsa-key xecdsa256; do
+# server-sig-algs names, ECDSA P-384 OpenSSH's, and the P-256, P-521 and
+# RSA keys x-ssh made
+cat "$fx/rsa-key.pub" "$fx/ecdsa-key.pub" "$fx/xecdsa256.pub" "$fx/xecdsa521.pub" "$fx/xrsa3072.pub" >> "$fx/authorized_keys"
+for k in rsa-key ecdsa-key xecdsa256 xecdsa521 xrsa3072; do
 	out=$(HOME="$home" "$X" -l ssh -- ssh -F none -p "$port" -i "$fx/$k" -l "$user" 127.0.0.1 "echo by $k" < /dev/null 2> "$fx/client.err")
 	if [ "$out" = "by $k" ]; then
 		echo "ok: identities -- the client authenticated with $k"

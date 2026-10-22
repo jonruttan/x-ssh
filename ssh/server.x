@@ -264,9 +264,9 @@
           (pair (lit password) (%yes? lines "passwordauthentication" #t))
           (pair (lit pubkey) (%yes? lines "pubkeyauthentication" #t))
           (pair (lit hostkey-algs) (%algorithm-list lines "hostkeyalgorithms"
-                                     (list "ssh-ed25519" "ecdsa-sha2-nistp256" "ecdsa-sha2-nistp384" "rsa-sha2-512" "rsa-sha2-256")))
+                                     (list "ssh-ed25519" "ecdsa-sha2-nistp256" "ecdsa-sha2-nistp384" "ecdsa-sha2-nistp521" "rsa-sha2-512" "rsa-sha2-256")))
           (pair (lit pubkey-algs) (%algorithm-list lines "pubkeyacceptedalgorithms"
-                                    (list "ssh-ed25519" "ecdsa-sha2-nistp256" "ecdsa-sha2-nistp384" "rsa-sha2-512" "rsa-sha2-256")))
+                                    (list "ssh-ed25519" "ecdsa-sha2-nistp256" "ecdsa-sha2-nistp384" "ecdsa-sha2-nistp521" "rsa-sha2-512" "rsa-sha2-256")))
           (pair (lit empty) (%yes? lines "permitemptypasswords" #f))
           (pair (lit root) ((fn (_ v) (if (str=? v "without-password") "prohibit-password" v))
                              (%choice lines "permitrootlogin" (list "yes" "no" "prohibit-password" "without-password" "forced-commands-only") "prohibit-password")))

@@ -26,7 +26,7 @@
 (import x/codec/aes)
 (import x/codec/bcrypt)
 (import ssh/bytes ssh-in ssh-get-uint32 ssh-get-string ssh-get-bytes ssh-get-text ssh-copy ssh-out ssh-put-text ssh-put-string ssh-out-run)
-(import ssh/pubkey ssh-pubkey-of ssh-pubkey-type)
+(import ssh/pubkey ssh-pubkey-of ssh-pubkey-type ssh-ecdsa-curve)
 
 (def %oref (prim-ref (lit obj) (lit ref)))
 (def %make-str (prim-ref (lit str) (lit make)))
@@ -54,7 +54,7 @@
 (def ssh-key-wrong-passphrase "incorrect passphrase supplied to decrypt private key")
 
 ; The key types a key file is read for.
-(def %types (list "ssh-ed25519" "ssh-rsa" "ecdsa-sha2-nistp256" "ecdsa-sha2-nistp384"))
+(def %types (list "ssh-ed25519" "ssh-rsa" "ecdsa-sha2-nistp256" "ecdsa-sha2-nistp384" "ecdsa-sha2-nistp521"))
 
 ; The ciphers a key file is sealed with, and their key sizes; none's 0.
 (def %ciphers (list (pair "none" 0) (pair "aes128-ctr" 16) (pair "aes192-ctr" 24) (pair "aes256-ctr" 32)))
@@ -151,7 +151,7 @@
           (do (def curve (ssh-get-text pin))
               (ssh-get-string pin)
               (def d (ssh-get-string pin))
-              (list (if (str=? curve "nistp384") (lit p384) (lit p256)) (region d))))))
+              (list (ssh-ecdsa-curve curve) (region d))))))
     (list key secret (ssh-get-text pin))))
 
 ; A key file read as an identity in either format: OpenSSH's, opened with

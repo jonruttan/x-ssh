@@ -31,14 +31,15 @@ pure-x, so the file is weighted.
 ---
     (('public "k" ()) ('fingerprint "k" #t) ('passphrase "k" "" "" 16) ('hosts ()) ('find "[h]:2222" ()) ('remove "h" "kh"))
 
-### ECDSA on 256 bits, the default, or 384; types and sizes not served, and unknown ones, refused
+### ECDSA on 256 bits, the default, 384 or 521; RSA on 3072, the default, or another from 1024 to 16384; types and sizes not served, and unknown ones, refused
 
 ```ssh
 (write (List map (fn (_ a) (first (rest (ssh-plan (List append (list "ssh-keygen" "-f" "k" "-t") a)))))
-  (list (list "ecdsa") (list "ecdsa" "-b" "384") (list "rsa") (list "frob") (list "ecdsa" "-b" "521") (list "ecdsa" "-b" "512"))))
+  (list (list "ecdsa") (list "ecdsa" "-b" "384") (list "ecdsa" "-b" "521") (list "rsa") (list "rsa" "-b" "4096")
+        (list "dsa") (list "frob") (list "ecdsa" "-b" "512") (list "rsa" "-b" "512") (list "rsa" "-b" "32768"))))
 ```
 ---
-    (('generate "k" () () #f 16 "ecdsa" 256) ('generate "k" () () #f 16 "ecdsa" 384) "x-ssh: key type rsa is not served yet\n" "unknown key type frob\n" "x-ssh: ECDSA key length 521 is not served yet\n" "Invalid ECDSA key length: valid lengths are 256, 384 or 521 bits\r\n")
+    (('generate "k" () () #f 16 "ecdsa" 256) ('generate "k" () () #f 16 "ecdsa" 384) ('generate "k" () () #f 16 "ecdsa" 521) ('generate "k" () () #f 16 "rsa" 3072) ('generate "k" () () #f 16 "rsa" 4096) "x-ssh: key type dsa is not served yet\n" "unknown key type frob\n" "Invalid ECDSA key length: valid lengths are 256, 384 or 521 bits\r\n" "Invalid RSA key length: minimum is 1024 bits\r\n" "Invalid RSA key length: maximum is 16384 bits\r\n")
 
 ## a key Dropbear wrote
 

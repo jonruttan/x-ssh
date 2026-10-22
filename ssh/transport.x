@@ -317,7 +317,7 @@
 (def %kex-names (list "curve25519-sha256" "curve25519-sha256@libssh.org"))
 ; The host key algorithms this end checks, as a client offers them unless
 ; known_hosts says which it already knows the host by.
-(def ssh-hostkey-names (list "ssh-ed25519" "ecdsa-sha2-nistp256" "ecdsa-sha2-nistp384" "rsa-sha2-512" "rsa-sha2-256"))
+(def ssh-hostkey-names (list "ssh-ed25519" "ecdsa-sha2-nistp256" "ecdsa-sha2-nistp384" "ecdsa-sha2-nistp521" "rsa-sha2-512" "rsa-sha2-256"))
 (def %cipher-names (list "chacha20-poly1305@openssh.com"))
 (def %mac-names (list "hmac-sha2-256"))
 (def %comp-names (list "none"))

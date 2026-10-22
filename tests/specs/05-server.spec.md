@@ -30,6 +30,7 @@ pidfile /var/run/sshd.pid
 authorizedkeysfile .ssh/authorized_keys .ssh/authorized_keys2
 passwordauthentication yes
 pubkeyauthentication yes
+pubkeyacceptedalgorithms ssh-ed25519,ecdsa-sha2-nistp256,ecdsa-sha2-nistp384,rsa-sha2-512,rsa-sha2-256
 permitemptypasswords no
 permitrootlogin prohibit-password
 allowtcpforwarding yes

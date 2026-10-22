@@ -34,6 +34,7 @@
 (import ssh/keys ssh-key-read-file ssh-key-file-sealed? ssh-public-of-key-file ssh-key-of-public-line
   ssh-key-wrong-passphrase)
 (import ssh/known ssh-known-find ssh-known-remove!)
+(import ssh/pubkey ssh-pubkey-of-line ssh-pubkey-blob ssh-pubkey-label ssh-pubkey-bits)
 
 (def %byte-ref (prim-ref (lit str) (lit byte-ref)))
 (def %char->int (prim-ref (lit char) (lit ->int)))
@@ -66,20 +67,25 @@
     (Str8 append "ssh-ed25519 " (Base64 encode-bytes (%bytes (first b) (rest b)))
                  (if (if (null? comment) #t (= (Str8 length comment) 0)) "" (Str8 append " " comment)))))
 
-; The blob's SHA256 digest, as bytes.
+; A blob's SHA256 digest, as bytes: the blob a region (BUF START LEN).
 (def %digest
-  (fn (_ pub) (def b (%blob pub)) (Hex decode-bytes (Sha256 hex-n (first b) (rest b)))))
+  (fn (_ b) (Hex decode-bytes (Sha256 hex-n (ssh-copy (first b) (List ref 1 b) (List ref 2 b)) (List ref 2 b)))))
 
-; The fingerprint: "SHA256:" and the blob's digest in base64, unpadded.
-(def ssh-key-fingerprint
-  (fn (_ pub) (Str8 append "SHA256:" (Str8 sub 0 43 (Base64 encode-bytes (%digest pub))))))
+(def %blob-region (fn (_ pub) ((fn (_ b) (list (first b) 0 (rest b))) (%blob pub))))
+
+; The fingerprint: "SHA256:" and a blob's digest in base64, unpadded;
+; an Ed25519 key's from its 32 bytes.
+(def ssh-blob-fingerprint
+  (fn (_ b) (Str8 append "SHA256:" (Str8 sub 0 43 (Base64 encode-bytes (%digest b))))))
+
+(def ssh-key-fingerprint (fn (_ pub) (ssh-blob-fingerprint (%blob-region pub))))
 
 ; The digest's randomart, OpenSSH's drunken bishop: from the middle of a
 ; 17 by 9 field, each byte's four 2-bit pairs, low first, step a
 ; diagonal, each square visited counting up a symbol; S where it began, E
-; where it ended.
-(def ssh-key-randomart
-  (fn (_ pub)
+; where it ended.  The title is the key's type and size, [RSA 3072].
+(def ssh-blob-randomart
+  (fn (_ b title)
     (def w 17) (def h 9)
     (def symbols " .o+=*BOX@%&#/^SE")
     (def field (Vector make (* w h) 0))
@@ -95,7 +101,7 @@
                    (when (< (%oref field (at x y)) 14) (%oset! field (at x y) (+ (%oref field (at x y)) 1)))
                    (self (+ k 1) (/ (- b (& b 3)) 4) (pair x y)))))
            0 byte xy))
-        (pair 8 4) (%digest pub)))
+        (pair 8 4) (%digest b)))
     (%oset! field (at 8 4) 15)
     (%oset! field (at (first end) (rest end)) 16)
     (def border
@@ -104,10 +110,12 @@
         (Str8 append "+" (Str8 repeat pad "-") title (Str8 repeat (- w pad (Str8 length title)) "-") "+")))
     (Str8 join "\n"
       (List append
-        (list (border "[ED25519 256]"))
+        (list (border title))
         (List map (fn (_ y) (Str8 append "|" (Str8 join "" (List map (fn (_ x) (Str8 sub (%oref field (at x y)) 1 symbols)) (List range 0 w))) "|"))
           (List range 0 h))
         (list (border "[SHA256]") "")))))
+
+(def ssh-key-randomart (fn (_ pub) (ssh-blob-randomart (%blob-region pub) "[ED25519 256]")))
 
 ; A base64 text in lines of 70 columns, each ended.
 (def %lines
@@ -305,9 +313,28 @@
 ; Only the public half is read, so a sealed key asks for nothing: its
 ; comment is FILE.pub's, as OpenSSH's sshkey_load_public finds it, or
 ; none.
+; A public line of another type than ssh-ed25519 -- RSA's or ECDSA's,
+; which this tool reads but does not make -- as (KEY COMMENT), or ().
+(def %other-public
+  (fn (_ path)
+    (def text (guard (e ()) (File read-all path)))
+    (def ws (if (null? text) () (List filter (fn (_ w) (> (Str8 length w) 0)) (Str8 split " " (first (Str8 split "\n" text))))))
+    (def key (if (if (< (List length ws) 2) #t (str=? (first ws) "ssh-ed25519")) () (ssh-pubkey-of-line (first ws) (List ref 1 ws))))
+    (if (null? key) () (list key (Str8 join " " (List drop 2 ws))))))
+
 (def %fingerprint
   (fn (_ file art)
     (def path (%file file "Enter file in which the key is"))
+    (def other (if (File exists? path) (%other-public path) ()))
+    (if (not (null? other))
+      (do (def key (first other))
+          (def label (ssh-pubkey-label key))
+          (def bits (%num (ssh-pubkey-bits key)))
+          (def c (List ref 1 other))
+          (%say 1 (Str8 append bits " " (ssh-blob-fingerprint (ssh-pubkey-blob key)) " "
+                               (if (= (Str8 length c) 0) "no comment" c) " (" label ")\n"
+                               (if art (ssh-blob-randomart (ssh-pubkey-blob key) (Str8 append "[" label " " bits "]")) "")))
+          0)
     (if (not (File exists? path)) (%missing path)
       (do (def key (%read-key path ()))
           (if (if (null? key) #t (%wrong key))
@@ -318,7 +345,7 @@
                 (%say 1 (Str8 append "256 " (ssh-key-fingerprint (List ref 1 key)) " "
                                      (if (if (null? c) #t (= (Str8 length c) 0)) "no comment" c) " (ED25519)\n"
                                      (if art (ssh-key-randomart (List ref 1 key)) "")))
-                0))))))
+                0)))))))
 
 ; -p: the key rewritten in OpenSSH's format under the new passphrase: the
 ; old one -P's or asked for when the key is sealed, the new one -N's or
@@ -391,4 +418,5 @@
       (#t (%remove (a 1) (a 2))))))
 
 (provide ssh/keygen ssh-keygen-main ssh-keygen-make ssh-key-public-line ssh-key-fingerprint ssh-key-randomart
+  ssh-blob-fingerprint ssh-blob-randomart
   ssh-key-openssh-text)

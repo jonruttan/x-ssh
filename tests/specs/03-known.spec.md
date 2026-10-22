@@ -26,8 +26,8 @@ The 32 bytes are those of a key whose `.pub` line is
 
 ```ssh
 (import x/codec/hex)
-(def %kn-blob (eval (lit %blob64) (module ssh/known)))
-(write (%kn-blob (Hex decode "9331ac96c562b6f6842083bf354d59b3754ddb0ffd243253cd3f6cb753bfd39e")))
+(import ssh/pubkey ssh-pubkey-of-line ssh-pubkey-base64)
+(write (ssh-pubkey-base64 (ssh-pubkey-of-line "ssh-ed25519" "AAAAC3NzaC1lZDI1NTE5AAAAIJMxrJbFYrb2hCCDvzVNWbN1TdsP/SQyU80/bLdTv9Oe")))
 ```
 ---
     "AAAAC3NzaC1lZDI1NTE5AAAAIJMxrJbFYrb2hCCDvzVNWbN1TdsP/SQyU80/bLdTv9Oe"

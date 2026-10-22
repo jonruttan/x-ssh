@@ -24,11 +24,12 @@
 (import ssh/ask ssh-ask-tty ssh-ask-secret)
 (import ssh/bytes ssh-copy)
 (import ssh/transport ssh-open ssh-host-key ssh-engines! ssh-exchange-versions! ssh-kex!
-  ssh-auth-service! ssh-auth-publickey-query! ssh-auth-publickey! ssh-auth-password!)
+  ssh-auth-service! ssh-auth-publickey-query! ssh-auth-publickey! ssh-auth-password! ssh-hostkey-names)
 (import ssh/session ssh-session-run! ssh-disconnect!)
 (import ssh/keys ssh-key-of-file ssh-seed-of-key-file ssh-key-file-sealed? ssh-public-of-key-file ssh-key-wrong-passphrase)
-(import ssh/known ssh-known-name ssh-known-check ssh-known-add!)
-(import ssh/keygen ssh-key-fingerprint)
+(import ssh/known ssh-known-name ssh-known-check ssh-known-types ssh-known-add!)
+(import ssh/keygen ssh-key-fingerprint ssh-blob-fingerprint)
+(import ssh/pubkey ssh-pubkey-blob ssh-pubkey-label)
 (import ssh/config ssh-config-read ssh-config-options ssh-config-first ssh-config-all ssh-config-faults
   ssh-config-tilde ssh-config-time ssh-config-patterns? ssh-config-ssh-keywords)
 
@@ -261,6 +262,19 @@
 
 (def %verification-failed (fn (_) (%say 2 "Host key verification failed.\n") #f))
 
+; The host key algorithms offered, as OpenSSH orders them: those of the
+; types known_hosts already holds for this host first, so a known host
+; is not met by a key of another type; then the rest.  An ssh-rsa key is
+; offered as rsa-sha2-512 and rsa-sha2-256.
+(def %hostkey-order
+  (fn (_ s)
+    (def port (%get s (lit port)))
+    (def name (ssh-known-name (if (null? (%get s (lit alias))) (%get s (lit hostname)) (%get s (lit alias))) port))
+    (def known (List flat-map (fn (_ t) (if (str=? t "ssh-rsa") (list "rsa-sha2-512" "rsa-sha2-256") (list t)))
+                 (ssh-known-types (List append (%get s (lit known)) (%get s (lit global))) name)))
+    (def first-known (List filter (fn (_ a) (List any? (fn (_ k) (str=? k a)) known)) ssh-hostkey-names))
+    (List append first-known (List filter (fn (_ a) (not (List any? (fn (_ k) (str=? k a)) first-known))) ssh-hostkey-names))))
+
 ; The server's key against known_hosts under StrictHostKeyChecking,
 ; before any credential is sent: #t to go on.  A new host is recorded in
 ; the first user file when accepted; a changed key is refused whatever
@@ -270,7 +284,8 @@
     (def port (%get s (lit port)))
     (def name (ssh-known-name (if (null? (%get s (lit alias))) (%get s (lit hostname)) (%get s (lit alias))) port))
     (def key (ssh-host-key c))
-    (def fp (ssh-key-fingerprint key))
+    (def fp (ssh-blob-fingerprint (ssh-pubkey-blob key)))
+    (def label (ssh-pubkey-label key))
     (def known (%get s (lit known)))
     (def seen (ssh-known-check (List append known (%get s (lit global))) name key))
     (def strict (%get s (lit strict)))
@@ -280,10 +295,10 @@
           (guard (e (%say 2 (Str8 append "Failed to add the host to the list of known hosts (" (first known) ").\n")))
             (ssh-known-add! (first known) name key)
             (unless quiet
-              (%say 2 (Str8 append "Warning: Permanently added '" name "' (ED25519) to the list of known hosts.\n")))))
+              (%say 2 (Str8 append "Warning: Permanently added '" name "' (" label ") to the list of known hosts.\n")))))
         #t))
     (match
-      ((eq? (first seen) (lit known)) (do (unless (null? tr) (tr (Str8 append "Host '" name "' is known and matches the ED25519 host key."))) #t))
+      ((eq? (first seen) (lit known)) (do (unless (null? tr) (tr (Str8 append "Host '" name "' is known and matches the " label " host key."))) #t))
       ((eq? (first seen) (lit changed))
         (do (%say 2 (Str8 append
               "@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@\n"
@@ -292,16 +307,16 @@
               "IT IS POSSIBLE THAT SOMEONE IS DOING SOMETHING NASTY!\n"
               "Someone could be eavesdropping on you right now (man-in-the-middle attack)!\n"
               "It is also possible that a host key has just been changed.\n"
-              "The fingerprint for the ED25519 key sent by the remote host is\n" fp ".\n"
+              "The fingerprint for the " label " key sent by the remote host is\n" fp ".\n"
               "Please contact your system administrator.\n"
               "Add correct host key in " (List ref 1 seen) " to get rid of this message.\n"
-              "Offending ED25519 key in " (List ref 1 seen) ":" (%num (List ref 2 seen)) "\n"
+              "Offending " label " key in " (List ref 1 seen) ":" (%num (List ref 2 seen)) "\n"
               "  remove with:\n"
               "  ssh-keygen -f '" (List ref 1 seen) "' -R '" name "'\n"
               "Host key for " name " has changed and you have requested strict checking.\n"))
             (%verification-failed)))
       ((str=? strict "yes")
-        (do (%say 2 (Str8 append "No ED25519 host key is known for " name " and you have requested strict checking.\n"))
+        (do (%say 2 (Str8 append "No " label " host key is known for " name " and you have requested strict checking.\n"))
             (%verification-failed)))
       ((not (str=? strict "ask")) (record!))
       ((%get s (lit batch)) (%verification-failed))
@@ -314,7 +329,7 @@
              ((str=? a "no") (%verification-failed))
              (#t (self "Please type 'yes', 'no' or the fingerprint: "))))
          (Str8 append "The authenticity of host '" name " (" (ssh-known-name addr port) ")' can't be established.\n"
-                      "ED25519 key fingerprint is " fp ".\n"
+                      label " key fingerprint is " fp ".\n"
                       "This key is not known by any other names.\n"
                       "Are you sure you want to continue connecting (yes/no/[fingerprint])? "))))))
 
@@ -435,7 +450,7 @@
         (def c (ssh-open fd tr))
         (ssh-engines! c)
         (ssh-exchange-versions! c)
-        (ssh-kex! c)
+        (ssh-kex! c (%hostkey-order s))
         (if (not (%host-key-ok c s addr quiet tr))
           (do (Socket close fd) 255)
           (do (def ids (%identities s quiet tr))

@@ -16,6 +16,8 @@
 #             key would do before it signs, and sends requests the
 #             server declines; the log says so in OpenSSH's words
 #   x-ssh     x-ssh's own client, with the Dropbear-format key
+#   key types OpenSSH's client with an RSA key and an ECDSA P-384 key,
+#             each logged by its type and fingerprint
 #   refused   a key not in authorized_keys is refused
 #   input     200000 random bytes through `cksum` on the server's side
 #   terminal  OpenSSH's -tt and x-ssh's RequestTTY force get a terminal, its
@@ -63,6 +65,9 @@ ssh-keygen -q -t ed25519 -N '' -C x-ssh-server -f "$fx/osshkey"
 ssh-keygen -q -t ed25519 -N '' -C stranger -f "$fx/stranger"
 "$db/dropbearkey" -y -f "$fx/dbkey" 2>/dev/null | grep '^ssh-ed25519 ' > "$fx/authorized_keys"
 cat "$fx/osshkey.pub" >> "$fx/authorized_keys"
+ssh-keygen -q -t rsa -b 3072 -N '' -C rsa-user -f "$fx/rsakey"
+ssh-keygen -q -t ecdsa -b 384 -N '' -C ecdsa-user -f "$fx/ecdsakey"
+cat "$fx/rsakey.pub" "$fx/ecdsakey.pub" >> "$fx/authorized_keys"
 user=$(id -un)
 # the server's options: its own configuration, none of the system's
 sshd() {
@@ -131,6 +136,22 @@ if [ "$status" = 255 ]; then
 else
 	fail "refused: a stranger's key gave status $status"
 fi
+
+# key types: OpenSSH's client with an RSA key, which it signs with as
+# rsa-sha2-512 since the server names it in server-sig-algs, then with
+# an ECDSA P-384 key; the log names each key as OpenSSH's sshd would
+for k in rsa:RSA ecdsa:ECDSA; do
+	kind=${k%%:*}; label=${k##*:}
+	out=$($ossh -o IdentitiesOnly=yes -i "$fx/${kind}key" "$user@127.0.0.1" "echo by $kind" < /dev/null 2> "$fx/client.err")
+	status=$?
+	fp=$(ssh-keygen -l -f "$fx/${kind}key.pub" | cut -d' ' -f2)
+	if [ "$out" = "by $kind" ] && [ "$status" = 0 ] \
+		&& grep -q "Accepted publickey for $user from 127.0.0.1 port [0-9]* ssh2: $label $fp" "$fx/server.log"; then
+		echo "ok: key types -- OpenSSH's client with an $label key, logged as OpenSSH's sshd logs it"
+	else
+		fail "key types: $label output '$out' status $status"
+	fi
+done
 
 # input
 head -c 200000 /dev/urandom > "$fx/input"

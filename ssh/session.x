@@ -140,7 +140,7 @@
 ; the window last sent, 11 where the escape character stands: 1 at a
 ; line's start, 2 just after a tilde there, 0 elsewhere.
 (def %CHANNELS 1) (def %NEXT 2) (def %MOVED 3) (def %LISTENERS 4) (def %SESSION 5)
-(def %REMOTES 6) (def %ASKED 7) (def %ENV 8) (def %TTY 9) (def %SIZE 10) (def %ESC 11)
+(def %REMOTES 6) (def %UNANSWERED 7) (def %ENV 8) (def %TTY 9) (def %SIZE 10) (def %ESC 11)
 (def %rn (fn (_ run i) (%oref run i)))
 (def %rn! (fn (_ run i v) (%oset! run i v)))
 
@@ -245,16 +245,16 @@
     (ssh-put-text req (if (null? (first remote)) "" (first remote)))
     (ssh-put-uint32 req (List ref 1 remote))
     (%send c req)
-    (%rn! run %ASKED (List append (%rn run %ASKED) (list remote)))))
+    (%rn! run %UNANSWERED (List append (%rn run %UNANSWERED) (list remote)))))
 
 ; The server's answer to the oldest request still open: a refusal said
 ; as OpenSSH says it.
 (def %answered!
   (fn (_ run ok)
-    (def asked (%rn run %ASKED))
+    (def asked (%rn run %UNANSWERED))
     (unless (null? asked)
       (do (def r (first asked))
-          (%rn! run %ASKED (rest asked))
+          (%rn! run %UNANSWERED (rest asked))
           (unless ok
             (%say (Str8 append "x-ssh: Remote TCP forward request failed (port " (%num (List ref 1 r))
                               " -> " (List ref 2 r) ":" (%num (List ref 3 r)) ")\n")))))))
@@ -516,7 +516,7 @@
     (def run (Vector make 11 ()))
     (%clocks-start!)
     (%rn! run %CHANNELS ()) (%rn! run %NEXT 0) (%rn! run %MOVED 0)
-    (%rn! run %REMOTES remotes) (%rn! run %ASKED ()) (%rn! run %ENV env)
+    (%rn! run %REMOTES remotes) (%rn! run %UNANSWERED ()) (%rn! run %ENV env)
     (%rn! run %TTY tty) (%rn! run %SIZE (if (null? tty) () ((List ref 1 tty)))) (%rn! run %ESC 1)
     (%rn! run %LISTENERS
       (List map (fn (_ f) (list (if (null? (first f)) (Socket tcp-listen (List ref 1 f))

@@ -605,10 +605,11 @@
 ; forward's connection, 10 whether the client has closed the
 ; channel, 11 whether we have, 12 whether the client has sent EOF, 13 a
 ; session's terminal as (MASTER . SLAVE-PATH) or (), 14 its TERM and window
-; as (TERM COLUMNS ROWS).
+; as (TERM COLUMNS ROWS), 15 the bytes taken from the client not yet given
+; back.
 (def %PEER 1) (def %OURS 2) (def %WINDOW 3) (def %MAX 4) (def %KIND 5) (def %CHILD 6)
 (def %OUT 7) (def %ERR 8) (def %FD 9) (def %PEER-CLOSED 10) (def %CLOSED 11) (def %PEER-EOF 12)
-(def %PTY 13) (def %TERM 14)
+(def %PTY 13) (def %TERM 14) (def %OWED 15)
 (def %ch (fn (_ ch i) (%oref ch i)))
 (def %ch! (fn (_ ch i v) (%oset! ch i v)))
 
@@ -630,10 +631,10 @@
 ; A channel added to the table, numbered next.
 (def %channel!
   (fn (_ run kind peer window max)
-    (def ch (Vector make 14 ()))
+    (def ch (Vector make 15 ()))
     (%ch! ch %PEER peer) (%ch! ch %OURS (%rn run %NEXT))
     (%rn! run %NEXT (+ (%rn run %NEXT) 1))
-    (%ch! ch %WINDOW window) (%ch! ch %MAX max) (%ch! ch %KIND kind)
+    (%ch! ch %WINDOW window) (%ch! ch %MAX max) (%ch! ch %KIND kind) (%ch! ch %OWED 0)
     (%ch! ch %OUT (eq? kind (lit forward))) (%ch! ch %ERR #f) (%ch! ch %PEER-CLOSED #f) (%ch! ch %CLOSED #f)
     (%ch! ch %PEER-EOF #f)
     (%rn! run %CHANNELS (List append (%rn run %CHANNELS) (list ch)))
@@ -898,10 +899,16 @@
             (if (eq? (%ch ch %KIND) (lit session))
               (unless (null? (%ch ch %CHILD)) (File write (List ref 1 (%ch ch %CHILD)) bytes (rest r)))
               (guard (e ()) (Socket send-run (%ch ch %FD) bytes (rest r))))
-            (def adj (%packet-of %msg-channel-window-adjust))
-            (ssh-put-uint32 adj (%ch ch %PEER))
-            (ssh-put-uint32 adj (rest r))
-            (%send c adj)
+            ; the window given back once half of it is used, as OpenSSH
+            ; gives it: typed keys cost no adjust each
+            (def owed (+ (%ch ch %OWED) (rest r)))
+            (if (< owed (>> %window 1))
+              (%ch! ch %OWED owed)
+              (do (def adj (%packet-of %msg-channel-window-adjust))
+                  (ssh-put-uint32 adj (%ch ch %PEER))
+                  (ssh-put-uint32 adj owed)
+                  (%send c adj)
+                  (%ch! ch %OWED 0)))
             (%moved! run (rest r))))
       ((= t %msg-channel-eof)
         ; a session's input ends with its pipe closed; a terminal's is

@@ -68,16 +68,17 @@
 ; --- the connection record ------------------------------------------------
 ;
 ; slots: 1 fd | 2 pending bytes (BUF . LEN) | 3 send seq | 4 recv seq
-;        5 send key (64 bytes) or () | 6 receive key or () | 7 session id
+;        5 send key as (K_1 . K_2) or () | 6 receive key or () | 7 session id
 ;        8 peer's version | 9 server's host key | 10 the trace fn or ()
-;        11 the server's server-sig-algs (RFC 8308), or () until it says
+;        11 the pending packet's length as (SEQ KEY LEN), once unveiled, or ()
+;        12 the server's server-sig-algs (RFC 8308), or () until it says
 
 (def %slot (fn (_ c i) (%oref c i)))
 (def %slot! (fn (_ c i v) (%oset! c i v)))
 
 (def ssh-open
   (fn (_ fd trace)
-    (def c (Vector make 11 ()))
+    (def c (Vector make 12 ()))
     (%slot! c 1 fd)
     (%slot! c 2 (pair (%make-str 0) 0))
     (%slot! c 3 0)
@@ -88,7 +89,7 @@
 (def ssh-fd (fn (_ c) (%slot c 1)))
 (def ssh-session-id (fn (_ c) (%slot c 7)))
 (def ssh-host-key (fn (_ c) (%slot c 9)))
-(def ssh-server-sig-algs (fn (_ c) (%slot c 11)))
+(def ssh-server-sig-algs (fn (_ c) (%slot c 12)))
 
 ; Whether received bytes are waiting to be read as a packet: a caller
 ; that waits on the socket must not, while they are.
@@ -104,8 +105,13 @@
     (def run (%slot c 2))
     (if (< (rest run) 4) #f
       (do (def key (%slot c 6))
-          (def lenb (if (null? key) (first run) (ChaCha20 xor (%k1 key) (%iv 0 (%slot c 4)) (first run) 0 4)))
-          (def len (| (<< (%byte lenb 0) 24) (| (<< (%byte lenb 1) 16) (| (<< (%byte lenb 2) 8) (%byte lenb 3)))))
+          (def seq (%slot c 4))
+          (def known (%slot c 11))
+          (def len (if (if (null? known) #f (if (= (first known) seq) (eq? (List ref 1 known) key) #f))
+                     (List ref 2 known)
+                     (do (def n (%packet-length key seq (first run)))
+                         (%slot! c 11 (list seq key n))
+                         n)))
           (>= (rest run) (+ 4 len (if (null? key) 0 16)))))))
 
 (def ssh-trace
@@ -201,23 +207,30 @@
 
 ; The nonce for a sequence number: the eight-byte counter, then the
 ; number as eight big-endian bytes, which is how the cipher's IV reads.
+; constraint: endian = little -- the counter's word write puts it in byte 0
 (def %iv
   (fn (_ counter seq)
     (def iv (%make-str 16))
     (def p (%str->ptr iv))
-    ((fn (self i) (unless (= i 16) (do (%pset1 p i 0 1) (self (+ i 1))))) 0)
-    (%pset1 p 0 counter 1)
+    (%pset1 p 0 counter 8) (%pset1 p 8 0 4)
     (%pset1 p 12 (>> seq 24) 1) (%pset1 p 13 (>> seq 16) 1)
     (%pset1 p 14 (>> seq 8) 1) (%pset1 p 15 seq 1)
     iv))
 
-; The two keys of a 64-byte key: K_2 the first half (the payload's),
-; K_1 the second (the length's).
-(def %k1 (fn (_ key) (ssh-copy key 32 32)))
-(def %k2 (fn (_ key) (ssh-copy key 0 32)))
+; A 64-byte key as the cipher uses it, split once as it is put in place:
+; (K_1 . K_2), K_1 the second half (the length's), K_2 the first (the
+; payload's).
+(def %split-key (fn (_ key) (pair (ssh-copy key 32 32) (ssh-copy key 0 32))))
 
 (def %poly-key
-  (fn (_ key seq) (ssh-copy (ChaCha20 block (%k2 key) (%iv 0 seq)) 0 32)))
+  (fn (_ k2 iv0) (ssh-copy (ChaCha20 block k2 iv0) 0 32)))
+
+; A packet's length field unveiled: the clear bytes under no key, else
+; K_1's keystream over them.
+(def %packet-length
+  (fn (_ key seq head)
+    (def lenb (if (null? key) head (ChaCha20 xor (first key) (%iv 0 seq) head 0 4)))
+    (| (<< (%byte lenb 0) 24) (| (<< (%byte lenb 1) 16) (| (<< (%byte lenb 2) 8) (%byte lenb 3))))))
 
 ; A payload sent as one packet: padded to a multiple of eight (the
 ; length field aside, as the AEAD framing has it), at least four bytes
@@ -241,10 +254,11 @@
     (if (null? key)
       (do (def whole (ssh-join (list (list (first h) 0 4) (list (first b) 0 len))))
           (%send! c (first whole) (rest whole)))
-      (do (def enc-len (ChaCha20 xor (%k1 key) (%iv 0 seq) (first h) 0 4))
-          (def enc (ChaCha20 xor (%k2 key) (%iv 1 seq) (first b) 0 len))
+      (do (def iv0 (%iv 0 seq))
+          (def enc-len (ChaCha20 xor (first key) iv0 (first h) 0 4))
+          (def enc (ChaCha20 xor (rest key) (%iv 1 seq) (first b) 0 len))
           (def framed (ssh-join (list (list enc-len 0 4) (list enc 0 len))))
-          (def tag (Poly1305 mac (%poly-key key seq) (first framed) 0 (rest framed)))
+          (def tag (Poly1305 mac (%poly-key (rest key) iv0) (first framed) 0 (rest framed)))
           (def whole (ssh-join (list (list (first framed) 0 (rest framed)) (list tag 0 16))))
           (%send! c (first whole) (rest whole))))
     (%slot! c 3 (+ seq 1))))
@@ -257,8 +271,11 @@
     (def key (%slot c 6))
     (def seq (%slot c 4))
     (def head (%take! c 4))
-    (def lenb (if (null? key) head (ChaCha20 xor (%k1 key) (%iv 0 seq) head 0 4)))
-    (def len (| (<< (%byte lenb 0) 24) (| (<< (%byte lenb 1) 16) (| (<< (%byte lenb 2) 8) (%byte lenb 3)))))
+    (def known (%slot c 11))
+    (def len (if (if (null? known) #f (if (= (first known) seq) (eq? (List ref 1 known) key) #f))
+               (List ref 2 known)
+               (%packet-length key seq head)))
+    (%slot! c 11 ())
     (when (if (> len 262144) #t (< len 5)) (Err raise 'value "ssh: a packet of an impossible length" ()))
     (def body
       (if (null? key)
@@ -266,10 +283,10 @@
         (do (def enc (%take! c len))
             (def tag (%take! c 16))
             (def framed (ssh-join (list (list head 0 4) (list enc 0 len))))
-            (def want (Poly1305 mac (%poly-key key seq) (first framed) 0 (rest framed)))
+            (def want (Poly1305 mac (%poly-key (rest key) (%iv 0 seq)) (first framed) 0 (rest framed)))
             (unless (ssh-same-bytes? want 0 tag 0 16)
               (Err raise 'value "ssh: a packet failed its authentication tag" ()))
-            (ChaCha20 xor (%k2 key) (%iv 1 seq) enc 0 len))))
+            (ChaCha20 xor (rest key) (%iv 1 seq) enc 0 len))))
     (%slot! c 4 (+ seq 1))
     (def pad (%byte body 0))
     (pair (ssh-copy body 1 (- len 1 pad)) (- len 1 pad))))
@@ -292,7 +309,7 @@
                (unless (= n 0)
                  (do (def name (ssh-get-text in))
                      (def value (ssh-get-text in))
-                     (when (str=? name "server-sig-algs") (%slot! c 11 (Str8 split "," value)))
+                     (when (str=? name "server-sig-algs") (%slot! c 12 (Str8 split "," value)))
                      (self (- n 1)))))
              (ssh-get-uint32 in))
             (self c)))
@@ -452,8 +469,8 @@
     (def kout (ssh-out))
     (ssh-put-mpint kout shared 0 32)
     (def kmp (ssh-out-run kout))
-    (%slot! c 5 (%derive kmp h 67 (%slot c 7)))
-    (%slot! c 6 (%derive kmp h 68 (%slot c 7)))
+    (%slot! c 5 (%split-key (%derive kmp h 67 (%slot c 7))))
+    (%slot! c 6 (%split-key (%derive kmp h 68 (%slot c 7))))
     (ssh-trace c "keys in place")
     c))
 
@@ -515,8 +532,8 @@
     (def kout (ssh-out))
     (ssh-put-mpint kout shared 0 32)
     (def kmp (ssh-out-run kout))
-    (%slot! c 5 (%derive kmp h 68 (%slot c 7)))
-    (%slot! c 6 (%derive kmp h 67 (%slot c 7)))
+    (%slot! c 5 (%split-key (%derive kmp h 68 (%slot c 7))))
+    (%slot! c 6 (%split-key (%derive kmp h 67 (%slot c 7))))
     (ssh-trace c "keys in place")
     ; a client that asked for extensions is told the signature algorithms
     ; its key may sign with (RFC 8308 3.1): OpenSSH's signs with an RSA key

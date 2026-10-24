@@ -23,6 +23,7 @@
 (import ssh/keygen ssh-keygen-main)
 (import ssh/server ssh-server-main)
 (import ssh/scp ssh-scp-client ssh-scp-remote)
+(import ssh/sftp ssh-sftp-main)
 
 (def %byte-len (prim-ref (lit str) (lit byte-len)))
 (def %byte-ref (prim-ref (lit str) (lit byte-ref)))
@@ -100,7 +101,13 @@
             (Opts flag "-v" "Verbose, passed to ssh")
             (Opts hidden (Opts flag "-d" "The target must be a directory (the remote end)"))
             (Opts hidden (Opts flag "-t" "Receive files (the remote end)"))
-            (Opts hidden (Opts flag "-f" "Send files (the remote end)"))))))
+            (Opts hidden (Opts flag "-f" "Send files (the remote end)"))))
+    (%row (lit sftp) "sftp-server" "the SFTP server" "[options]"
+      (list (Opts arg "-d" "start_directory" "The directory to start in: %d the home directory, %u the user")
+            (Opts flag "-e" "Log to standard error (nothing is logged)")
+            (Opts arg "-f" "log_facility" "The syslog facility (nothing is logged)")
+            (Opts arg "-l" "log_level" "The log level (nothing is logged)")
+            (Opts flag "-R" "Read-only: every request that would change a file is refused")))))
 
 ; The program row a name answers to, or ().
 (def ssh-program
@@ -131,6 +138,10 @@
       ((eq? (first p) (lit client)) (%client-plan o decl))
       ((eq? (first p) (lit keygen)) (%keygen-plan o decl))
       ((eq? (first p) (lit server)) (%server-plan o decl))
+      ((eq? (first p) (lit sftp))
+        (if (null? (Opts operands o))
+          (list (lit sftp) (list (lit serve) (%value o "-d") (Opts on? o "-R")) 0)
+          (list (lit sftp) (Opts usage decl) 1)))
       (#t (%scp-plan o decl)))))
 
 (def %value (fn (_ o flag) (if (Opts on? o flag) (Opts value o flag) ())))
@@ -288,6 +299,8 @@
           ((eq? (first plan) (lit client)) (ssh-client-main (rest what)))
           ((eq? (first plan) (lit server)) (ssh-server-main (rest what)))
           ((eq? (first plan) (lit keygen)) (ssh-keygen-main what))
+          ; sftp-server's requests on standard input, which the platform keeps on fd 3
+          ((eq? (first plan) (lit sftp)) (ssh-sftp-main (List ref 1 what) (List ref 2 what) 3 1))
           ((eq? (first what) (lit to)) (ssh-scp-remote #t (List ref 1 what) (List ref 2 what) (List ref 3 what)))
           ((eq? (first what) (lit from)) (ssh-scp-remote #f (List ref 1 what) (List ref 2 what) (List ref 3 what)))
           (#t (ssh-scp-client (List ref 1 what) (List ref 2 what) (List ref 3 what) (List ref 4 what) (List ref 5 what)))))

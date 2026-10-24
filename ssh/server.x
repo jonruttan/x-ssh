@@ -42,6 +42,7 @@
 (import ssh/pubkey ssh-pubkey-of ssh-pubkey-type ssh-pubkey-label ssh-pubkey-blob ssh-pubkey-algorithms ssh-pubkey-verify?
   ssh-identity-pubkey)
 (import x/sys/pty)
+(import ssh/sftp ssh-sftp-main ssh-sftp-options)
 (import ssh/config ssh-config-read ssh-config-options ssh-config-first ssh-config-all ssh-config-faults
   ssh-config-time ssh-config-patterns? ssh-config-sshd-keywords)
 
@@ -238,6 +239,25 @@
     (def addr (first split))
     (pair (if (if (str=? addr "0.0.0.0") #t (if (str=? addr "::") #t (str=? addr "*"))) () addr) (rest split))))
 
+; The Subsystem lines: (NAME COMMAND ARG...) each, a name given once, as
+; OpenSSH's sshd has it.  internal-sftp is served in the server's own
+; child; any other command runs under the user's shell.
+(def %subsystems
+  (fn (_ lines)
+    ((fn (self ls acc)
+       (match
+         ((null? ls) (List reverse acc))
+         (#t
+           (do (def l (first ls))
+               (def args (first (rest l)))
+               (when (< (List length args) 2) (%bad l "Missing subsystem command."))
+               (when (List any? (fn (_ p) (str=? (first p) (first args))) acc)
+                 (%bad l (Str8 append "Subsystem '" (first args) "' already defined.")))
+               (when (str=? (List ref 1 args) "internal-sftp")
+                 ((fn (_ o) (unless (pair? o) (%bad l o))) (ssh-sftp-options (rest (rest args)))))
+               (self (rest ls) (pair args acc))))))
+     (List filter (fn (_ l) (str=? (first l) "subsystem")) lines) ())))
+
 ; The settings in force, from the lines in order: an alist.  Command-line
 ; Port lines, from -p or -o, stand in place of the file's.  Raises a
 ; label 'value Err whose message is OpenSSH's for a value it refuses.
@@ -278,7 +298,8 @@
                                  (list "daemon" "user" "auth" "authpriv" "local0" "local1" "local2" "local3" "local4" "local5" "local6" "local7") "auth"))
           (pair (lit level) (%choice lines "loglevel" (list "quiet" "fatal" "error" "info" "verbose" "debug" "debug1" "debug2" "debug3") "info"))
           (pair (lit tries) (%count lines "maxauthtries" 6))
-          (pair (lit accept) (List flat-map (fn (_ a) a) (ssh-config-all lines "acceptenv"))))))
+          (pair (lit accept) (List flat-map (fn (_ a) a) (ssh-config-all lines "acceptenv")))
+          (pair (lit subsystems) (%subsystems lines)))))
 
 ; The settings as -T prints them, a keyword and its value a line.
 (def %print
@@ -307,7 +328,8 @@
                 (Str8 append "syslogfacility " (Str8 upcase (%get s (lit facility))))
                 (Str8 append "loglevel " (Str8 upcase (%get s (lit level))))
                 (Str8 append "maxauthtries " (%num (%get s (lit tries)))))
-          (List map (fn (_ e) (Str8 append "acceptenv " e)) (%get s (lit accept))))))))
+          (List map (fn (_ e) (Str8 append "acceptenv " e)) (%get s (lit accept)))
+          (List map (fn (_ p) (Str8 append "subsystem " (first p) " " (Str8 join " " (rest p)))) (%get s (lit subsystems))))))))
 
 ; --- authorized_keys --------------------------------------------------------
 
@@ -545,6 +567,23 @@
       ((< pid 0) ())
       (#t (list pid (rest kid) (rest kid) ())))))
 
+; internal-sftp: the SFTP server in a child of this one, on three pipes as
+; a command's, with its options from the Subsystem line.  The child never
+; returns to the server's loop.
+(def %spawn-sftp
+  (fn (_ args sock env home)
+    (def o (ssh-sftp-options args))
+    (def i (Sys pipe)) (def out (Sys pipe)) (def e (Sys pipe))
+    (def pid (Sys fork))
+    (when (= pid 0)
+      (Sys dup2 (rest e) 2)
+      (List for-each (fn (_ fd) (Sys close fd)) (list (rest i) (first out) (first e) (rest e) sock))
+      (List for-each (fn (_ v) (Sys setenv (first v) (rest v))) env)
+      (guard (x ()) (Sys chdir home))
+      (Sys exit (guard (x 1) (ssh-sftp-main (first o) (List ref 1 o) (first i) (rest out)))))
+    (Sys close (first i)) (Sys close (rest out)) (Sys close (rest e))
+    (if (< pid 0) () (list pid (rest i) (first out) (first e)))))
+
 ; --- the clocks ------------------------------------------------------------
 ;
 ; The clocks ClientAliveInterval and ChannelTimeout read, seconds since
@@ -626,7 +665,7 @@
 ; AcceptEnv's patterns, 10 the variables the client sent that they
 ; accept, as (NAME . VALUE).
 (def %CHANNELS 1) (def %NEXT 2) (def %MOVED 3) (def %FORWARDING 4) (def %SESSION 5)
-(def %REMOTE 6) (def %GATEWAY 7) (def %LISTENERS 8) (def %ACCEPT 9) (def %ENV 10)
+(def %REMOTE 6) (def %GATEWAY 7) (def %LISTENERS 8) (def %ACCEPT 9) (def %ENV 10) (def %SUBSYSTEMS 11)
 (def %rn (fn (_ run i) (%oref run i)))
 (def %rn! (fn (_ run i v) (%oset! run i v)))
 (def %min (fn (_ a b) (if (< a b) a b)))
@@ -855,16 +894,33 @@
         (do (def name (ssh-get-text in))
             (def want-reply (ssh-get-bool in))
             (def fresh (if (eq? (%ch ch %KIND) (lit session)) (null? (%ch ch %CHILD)) #f))
-            (def start!
-              (fn (_ command)
-                (def pty (%ch ch %PTY))
-                (def kid (%spawn command sock (%rn run %ENV) pty (%ch ch %TERM) (%home (%me))))
+            (def started!
+              (fn (_ kid pty)
                 (%ch! ch %CHILD kid)
                 (if (null? kid)
                   (%debug "refused: no pseudo-terminal")
                   (do (%ch! ch %OUT #t) (%ch! ch %ERR (null? pty))))
                 (%reply c ch want-reply (not (null? kid)))))
+            (def start!
+              (fn (_ command)
+                (def pty (%ch ch %PTY))
+                (started! (%spawn command sock (%rn run %ENV) pty (%ch ch %TERM) (%home (%me))) pty)))
             (match
+              ; a subsystem (RFC 4254 6.5) by its Subsystem line: internal-sftp
+              ; in a child of this server, any other command under the shell
+              ((if fresh (str=? name "subsystem") #f)
+                (do (def sub (ssh-get-text in))
+                    (def row (List find (fn (_ p) (str=? (first p) sub)) (%rn run %SUBSYSTEMS)))
+                    (match
+                      ((null? row)
+                        (do (%log (Str8 append "subsystem request for " sub " failed, subsystem not found"))
+                            (%reply c ch want-reply #f)))
+                      ((str=? (List ref 1 row) "internal-sftp")
+                        (do (%debug (Str8 append "subsystem request for " sub " by internal-sftp"))
+                            (started! (%spawn-sftp (rest (rest row)) sock (%rn run %ENV) (%home (%me))) ())))
+                      (#t
+                        (do (%debug (Str8 append "subsystem request for " sub " by " (List ref 1 row)))
+                            (start! (Str8 join " " (rest row))))))))
               ((if fresh (str=? name "exec") #f)
                 (do (def command (ssh-get-text in))
                     (%debug (Str8 append "exec: " command))
@@ -949,7 +1005,7 @@
 ; GatewayPorts, AcceptEnv and the clocks.
 (def %serve-session
   (fn (_ c sock s)
-    (def run (Vector make 10 ()))
+    (def run (Vector make 11 ()))
     (def tcp (%get s (lit tcp)))
     (def limits (%get s (lit limits)))
     (%clocks-start!)
@@ -957,6 +1013,7 @@
     (%rn! run %FORWARDING (if (str=? tcp "all") #t (str=? tcp "local"))) (%rn! run %SESSION ())
     (%rn! run %REMOTE (if (str=? tcp "all") #t (str=? tcp "remote"))) (%rn! run %GATEWAY (%get s (lit gateway)))
     (%rn! run %LISTENERS ()) (%rn! run %ACCEPT (%get s (lit accept))) (%rn! run %ENV ())
+    (%rn! run %SUBSYSTEMS (%get s (lit subsystems)))
     ((fn (self)
        (def session (%rn run %SESSION))
        (unless (if (null? session) #f

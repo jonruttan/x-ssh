@@ -22,6 +22,9 @@
 #             by OpenSSH's client held to its algorithm, P-256's by x-ssh's
 #   refused   a key not in authorized_keys is refused
 #   input     200000 random bytes through `cksum` on the server's side
+#   sftp      OpenSSH's sftp and scp (SFTP) through Subsystem internal-sftp;
+#             sftp-server -R as a Subsystem command refuses a put; an
+#             unconfigured subsystem is refused, as the log says
 #   terminal  OpenSSH's -tt and x-ssh's RequestTTY force get a terminal, its
 #             window and TERM; x-ssh at a terminal under expect (shell.exp):
 #             a shell, a resize, its exit status, and the ~. escape
@@ -84,7 +87,8 @@ started() {
 		sleep 1
 	done
 }
-SHELL=/bin/sh sshd -D -e -p "$port" -o LogLevel=DEBUG1 -o AcceptEnv='XSSH_*' > "$fx/server.log" 2>&1 &
+SHELL=/bin/sh sshd -D -e -p "$port" -o LogLevel=DEBUG1 -o AcceptEnv='XSSH_*' -o 'Subsystem=sftp internal-sftp' \
+	-o "Subsystem=ro-sftp $X -l ssh -- sftp-server -R" > "$fx/server.log" 2>&1 &
 srvpid=$!
 # the listener builds the curves' engines before it listens
 started "$fx/server.log" "$port"
@@ -197,6 +201,37 @@ if [ "$got" = "$want" ]; then
 	echo "ok: input -- 200000 bytes reach the command whole ($want)"
 else
 	fail "input: the server side's cksum '$got', the client side's '$want'"
+fi
+
+# sftp: Subsystem sftp internal-sftp served to OpenSSH's sftp (a file put
+# and got back whole, a directory made, a rename, removes) and to its scp,
+# which speaks SFTP unless told -O; Subsystem ro-sftp runs sftp-server -R
+# as a command, which refuses a put; a subsystem not configured is refused
+mkdir "$fx/sftp"
+printf 'cd %s\nput %s d1\nmkdir dir\nrename d1 dir/d2\nls -l dir\nget dir/d2 %s\nrm dir/d2\nrmdir dir\n' \
+	"$fx/sftp" "$fx/input" "$fx/sftp.back" > "$fx/sftp.batch"
+sftp -q -F none -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i "$fx/osshkey" \
+	-P "$port" -b "$fx/sftp.batch" "$user@127.0.0.1" > "$fx/sftp.out" 2> "$fx/client.err"
+status=$?
+scp -q -F none -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i "$fx/osshkey" \
+	-P "$port" "$fx/input" "$user@127.0.0.1:$fx/sftp/s1" 2>> "$fx/client.err" \
+	&& scp -q -F none -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i "$fx/osshkey" \
+		-P "$port" "$user@127.0.0.1:$fx/sftp/s1" "$fx/scp.back" 2>> "$fx/client.err"
+sstatus=$?
+printf 'put %s %s/r1\n' "$fx/input" "$fx/sftp" > "$fx/ro.batch"
+sftp -q -F none -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i "$fx/osshkey" \
+	-P "$port" -s ro-sftp -b "$fx/ro.batch" "$user@127.0.0.1" > /dev/null 2> "$fx/ro.err"
+rstatus=$?
+$ossh -i "$fx/osshkey" -s "$user@127.0.0.1" nosuch < /dev/null > /dev/null 2>> "$fx/client.err"
+nstatus=$?
+if [ "$status" = 0 ] && cmp -s "$fx/input" "$fx/sftp.back" && grep -q ' d2$' "$fx/sftp.out" \
+	&& [ ! -e "$fx/sftp/dir" ] && [ "$sstatus" = 0 ] && cmp -s "$fx/input" "$fx/scp.back" \
+	&& [ "$rstatus" != 0 ] && grep -q 'Permission denied' "$fx/ro.err" && [ ! -e "$fx/sftp/r1" ] \
+	&& [ "$nstatus" = 255 ] && grep -q 'subsystem request for nosuch failed, subsystem not found' "$fx/server.log"; then
+	echo "ok: sftp -- OpenSSH's sftp and scp through internal-sftp; sftp-server -R refuses a put; an unknown subsystem is refused"
+else
+	fail "sftp: status $status, scp $sstatus, read-only $rstatus ($(cat "$fx/ro.err")), unknown $nstatus"
+	cat "$fx/sftp.out" >&2
 fi
 
 # env: AcceptEnv XSSH_* takes OpenSSH's SetEnv and x-ssh's SendEnv, and

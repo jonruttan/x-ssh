@@ -69,6 +69,29 @@ maxauthtries 6
 ---
     ("command-line: line 1: Badly formatted port number." "command-line: line 1: unsupported option \"maybe\"." "command-line: line 1: ciphers leaves out chacha20-poly1305@openssh.com, the one served" "command-line: line 1: the channel timeout session=5 is not served; global= is")
 
+### Subsystem lines: a name and its command, printed as -T prints them
+
+internal-sftp's options are checked as the line is read; a name given
+twice is refused in OpenSSH's words.
+
+```ssh
+(import ssh/server ssh-server-settings)
+(import ssh/config ssh-config-options)
+(def %subs (fn (_ ls) (guard (e (e msg)) (rest (List find (fn (_ p) (eq? (first p) (lit subsystems))) (ssh-server-settings (ssh-config-options ls)))))))
+(write (list (%subs (list "Subsystem sftp internal-sftp -R" "Subsystem other /usr/libexec/sftp-server -l INFO"))
+             (%subs (list "Subsystem sftp internal-sftp" "Subsystem sftp /bin/true"))
+             (%subs (list "Subsystem sftp"))
+             (%subs (list "Subsystem sftp internal-sftp -P read"))))
+(newline)
+(display (Str8 join "\n" (List filter (fn (_ l) (str=? (Str8 sub 0 9 l) "subsystem"))
+  (Str8 split "\n" ((eval (lit %print) (module ssh/server)) (ssh-server-settings (ssh-config-options (list "Subsystem sftp internal-sftp -R"))))))))
+```
+---
+```output
+((("sftp" "internal-sftp" "-R") ("other" "/usr/libexec/sftp-server" "-l" "INFO")) "command-line: line 1: Subsystem 'sftp' already defined." "command-line: line 1: Missing subsystem command." "command-line: line 1: internal-sftp: -P is not served")
+subsystem sftp internal-sftp -R
+```
+
 ### authorized_keys files: %h and %u, a relative one under the home directory
 
 ```ssh

@@ -77,3 +77,78 @@ each wrapped in its SSH signature blob here.
 ```
 ---
     (#t #t #t #t #f #f #f)
+
+## identities
+
+An RSA key `ssh-keygen -t rsa -b 1024` made and ECDSA ones `-t ecdsa`
+and `-t ecdsa -b 521` made, their private files read; the signatures
+`openssl dgst -sign` made over "abc" with the same keys, ECDSA's with
+`-sigopt nonce-type:1`, RFC 6979's nonce.
+
+### an identity's signatures are openssl's, each one its key verifies, and its file written reads back
+
+```ssh
+(import ssh/keys ssh-key-identity-of-text)
+(import ssh/keygen ssh-identity-openssh-text)
+(import ssh/bytes ssh-same-bytes?)
+(import ssh/pubkey ssh-identity-pubkey ssh-identity-comment ssh-identity-sign ssh-pubkey-verify? ssh-pubkey-base64)
+(def %id-rsa (ssh-key-identity-of-text (Str8 join "\n" (list
+    "-----BEGIN OPENSSH PRIVATE KEY-----"
+    "b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAlwAAAAdzc2gtcn"
+    "NhAAAAAwEAAQAAAIEA4YUu1IKFPCCjPjqhRwiCOnd//TwuePnztcAVzQWNQODaKXiUiVy1"
+    "Clm8mJJTX6ScEFFb41zyNCJVYsT8SREh/NGnjrFl4VNcry/UBiSBUDNQRPI6B2Fvz7Ij8N"
+    "l2CuDz5eemsJQRJACbwYL/lSQkDBX148GEbbwUr8IK7xr6XIkAAAIAXZtoLV2baC0AAAAH"
+    "c3NoLXJzYQAAAIEA4YUu1IKFPCCjPjqhRwiCOnd//TwuePnztcAVzQWNQODaKXiUiVy1Cl"
+    "m8mJJTX6ScEFFb41zyNCJVYsT8SREh/NGnjrFl4VNcry/UBiSBUDNQRPI6B2Fvz7Ij8Nl2"
+    "CuDz5eemsJQRJACbwYL/lSQkDBX148GEbbwUr8IK7xr6XIkAAAADAQABAAAAgH8gA1D5rj"
+    "9BqqO2ixkum7J3kGdgmFXLmGzYtbFXstNirLf558kywD7wbNaYjXT5ppuwMRsOVt26iOVf"
+    "Y1OQ29XINJLBFxIgeroaZxaRI+wrQooj3hL9G12iZY6TrgrVyv4hihJNpOsrCOihiFuNr8"
+    "H5nN/DmqEqsLci7t/iP5OBAAAAQQCeRlkeZ4k/GzLbYQEEKtmmkCJ4UT7dm7AyB3uiHHcZ"
+    "4loeJZ1MO6m/JvDhTcTX/0ZAyw1I1Y5caOICjWT1eh+IAAAAQQDzAoSUWYPI333s1Q6yms"
+    "bGKmfleZFHH+O3ZCklXVeQtNu99u9KFfDlMBQUJ/0bfXEcxZk4kWspqhHEzueGYFWxAAAA"
+    "QQDtk1Pm8XhazPKxiRgqNeKtowCTNIo7ZEFI0Q5F2WpzLfVyU/zNZH07udFhcoSqTyRycZ"
+    "fRQcCrVgtchfSuwDJZAAAACHJzYUBzcGVjAQI="
+    "-----END OPENSSH PRIVATE KEY-----"
+    "")) ""))
+(def %id-ec (ssh-key-identity-of-text (Str8 join "\n" (list
+    "-----BEGIN OPENSSH PRIVATE KEY-----"
+    "b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAaAAAABNlY2RzYS"
+    "1zaGEyLW5pc3RwMjU2AAAACG5pc3RwMjU2AAAAQQRjgIFo/x48IXNxY0y8JauL++ZzXPag"
+    "zond/aO5vqEP52IV1wGx2G9oVFtblxNuU/5//aD7IOP1JSCCM+QbCsCKAAAAqHwGOKZ8Bj"
+    "imAAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBGOAgWj/Hjwhc3Fj"
+    "TLwlq4v75nNc9qDOid39o7m+oQ/nYhXXAbHYb2hUW1uXE25T/n/9oPsg4/UlIIIz5BsKwI"
+    "oAAAAgD/Az9JQItj3tni7jIPkr+QrwEAxJBad8HlVv/Syb3RAAAAAKZWNkc2FAc3BlYwEC"
+    "AwQFBg=="
+    "-----END OPENSSH PRIVATE KEY-----"
+    "")) ""))
+(def %id-ec5 (ssh-key-identity-of-text (Str8 join "\n" (list
+    "-----BEGIN OPENSSH PRIVATE KEY-----"
+    "b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAArAAAABNlY2RzYS"
+    "1zaGEyLW5pc3RwNTIxAAAACG5pc3RwNTIxAAAAhQQADeiJozDD5UC8A5mzPMXhMNqpXMo5"
+    "lOqZE7WRzQxKmU0rKYIq5aM4IhvX0ba+igZ0gTZF9564EUTbQzDJopwLp3UBcaI1WR7w/s"
+    "h9o7eUswV0E+fvPjrRvtOl2Mgd07OmHkZL0VQzHP96TtjlJ+7dSYUC9pQh56mesoB+BV9f"
+    "4JvEIIgAAAEQsSoqybEqKskAAAATZWNkc2Etc2hhMi1uaXN0cDUyMQAAAAhuaXN0cDUyMQ"
+    "AAAIUEAA3oiaMww+VAvAOZszzF4TDaqVzKOZTqmRO1kc0MSplNKymCKuWjOCIb19G2vooG"
+    "dIE2RfeeuBFE20MwyaKcC6d1AXGiNVke8P7IfaO3lLMFdBPn7z460b7TpdjIHdOzph5GS9"
+    "FUMxz/ek7Y5Sfu3UmFAvaUIeepnrKAfgVfX+CbxCCIAAAAQgEsC7v+C9QQ+1cF6eSnZxmw"
+    "3716p8BPMrJyw6esf8re7wzZuMNi/lzxZnmk+FTgVw5okYwnHoDIGdXYbtLJSW2K6AAAAA"
+    "1lY2RzYTUyMUBzcGVjAQIDBAU="
+    "-----END OPENSSH PRIVATE KEY-----"
+    "")) ""))
+(def %id-same? (fn (_ a b) (if (= (List ref 2 a) (List ref 2 b)) (ssh-same-bytes? (first a) (List ref 1 a) (first b) (List ref 1 b) (List ref 2 a)) #f)))
+(def %id-check
+  (fn (_ id alg want)
+    (def sig (ssh-identity-sign id %pk-abc alg))
+    (list (%id-same? sig want) (ssh-pubkey-verify? (ssh-identity-pubkey id) sig %pk-abc))))
+(def %id-back
+  (fn (_ id)
+    ((fn (_ b) (list (str=? (ssh-pubkey-base64 (ssh-identity-pubkey b)) (ssh-pubkey-base64 (ssh-identity-pubkey id))) (ssh-identity-comment b)))
+     (ssh-key-identity-of-text (ssh-identity-openssh-text id (ssh-identity-comment id)) ""))))
+(write (list (%id-check %id-rsa "rsa-sha2-256" (%pk-rsa-sig "rsa-sha2-256" "2aadf8def2cbc5bd05ffe8f4abcb3064f0dc87e82809d55c756c3c574aa0c595cdb580fc5b68d7ccca6b83117fac066b0ca8590f0b1dc89e07b1f730f04e643c387579362f40e69168e1ae38f67988c68bf16c12bf5251e5b136ef2cf65731291bfc553b0c0564a42a79380ec35f5b6618300ef5cf9dbecf991709c0ebb6bdff"))
+             (%id-check %id-rsa "rsa-sha2-512" (%pk-rsa-sig "rsa-sha2-512" "7cb30148324c1c338e5f070cae7dbf878921820813068bdd3bd4fd14fdf3995d248ffecf7f876d094672cb47f82bdd0500ff72926e138ea25be164a63399c15a63d887efadfca47fc030462cc76b14bfe3faace9cbcda8102f715f45c08cdd395f8e2ad0a9f0551a30825ec853011d336e6c9b39310028427563f33195c6c5c8"))
+             (%id-check %id-ec "ecdsa-sha2-nistp256" (%pk-ec-sig "ecdsa-sha2-nistp256" "454578510951193E69E84DFF142249CDAB09F6CEEE72F8AD308CEFD08D957522" "316CA21ACB9537ED74C2F48DE37FA2F06E53D363FF410058E98CFC8149D70DDB"))
+             (%id-check %id-ec5 "ecdsa-sha2-nistp521" (%pk-ec-sig "ecdsa-sha2-nistp521" "B1CD3762E0350D122BDDF505E120710AA246E09879A0147E9E698BDE3AEDC790408F41976881F82584B17D0E08FF3FC008A0C493F9281F91CEDA30C7F237600B68" "016DCB3DAC10704044B78DBFC97ACC5DB3A32666D12F9D2779AA2CC57B30FEFD4E50BD39081609C2B9AE17CF5C56B61C8421A7F9066173A4E2014CB43566C0F8432C"))
+             (%id-back %id-rsa) (%id-back %id-ec) (%id-back %id-ec5)))
+```
+---
+    ((#t #t) (#t #t) (#t #t) (#t #t) (#t "rsa@spec") (#t "ecdsa@spec") (#t "ecdsa521@spec"))

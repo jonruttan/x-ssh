@@ -16,13 +16,13 @@
 ;                           SHA-256 or SHA-512 -- the SHA-1 ssh-rsa is
 ;                           refused, as OpenSSH refuses it
 ;   ecdsa-sha2-nistp256     string type, string the curve, string the point
-;   ecdsa-sha2-nistp384     (SEC 1 uncompressed); signed over SHA-256 or
-;                           SHA-384, the signature mpint r then mpint s
+;   ecdsa-sha2-nistp384     (SEC 1 uncompressed); signed over SHA-256,
+;   ecdsa-sha2-nistp521     SHA-384 or SHA-512 by the curve, the signature
+;                           mpint r then mpint s
 ;
 ; A key is (KIND BLOB ...): ed25519 with the 32 bytes, rsa with e and n,
 ; ecdsa with the curve and the point, BLOB and each part a region (BUF
-; START LEN), as x-lang's codecs take them.  nistp521 is read but not
-; checked: x-lang's Ecdsa has P-256 and P-384.
+; START LEN), as x-lang's codecs take them.
 
 (module ssh/pubkey)
 
@@ -33,7 +33,7 @@
 (import x/codec/ed25519)
 (import x/codec/rsa)
 (import x/codec/ecdsa)
-(import ssh/bytes ssh-in ssh-get-text ssh-get-string ssh-get-bytes ssh-copy)
+(import ssh/bytes ssh-in ssh-get-text ssh-get-string ssh-get-bytes ssh-copy ssh-out ssh-put-text ssh-put-string ssh-put-mpint ssh-out-run)
 
 (def %byte-ref (prim-ref (lit str) (lit byte-ref)))
 (def %char->int (prim-ref (lit char) (lit ->int)))
@@ -92,6 +92,16 @@
                         ((fn (self b k) (if (= b 0) k (self (/ (- b (& b 1)) 2) (+ k 1)))) (%byte buf (+ at i)) 0)))))
                0))))))
 
+; An ECDSA curve's name in SSH, nistp256, nistp384 or nistp521, as
+; x-lang's Ecdsa names it, p256, p384 or p521; () for another.
+(def ssh-ecdsa-curve
+  (fn (_ name)
+    (match ((str=? name "nistp256") (lit p256)) ((str=? name "nistp384") (lit p384)) ((str=? name "nistp521") (lit p521)) (#t ()))))
+
+; The hash a curve is signed over (RFC 5656 6.2.1).
+(def %curve-hash
+  (fn (_ c) (match ((eq? c (lit p256)) (lit sha256)) ((eq? c (lit p384)) (lit sha384)) (#t (lit sha512)))))
+
 ; The signature algorithms a key verifies, ours first.
 (def ssh-pubkey-algorithms
   (fn (_ key)
@@ -130,9 +140,44 @@
               (def r (ssh-get-string rs))
               (def t (ssh-get-string rs))
               (match
-                ((str=? curve "nistp256") (Ecdsa verify (lit p256) (List ref 3 key) (%digest (lit sha256) data) (%region buf r) (%region buf t)))
-                ((str=? curve "nistp384") (Ecdsa verify (lit p384) (List ref 3 key) (%digest (lit sha384) data) (%region buf r) (%region buf t)))
+                ((not (null? (ssh-ecdsa-curve curve)))
+                  ((fn (_ c) (Ecdsa verify c (List ref 3 key) (%digest (%curve-hash c) data) (%region buf r) (%region buf t))) (ssh-ecdsa-curve curve)))
                 (#t #f))))))))
+
+; --- identities: keys with their secret halves ----------------------------
+;
+; An identity is (KEY SECRET COMMENT): KEY the public key as above, SECRET
+; the Ed25519 key's 32-byte seed, an RSA key's (N D E IQMP P Q) or an ECDSA key's
+; (CURVE D), N and D regions, CURVE p256, p384 or p521.
+
+(def ssh-identity-pubkey (fn (_ id) (first id)))
+(def ssh-identity-comment (fn (_ id) (List ref 2 id)))
+
+; A signature blob by an identity over data's region, with alg -- one of
+; (ssh-pubkey-algorithms of its key) -- as a region: string alg, string the
+; signature (RFC 8332 3; RFC 5656 3.1.2, mpint r and mpint s within).
+(def ssh-identity-sign
+  (fn (_ id data alg)
+    (def key (first id))
+    (def secret (List ref 1 id))
+    (def out (ssh-out))
+    (ssh-put-text out alg)
+    (match
+      ((eq? (first key) (lit ed25519))
+        (ssh-put-string out (Ed25519 sign secret (first data) (List ref 1 data) (List ref 2 data)) 0 64))
+      ((eq? (first key) (lit rsa))
+        (do (def hash (if (str=? alg "rsa-sha2-512") (lit sha512) (lit sha256)))
+            (def sig (Rsa sign-pkcs1 (first secret) (List ref 1 secret) hash (%digest hash data)))
+            (ssh-put-string out (first sig) (List ref 1 sig) (List ref 2 sig))))
+      (#t
+        (do (def curve (first secret))
+            (def rs (Ecdsa sign curve (List ref 1 secret) (%digest (%curve-hash curve) data)))
+            (def inner (ssh-out))
+            (ssh-put-mpint inner (first (first rs)) (List ref 1 (first rs)) (List ref 2 (first rs)))
+            ((fn (_ s) (ssh-put-mpint inner (first s) (List ref 1 s) (List ref 2 s))) (first (rest rs)))
+            (def ir (ssh-out-run inner))
+            (ssh-put-string out (first ir) 0 (rest ir)))))
+    ((fn (_ r) (list (first r) 0 (rest r))) (ssh-out-run out))))
 
 ; A key's blob in base64, as known_hosts and authorized_keys spell it.
 (def ssh-pubkey-base64
@@ -155,4 +200,5 @@
       (if (str=? (ssh-pubkey-type key) type) key ()))))
 
 (provide ssh/pubkey ssh-pubkey-of ssh-pubkey-of-line ssh-pubkey-blob ssh-pubkey-type ssh-pubkey-label ssh-pubkey-bits
-  ssh-pubkey-algorithms ssh-pubkey-verify? ssh-pubkey-base64)
+  ssh-pubkey-algorithms ssh-pubkey-verify? ssh-pubkey-base64 ssh-identity-pubkey ssh-identity-comment ssh-identity-sign
+  ssh-ecdsa-curve)

@@ -19,7 +19,7 @@ pure-x, so the file is weighted.
              (first (rest (ssh-plan (list "ssh-keygen"))))))
 ```
 ---
-    (('generate "k" "me@here" "" #t 16) ('generate () () () #f 16))
+    (('generate "k" "me@here" "" #t 16 "ed25519" 256) ('generate () () () #f 16 "ed25519" 256))
 
 ### -y, -l, -p, -A, -F and -R
 
@@ -31,13 +31,15 @@ pure-x, so the file is weighted.
 ---
     (('public "k" ()) ('fingerprint "k" #t) ('passphrase "k" "" "" 16) ('hosts ()) ('find "[h]:2222" ()) ('remove "h" "kh"))
 
-### types not served, and unknown types, are refused
+### ECDSA on 256 bits, the default, 384 or 521; RSA on 3072, the default, or another from 1024 to 16384; types and sizes not served, and unknown ones, refused
 
 ```ssh
-(write (List map (fn (_ t) (first (rest (ssh-plan (list "ssh-keygen" "-t" t "-f" "k"))))) (list "rsa" "frob")))
+(write (List map (fn (_ a) (first (rest (ssh-plan (List append (list "ssh-keygen" "-f" "k" "-t") a)))))
+  (list (list "ecdsa") (list "ecdsa" "-b" "384") (list "ecdsa" "-b" "521") (list "rsa") (list "rsa" "-b" "4096")
+        (list "dsa") (list "frob") (list "ecdsa" "-b" "512") (list "rsa" "-b" "512") (list "rsa" "-b" "32768"))))
 ```
 ---
-    ("x-ssh: key type rsa is not served yet\n" "unknown key type frob\n")
+    (('generate "k" () () #f 16 "ecdsa" 256) ('generate "k" () () #f 16 "ecdsa" 384) ('generate "k" () () #f 16 "ecdsa" 521) ('generate "k" () () #f 16 "rsa" 3072) ('generate "k" () () #f 16 "rsa" 4096) "x-ssh: key type dsa is not served yet\n" "unknown key type frob\n" "Invalid ECDSA key length: valid lengths are 256, 384 or 521 bits\r\n" "Invalid RSA key length: minimum is 1024 bits\r\n" "Invalid RSA key length: maximum is 16384 bits\r\n")
 
 ## a key Dropbear wrote
 
@@ -180,4 +182,4 @@ ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMyaRFRPx6NmxOjjOye/6UtsYWQ4LGlAMH5D0sABGKOv
   (list (list "-a" "4" "-N" "pw" "-f" "k") (list "-p" "-a" "8" "-f" "k") (list "-a" "x") (list "-a" "0"))))
 ```
 ---
-    ((('generate "k" () "pw" #f 4) 0) (('passphrase "k" () () 8) 0) ("Invalid number: x (invalid)\n" 255) ("Invalid number: 0 (too small)\n" 255))
+    ((('generate "k" () "pw" #f 4 "ed25519" 256) 0) (('passphrase "k" () () 8) 0) ("Invalid number: x (invalid)\n" 255) ("Invalid number: 0 (too small)\n" 255))

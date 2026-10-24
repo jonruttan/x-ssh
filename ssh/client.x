@@ -24,12 +24,12 @@
 (import ssh/ask ssh-ask-tty ssh-ask-secret)
 (import ssh/bytes ssh-copy)
 (import ssh/transport ssh-open ssh-host-key ssh-engines! ssh-exchange-versions! ssh-kex!
-  ssh-auth-service! ssh-auth-publickey-query! ssh-auth-publickey! ssh-auth-password! ssh-hostkey-names)
+  ssh-auth-service! ssh-auth-publickey-query! ssh-auth-publickey! ssh-auth-password! ssh-hostkey-names ssh-server-sig-algs)
 (import ssh/session ssh-session-run! ssh-disconnect!)
-(import ssh/keys ssh-key-of-file ssh-seed-of-key-file ssh-key-file-sealed? ssh-public-of-key-file ssh-key-wrong-passphrase)
+(import ssh/keys ssh-key-file-sealed? ssh-key-wrong-passphrase ssh-identity-read-file ssh-pubkey-of-key-file)
 (import ssh/known ssh-known-name ssh-known-check ssh-known-types ssh-known-add!)
-(import ssh/keygen ssh-key-fingerprint ssh-blob-fingerprint)
-(import ssh/pubkey ssh-pubkey-blob ssh-pubkey-label)
+(import ssh/keygen ssh-blob-fingerprint)
+(import ssh/pubkey ssh-pubkey-blob ssh-pubkey-label ssh-pubkey-algorithms)
 (import ssh/config ssh-config-read ssh-config-options ssh-config-first ssh-config-all ssh-config-faults
   ssh-config-tilde ssh-config-time ssh-config-patterns? ssh-config-ssh-keywords)
 
@@ -195,7 +195,7 @@
     (def session (%choice lines "sessiontype" (list "default" "none" "subsystem") "default"))
     (when (str=? session "subsystem") (%bad (%line lines "sessiontype") "SessionType subsystem is not served"))
     (list (pair (lit host) host) (pair (lit hostname) hostname) (pair (lit port) port) (pair (lit user) user)
-          (pair (lit identities) (if (null? ids) (list (pair (path "~/.ssh/id_ed25519") #f)) (List map (fn (_ p) (pair (path p) #t)) ids)))
+          (pair (lit identities) (if (null? ids) (List map (fn (_ p) (pair (path p) #f)) (list "~/.ssh/id_rsa" "~/.ssh/id_ecdsa" "~/.ssh/id_ed25519")) (List map (fn (_ p) (pair (path p) #t)) ids)))
           (pair (lit known) (files "userknownhostsfile" (list "~/.ssh/known_hosts" "~/.ssh/known_hosts2")))
           (pair (lit global) (files "globalknownhostsfile" (list "/etc/ssh/ssh_known_hosts" "/etc/ssh/ssh_known_hosts2")))
           (pair (lit strict) (%choice lines "stricthostkeychecking" (list "yes" "no" "off" "ask" "accept-new") "ask"))
@@ -337,10 +337,11 @@
 
 (def %offers? (fn (_ methods m) (if (eq? methods #t) #f (List any? (fn (_ x) (str=? x m)) methods))))
 
-; The identity files that read, as (PATH PUB SEED): a file named but
-; missing is warned of, the default one passed over quietly.  A key
-; sealed under a passphrase is read for its public half alone, its SEED
-; (), and opened only when the server would take it.
+; The identity files that read, as (PATH KEY ID): KEY the public key
+; (ssh/pubkey's), of any type served, ID the identity, opened; a file
+; named but missing is warned of, the default ones passed over quietly.
+; A key sealed under a passphrase is read for its public half alone, its
+; ID (), and opened only when the server would take it.
 (def %identities
   (fn (_ s quiet tr)
     (if (not (%get s (lit pubkey))) ()
@@ -352,14 +353,26 @@
                     (%say 2 (Str8 append "Warning: Identity file " (first i) " not accessible: No such file or directory.\n")))
                   ()))
             (#t (guard (e (do (%say 2 (Str8 append "Load key \"" (first i) "\": " (%message e) "\n")) ()))
-                  (def id (if (ssh-key-file-sealed? (first i))
-                            (list (first i) (ssh-public-of-key-file (first i)) ())
-                            ((fn (_ k) (list (first i) (rest k) (first k))) (ssh-key-of-file (first i)))))
-                  (unless (null? tr) (tr (Str8 append "Will attempt key: " (first i) " ED25519 " (ssh-key-fingerprint (List ref 1 id)))))
-                  (list id)))))
+                  (def key (ssh-pubkey-of-key-file (first i)))
+                  (def id (if (ssh-key-file-sealed? (first i)) () (ssh-identity-read-file (first i) "")))
+                  (unless (null? tr) (tr (Str8 append "Will attempt key: " (first i) " " (%key-words key))))
+                  (list (list (first i) key id))))))
         (%get s (lit identities))))))
 
-; A sealed key's seed, its passphrase asked for up to
+; A key as -v names it: its label and fingerprint.
+(def %key-words (fn (_ key) (Str8 append (ssh-pubkey-label key) " " (ssh-blob-fingerprint (ssh-pubkey-blob key)))))
+
+; The algorithm a key signs with: its own, or for RSA the first of
+; rsa-sha2-512 and rsa-sha2-256 the server's server-sig-algs names --
+; the first when it named none.
+(def %alg-for
+  (fn (_ c key)
+    (def algs (ssh-pubkey-algorithms key))
+    (def said (ssh-server-sig-algs c))
+    ((fn (_ a) (if (null? a) (first algs) a))
+     (if (null? said) () (List find (fn (_ a) (List any? (fn (_ x) (str=? x a)) said)) algs)))))
+
+; A sealed key opened, its passphrase asked for up to
 ; NumberOfPasswordPrompts times as OpenSSH's load_identity_file asks; ()
 ; when an answer is empty, there is none, or none opens it.  Batch mode
 ; asks nothing.
@@ -374,7 +387,7 @@
                (guard (e (if (str=? (%message e) ssh-key-wrong-passphrase)
                            (do (unless (null? tr) (tr "bad passphrase given, try again...")) (self (- left 1)))
                            (do (%say 2 (Str8 append "Load key \"" path "\": " (%message e) "\n")) ())))
-                 (ssh-seed-of-key-file path typed))))))
+                 (ssh-identity-read-file path typed))))))
      (%get s (lit prompts)))))
 
 ; One identity offered: an open key signed with; a sealed one asked
@@ -383,12 +396,14 @@
 ; the key is passed over.
 (def %offer-identity
   (fn (_ c s user id answer tr)
-    (if (not (null? (List ref 2 id))) (ssh-auth-publickey! c user (List ref 2 id))
-      (do (def q (ssh-auth-publickey-query! c user (List ref 1 id)))
+    (def key (List ref 1 id))
+    (def alg (%alg-for c key))
+    (if (not (null? (List ref 2 id))) (ssh-auth-publickey! c user (List ref 2 id) alg)
+      (do (def q (ssh-auth-publickey-query! c user key alg))
           (if (not (eq? q (lit pk-ok))) q
-            (do (unless (null? tr) (tr (Str8 append "Server accepts key: " (first id) " ED25519 " (ssh-key-fingerprint (List ref 1 id)))))
-                (def seed (%open-identity s (first id) tr))
-                (if (null? seed) answer (ssh-auth-publickey! c user seed))))))))
+            (do (unless (null? tr) (tr (Str8 append "Server accepts key: " (first id) " " (%key-words key))))
+                (def opened (%open-identity s (first id) tr))
+                (if (null? opened) answer (ssh-auth-publickey! c user opened alg))))))))
 
 ; Authentication as OpenSSH's client tries it: each key while the server
 ; offers publickey, then, while it offers password, a password asked for

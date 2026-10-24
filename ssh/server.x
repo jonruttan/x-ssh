@@ -34,12 +34,13 @@
   ssh-send-packet! ssh-next-packet! ssh-expect! ssh-msg-service-request ssh-msg-service-accept
   ssh-msg-userauth-request ssh-msg-userauth-failure ssh-msg-userauth-success ssh-msg-disconnect
   ssh-msg-global-request ssh-msg-request-success ssh-msg-request-failure)
-(import ssh/keys ssh-key-of-file ssh-key-wrong-passphrase)
+(import ssh/keys ssh-identity-read-file ssh-key-wrong-passphrase)
 (import x/codec/ed25519)
 (import x/codec/crypt)
 (import x/sys/syslog)
 (import ssh/keygen ssh-key-fingerprint ssh-blob-fingerprint)
-(import ssh/pubkey ssh-pubkey-of ssh-pubkey-type ssh-pubkey-label ssh-pubkey-blob ssh-pubkey-algorithms ssh-pubkey-verify?)
+(import ssh/pubkey ssh-pubkey-of ssh-pubkey-type ssh-pubkey-label ssh-pubkey-blob ssh-pubkey-algorithms ssh-pubkey-verify?
+  ssh-identity-pubkey)
 (import ssh/pty ssh-pty-open ssh-pty-window! ssh-pty-attach!)
 (import ssh/config ssh-config-read ssh-config-options ssh-config-first ssh-config-all ssh-config-faults
   ssh-config-time ssh-config-patterns? ssh-config-sshd-keywords)
@@ -251,7 +252,6 @@
     (def akf (ssh-config-first lines "authorizedkeysfile"))
     (%algorithms lines "ciphers" "chacha20-poly1305@openssh.com")
     (%algorithms lines "kexalgorithms" "curve25519-sha256")
-    (%algorithms lines "hostkeyalgorithms" "ssh-ed25519")
     (list (pair (lit ports) ports*)
           (pair (lit listen)
             (if (null? listens) (List map (fn (_ p) (pair () p)) ports*)
@@ -263,8 +263,10 @@
                                    (if (if (= (List length akf) 1) (str=? (Str8 downcase (first akf)) "none") #f) () akf)))
           (pair (lit password) (%yes? lines "passwordauthentication" #t))
           (pair (lit pubkey) (%yes? lines "pubkeyauthentication" #t))
+          (pair (lit hostkey-algs) (%algorithm-list lines "hostkeyalgorithms"
+                                     (list "ssh-ed25519" "ecdsa-sha2-nistp256" "ecdsa-sha2-nistp384" "ecdsa-sha2-nistp521" "rsa-sha2-512" "rsa-sha2-256")))
           (pair (lit pubkey-algs) (%algorithm-list lines "pubkeyacceptedalgorithms"
-                                    (list "ssh-ed25519" "ecdsa-sha2-nistp256" "ecdsa-sha2-nistp384" "rsa-sha2-512" "rsa-sha2-256")))
+                                    (list "ssh-ed25519" "ecdsa-sha2-nistp256" "ecdsa-sha2-nistp384" "ecdsa-sha2-nistp521" "rsa-sha2-512" "rsa-sha2-256")))
           (pair (lit empty) (%yes? lines "permitemptypasswords" #f))
           (pair (lit root) ((fn (_ v) (if (str=? v "without-password") "prohibit-password" v))
                              (%choice lines "permitrootlogin" (list "yes" "no" "prohibit-password" "without-password" "forced-commands-only") "prohibit-password")))
@@ -294,6 +296,7 @@
                 (Str8 append "passwordauthentication " (yn (%get s (lit password))))
                 (Str8 append "pubkeyauthentication " (yn (%get s (lit pubkey))))
                 (Str8 append "pubkeyacceptedalgorithms " (Str8 join "," (%get s (lit pubkey-algs))))
+                (Str8 append "hostkeyalgorithms " (Str8 join "," (%get s (lit hostkey-algs))))
                 (Str8 append "permitemptypasswords " (yn (%get s (lit empty))))
                 (Str8 append "permitrootlogin " (%get s (lit root)))
                 (Str8 append "allowtcpforwarding " (if (str=? (%get s (lit tcp)) "all") "yes" (%get s (lit tcp))))
@@ -984,24 +987,25 @@
 
 ; --- the listener ----------------------------------------------------------
 
-; The host key: the first of the HostKey files that reads as an
-; ssh-ed25519 key.  A named file that does not read is logged; the
-; default names of the types not served are passed over when absent.  A
-; key sealed under a passphrase is opened with none, as OpenSSH's sshd
-; opens it, and so refused, in its words.
-(def %host-key
+; The host keys: every HostKey file that reads as a key of a type served,
+; as ssh/pubkey's identities, one a type, the first of each kept.  A
+; named file that does not read is logged; the default names are passed
+; over when absent.  A key sealed under a passphrase is opened with none,
+; as OpenSSH's sshd opens it, and so refused, in its words.
+(def %host-keys
   (fn (_ s)
-    ((fn (self paths)
-       (if (null? paths) ()
-         (do (def key (guard (e (do (when (str=? (guard (e2 "") (e msg)) ssh-key-wrong-passphrase)
-                                      (%log-at "error" (Str8 append "Unable to load host key \"" (first paths) "\": "
-                                                                    ssh-key-wrong-passphrase)))
-                                    ()))
-                        (ssh-key-of-file (first paths))))
-             (when (if (null? key) (if (%get s (lit hostkeys-given)) #t (File exists? (first paths))) #f)
-               (%log-at "error" (Str8 append "Unable to load host key: " (first paths))))
-             (if (null? key) (self (rest paths)) key))))
-     (%get s (lit hostkeys)))))
+    (List fold
+      (fn (_ acc path)
+        (def id (guard (e (do (when (str=? (guard (e2 "") (e msg)) ssh-key-wrong-passphrase)
+                                (%log-at "error" (Str8 append "Unable to load host key \"" path "\": " ssh-key-wrong-passphrase)))
+                              ()))
+                  (ssh-identity-read-file path "")))
+        (when (if (null? id) (if (%get s (lit hostkeys-given)) #t (File exists? path)) #f)
+          (%log-at "error" (Str8 append "Unable to load host key: " path)))
+        (if (if (null? id) #t (List any? (fn (_ k) (str=? (ssh-pubkey-type (ssh-identity-pubkey k)) (ssh-pubkey-type (ssh-identity-pubkey id)))) acc))
+          acc
+          (List append acc (list id))))
+      () (%get s (lit hostkeys)))))
 
 (def %dlopen (prim-ref (lit ffi) (lit dlopen)))
 (def %dlsym (prim-ref (lit ffi) (lit dlsym)))
@@ -1045,7 +1049,7 @@
 
 ; One connection served.
 (def %serve-connection
-  (fn (_ fd key s)
+  (fn (_ fd keys s)
     (def peer (Socket peer fd))
     (def from (Str8 append (first peer) " port " (%num (rest peer))))
     (%log-at "verbose" (Str8 append "Connection from " from))
@@ -1053,7 +1057,7 @@
     (def user
       (guard (e ())
         (ssh-exchange-versions! c)
-        (ssh-kex-server! c (first key) (rest key))
+        (ssh-kex-server! c keys (%get s (lit hostkey-algs)))
         (%authenticate c s from)))
     (if (null? user)
       (%log (Str8 append "Connection closed by " from " [preauth]"))
@@ -1117,7 +1121,7 @@
             ; OpenSSH's sshd loads them: what does not load is said on
             ; standard error, or -E's file
             (%oset! %log-to 1 #f)
-            (def key (%host-key s))
+            (def key (%host-keys s))
             (%oset! %log-to 1 (not (if stderr #t (not (null? logfile)))))
             (match
               ((List ref 5 mode) (do (File write 1 (%print s) (%byte-len (%print s))) 0))
@@ -1126,7 +1130,7 @@
               (#t (%listen-and-serve s key foreground debug))))))))
 
 (def %listen-and-serve
-  (fn (_ s key foreground debug)
+  (fn (_ s keys foreground debug)
     (def lfds (%listeners s))
     (when (null? lfds) (do (%log-at "fatal" "Cannot bind any address.") (Sys exit 255)))
     (unless foreground (%background!))
@@ -1148,13 +1152,13 @@
        (def fd (Socket accept lfd))
        (if debug
          (do (List for-each (fn (_ l) (Socket close l)) lfds)
-             (%serve-connection fd key s)
+             (%serve-connection fd keys s)
              0)
          (do (def pid (Sys fork))
              (if (= pid 0)
                (do (List for-each (fn (_ l) (Socket close l)) lfds)
                    (unless (null? chld) (Sys signal chld (Sys sig-dfl)))
-                   (%serve-connection fd key s)
+                   (%serve-connection fd keys s)
                    (Sys exit 0))
                (do (Socket close fd)
                    (self)))))))))

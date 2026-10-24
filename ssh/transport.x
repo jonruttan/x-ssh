@@ -36,7 +36,8 @@
 (import ssh/bytes ssh-out ssh-put-byte ssh-put-bool ssh-put-uint32 ssh-put-bytes ssh-put-string ssh-put-text ssh-put-mpint ssh-put-names ssh-out-run
   ssh-in ssh-in-left ssh-in-buf ssh-get-byte ssh-get-bool ssh-get-uint32 ssh-get-string ssh-get-bytes ssh-get-text ssh-get-names
   ssh-copy ssh-join ssh-same-bytes?)
-(import ssh/pubkey ssh-pubkey-of ssh-pubkey-verify? ssh-pubkey-type ssh-pubkey-base64)
+(import ssh/pubkey ssh-pubkey-of ssh-pubkey-verify? ssh-pubkey-type ssh-pubkey-base64 ssh-pubkey-blob ssh-pubkey-algorithms
+  ssh-identity-pubkey ssh-identity-sign)
 
 (def %oref (prim-ref (lit obj) (lit ref)))
 (def %oset! (prim-ref (lit obj) (lit set!)))
@@ -68,15 +69,16 @@
 ;
 ; slots: 1 fd | 2 pending bytes (BUF . LEN) | 3 send seq | 4 recv seq
 ;        5 send key as (K_1 . K_2) or () | 6 receive key or () | 7 session id
-;        8 peer's version | 9 server's host key (32) | 10 the trace fn or ()
+;        8 peer's version | 9 server's host key | 10 the trace fn or ()
 ;        11 the pending packet's length as (SEQ KEY LEN), once unveiled, or ()
+;        12 the server's server-sig-algs (RFC 8308), or () until it says
 
 (def %slot (fn (_ c i) (%oref c i)))
 (def %slot! (fn (_ c i v) (%oset! c i v)))
 
 (def ssh-open
   (fn (_ fd trace)
-    (def c (Vector make 11 ()))
+    (def c (Vector make 12 ()))
     (%slot! c 1 fd)
     (%slot! c 2 (pair (%make-str 0) 0))
     (%slot! c 3 0)
@@ -87,6 +89,7 @@
 (def ssh-fd (fn (_ c) (%slot c 1)))
 (def ssh-session-id (fn (_ c) (%slot c 7)))
 (def ssh-host-key (fn (_ c) (%slot c 9)))
+(def ssh-server-sig-algs (fn (_ c) (%slot c 12)))
 
 ; Whether received bytes are waiting to be read as a packet: a caller
 ; that waits on the socket must not, while they are.
@@ -299,7 +302,17 @@
     (match
       ((= t ssh-msg-ignore) (self c))
       ((= t ssh-msg-debug) (self c))
-      ((= t ssh-msg-ext-info) (self c))
+      ; extensions (RFC 8308): server-sig-algs kept, the rest passed over
+      ((= t ssh-msg-ext-info)
+        (do (def in (ssh-in (first p) 1 (- (rest p) 1)))
+            ((fn (self n)
+               (unless (= n 0)
+                 (do (def name (ssh-get-text in))
+                     (def value (ssh-get-text in))
+                     (when (str=? name "server-sig-algs") (%slot! c 12 (Str8 split "," value)))
+                     (self (- n 1)))))
+             (ssh-get-uint32 in))
+            (self c)))
       ((= t ssh-msg-disconnect)
         (do (def in (ssh-in (first p) 1 (- (rest p) 1)))
             (def code (ssh-get-uint32 in))
@@ -321,17 +334,17 @@
 (def %kex-names (list "curve25519-sha256" "curve25519-sha256@libssh.org"))
 ; The host key algorithms this end checks, as a client offers them unless
 ; known_hosts says which it already knows the host by.
-(def ssh-hostkey-names (list "ssh-ed25519" "ecdsa-sha2-nistp256" "ecdsa-sha2-nistp384" "rsa-sha2-512" "rsa-sha2-256"))
+(def ssh-hostkey-names (list "ssh-ed25519" "ecdsa-sha2-nistp256" "ecdsa-sha2-nistp384" "ecdsa-sha2-nistp521" "rsa-sha2-512" "rsa-sha2-256"))
 (def %cipher-names (list "chacha20-poly1305@openssh.com"))
 (def %mac-names (list "hmac-sha2-256"))
 (def %comp-names (list "none"))
 
 (def %kexinit
-  (fn (_ hostkeys)
+  (fn (_ hostkeys extra)
     (def out (ssh-out))
     (ssh-put-byte out ssh-msg-kexinit)
     (ssh-put-bytes out (ssh-random 16) 0 16)
-    (ssh-put-names out %kex-names)
+    (ssh-put-names out (List append %kex-names extra))
     (ssh-put-names out hostkeys)
     (ssh-put-names out %cipher-names) (ssh-put-names out %cipher-names)
     (ssh-put-names out %mac-names) (ssh-put-names out %mac-names)
@@ -407,7 +420,8 @@
 ; hostkeys are the host key algorithms offered, in the order preferred.
 (def ssh-kex!
   (fn (_ c hostkeys)
-    (def ic (%kexinit hostkeys))
+    ; ext-info-c asks the server for its server-sig-algs (RFC 8308 2.1)
+    (def ic (%kexinit hostkeys (list "ext-info-c")))
     (ssh-send-packet! c (first ic) (rest ic))
     (def is (ssh-expect! c ssh-msg-kexinit "KEXINIT"))
     (%read-kexinit c is #f hostkeys)
@@ -463,14 +477,21 @@
 ; The exchange as the server runs it: KEXINIT both ways, the client's
 ; ephemeral key in, ours out with our host key and our signature of the
 ; exchange hash, NEWKEYS both ways, and the keys in place -- ours to send
-; the server-to-client key, as the client's is the other.  seed and pub
-; are the host key's halves.
+; the server-to-client key, as the client's is the other.  ids are the
+; host keys, as ssh/pubkey's identities: their algorithms that allowed
+; names are offered, in
+; order, and the one agreed signs.
 (def ssh-kex-server!
-  (fn (_ c seed pub)
-    (def is (%kexinit (list "ssh-ed25519")))
+  (fn (_ c ids allowed)
+    (def offered (List filter (fn (_ a) (List any? (fn (_ x) (str=? x a)) allowed))
+                   (List flat-map (fn (_ id) (ssh-pubkey-algorithms (ssh-identity-pubkey id))) ids)))
+    (def is (%kexinit offered ()))
     (ssh-send-packet! c (first is) (rest is))
     (def ic (ssh-expect! c ssh-msg-kexinit "KEXINIT"))
-    (def agreed (%read-kexinit c ic #t (list "ssh-ed25519")))
+    (def agreed (%read-kexinit c ic #t offered))
+    (def alg (List ref 1 (List ref 1 agreed)))
+    (def id (List find (fn (_ i) (List any? (fn (_ a) (str=? a alg)) (ssh-pubkey-algorithms (ssh-identity-pubkey i)))) ids))
+    (def blob (ssh-pubkey-blob (ssh-identity-pubkey id)))
     ; a client that guessed another exchange sent its packet already
     (when (first agreed) (ssh-next-packet! c))
     (def init (ssh-expect! c ssh-msg-kex-ecdh-init "KEX_ECDH_INIT"))
@@ -481,8 +502,7 @@
     (when (not (List any? (fn (_ i) (not (= (%byte shared i) 0))) (list 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31)))
       (Err raise 'value "ssh: the shared secret is zero" ()))
     (def ks (ssh-out))
-    (ssh-put-text ks "ssh-ed25519")
-    (ssh-put-string ks pub 0 32)
+    (ssh-put-bytes ks (first blob) (List ref 1 blob) (List ref 2 blob))
     (def ksr (ssh-out-run ks))
     ; the exchange hash: the client's version and KEXINIT first
     (def hin (ssh-out))
@@ -495,10 +515,7 @@
     (ssh-put-string hin qs 0 32)
     (ssh-put-mpint hin shared 0 32)
     (def h (%sha256-out hin))
-    (def sigb (ssh-out))
-    (ssh-put-text sigb "ssh-ed25519")
-    (ssh-put-string sigb (Ed25519 sign seed h 0 32) 0 64)
-    (def sigr (ssh-out-run sigb))
+    (def sigr ((fn (_ s) (pair (ssh-copy (first s) (List ref 1 s) (List ref 2 s)) (List ref 2 s))) (ssh-identity-sign id (list h 0 32) alg)))
     (def reply (ssh-out))
     (ssh-put-byte reply ssh-msg-kex-ecdh-reply)
     (ssh-put-string reply (first ksr) 0 (rest ksr))
@@ -531,15 +548,7 @@
           (ssh-send-packet! c (first er) (rest er))))
     c))
 
-; --- authentication (RFC 4252), publickey with ssh-ed25519 ---------------
-
-; The public key blob of an Ed25519 key.
-(def %pk-blob
-  (fn (_ pub)
-    (def out (ssh-out))
-    (ssh-put-text out "ssh-ed25519")
-    (ssh-put-string out pub 0 32)
-    (ssh-out-run out)))
+; --- authentication (RFC 4252): publickey, of any type served, and password -
 
 ; The ssh-userauth service asked for, before any method is tried.
 (def ssh-auth-service!
@@ -585,58 +594,51 @@
     (ssh-send-packet! c (first rr) (rest rr))
     (%auth-answer c)))
 
+; The publickey request's body for a key and algorithm, up to the
+; signature: (BUF . LEN).
+(def %pk-request
+  (fn (_ user key alg signed)
+    (def blob (ssh-pubkey-blob key))
+    (def out (ssh-out))
+    (ssh-put-byte out ssh-msg-userauth-request)
+    (ssh-put-text out user)
+    (ssh-put-text out "ssh-connection")
+    (ssh-put-text out "publickey")
+    (ssh-put-bool out signed)
+    (ssh-put-text out alg)
+    (ssh-put-string out (first blob) (List ref 1 blob) (List ref 2 blob))
+    (ssh-out-run out)))
+
 ; Whether the server would take a key, asked before it is signed with:
 ; the request without its signature, answered as %auth-answer has it.
 ; What a key sealed under a passphrase is offered with, so the
-; passphrase is asked for only when the server takes the key.
+; passphrase is asked for only when the server takes the key.  key is
+; ssh/pubkey's, alg one of its algorithms.
 (def ssh-auth-publickey-query!
-  (fn (_ c user pub)
-    (def blob (%pk-blob pub))
-    (def req (ssh-out))
-    (ssh-put-byte req ssh-msg-userauth-request)
-    (ssh-put-text req user)
-    (ssh-put-text req "ssh-connection")
-    (ssh-put-text req "publickey")
-    (ssh-put-bool req #f)
-    (ssh-put-text req "ssh-ed25519")
-    (ssh-put-string req (first blob) 0 (rest blob))
-    (def rr (ssh-out-run req))
+  (fn (_ c user key alg)
+    (def rr (%pk-request user key alg #f))
     (ssh-send-packet! c (first rr) (rest rr))
     (%auth-answer c)))
 
-; The request signed with the user's key, and its answer as
-; %auth-answer has it.
+; The request signed with an identity (ssh/pubkey's) as alg, and its
+; answer as %auth-answer has it.  What is signed: the session id as a
+; string, then the request itself (RFC 4252 7).
 (def ssh-auth-publickey!
-  (fn (_ c user seed)
-    (def pub (Ed25519 public seed))
-    (def blob (%pk-blob pub))
-    ; what is signed: the session id as a string, then the request itself
-    (def body (ssh-out))
-    (ssh-put-byte body ssh-msg-userauth-request)
-    (ssh-put-text body user)
-    (ssh-put-text body "ssh-connection")
-    (ssh-put-text body "publickey")
-    (ssh-put-bool body #t)
-    (ssh-put-text body "ssh-ed25519")
-    (ssh-put-string body (first blob) 0 (rest blob))
-    (def br (ssh-out-run body))
+  (fn (_ c user id alg)
+    (def br (%pk-request user (ssh-identity-pubkey id) alg #t))
     (def signed (ssh-out))
     (ssh-put-string signed (%slot c 7) 0 32)
     (ssh-put-bytes signed (first br) 0 (rest br))
     (def sgr (ssh-out-run signed))
-    (def sig (Ed25519 sign seed (first sgr) 0 (rest sgr)))
-    (def sblob (ssh-out))
-    (ssh-put-text sblob "ssh-ed25519")
-    (ssh-put-string sblob sig 0 64)
-    (def sbr (ssh-out-run sblob))
+    (def sig (ssh-identity-sign id (list (first sgr) 0 (rest sgr)) alg))
     (def req (ssh-out))
     (ssh-put-bytes req (first br) 0 (rest br))
-    (ssh-put-string req (first sbr) 0 (rest sbr))
+    (ssh-put-string req (first sig) (List ref 1 sig) (List ref 2 sig))
     (def rr (ssh-out-run req))
     (ssh-send-packet! c (first rr) (rest rr))
     (%auth-answer c)))
 
-(provide ssh/transport ssh-version-string ssh-open ssh-fd ssh-session-id ssh-host-key ssh-hostkey-names ssh-pending? ssh-random ssh-engines!
+(provide ssh/transport ssh-version-string ssh-open ssh-fd ssh-session-id ssh-host-key ssh-server-sig-algs ssh-hostkey-names ssh-pending? ssh-random ssh-engines!
   ssh-exchange-versions! ssh-send-packet! ssh-recv-packet! ssh-next-packet! ssh-expect! ssh-kex! ssh-kex-server! ssh-auth-service! ssh-auth-publickey-query! ssh-auth-publickey! ssh-auth-password!
   ssh-msg-disconnect ssh-msg-global-request ssh-msg-request-success ssh-msg-request-failure ssh-msg-service-request ssh-msg-service-accept
   ssh-msg-userauth-request ssh-msg-userauth-failure ssh-msg-userauth-success ssh-trace)

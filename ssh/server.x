@@ -41,7 +41,7 @@
 (import ssh/keygen ssh-key-fingerprint ssh-blob-fingerprint)
 (import ssh/pubkey ssh-pubkey-of ssh-pubkey-type ssh-pubkey-label ssh-pubkey-blob ssh-pubkey-algorithms ssh-pubkey-verify?
   ssh-identity-pubkey)
-(import ssh/pty ssh-pty-open ssh-pty-window! ssh-pty-attach!)
+(import x/sys/pty)
 (import ssh/config ssh-config-read ssh-config-options ssh-config-first ssh-config-all ssh-config-faults
   ssh-config-time ssh-config-patterns? ssh-config-sshd-keywords)
 
@@ -515,33 +515,35 @@
 ; The command run in the user's shell, or the shell itself when command
 ; is (), in the user's home directory as OpenSSH's sessions start: on
 ; three pipes, (PID IN OUT ERR), IN the end we write, OUT and ERR the
-; ends we read; or on the session's terminal, its master both IN and OUT
-; and ERR (), the shell interactive since its input is a terminal, TERM
-; and the window set as the client gave them.
+; ends we read; or, when the session asked for a terminal, on a new
+; pseudo-terminal, its master both IN and OUT and ERR (), the shell
+; interactive since its input is a terminal, TERM and the window set as
+; the client gave them.  () when no terminal or no child can be had.
 (def %spawn
   (fn (_ command sock env pty term home)
     (def pipes (if (null? pty) (list (Sys pipe) (Sys pipe) (Sys pipe)) ()))
-    (def pid (Sys fork))
+    (def kid (if (null? pty) (Sys fork) (Pty fork (List ref 1 term) (List ref 2 term) (list sock))))
+    (def pid (if (null? pty) kid (if (null? kid) -1 (first kid))))
     (when (= pid 0)
       (if (null? pty)
         (do (def i (first pipes)) (def o (List ref 1 pipes)) (def e (List ref 2 pipes))
             (Sys dup2 (first i) 0) (Sys dup2 (rest o) 1) (Sys dup2 (rest e) 2)
             (List for-each (fn (_ fd) (Sys close fd))
-              (list (first i) (rest i) (first o) (rest o) (first e) (rest e))))
-        (do (Sys close (first pty))
-            (ssh-pty-attach! (rest pty) (List ref 1 term) (List ref 2 term))
-            (Sys setenv "TERM" (first term))))
-      (Sys close sock)
+              (list (first i) (rest i) (first o) (rest o) (first e) (rest e)))
+            (Sys close sock))
+        (Sys setenv "TERM" (first term)))
       (List for-each (fn (_ v) (Sys setenv (first v) (rest v))) env)
       (guard (e ()) (Sys chdir home))
       (def shell ((fn (_ s) (if (if (null? s) #t (= (Str8 length s) 0)) "/bin/sh" s)) (Sys getenv "SHELL")))
       (Sys exec shell (if (null? command) () (list "-c" command)))
       (Sys exit 127))
-    (if (null? pty)
-      (do (def i (first pipes)) (def o (List ref 1 pipes)) (def e (List ref 2 pipes))
-          (Sys close (first i)) (Sys close (rest o)) (Sys close (rest e))
-          (list pid (rest i) (first o) (first e)))
-      (list pid (first pty) (first pty) ()))))
+    (match
+      ((null? pty)
+        (do (def i (first pipes)) (def o (List ref 1 pipes)) (def e (List ref 2 pipes))
+            (Sys close (first i)) (Sys close (rest o)) (Sys close (rest e))
+            (list pid (rest i) (first o) (first e))))
+      ((< pid 0) ())
+      (#t (list pid (rest kid) (rest kid) ())))))
 
 ; --- the clocks ------------------------------------------------------------
 ;
@@ -856,34 +858,41 @@
             (def start!
               (fn (_ command)
                 (def pty (%ch ch %PTY))
-                (%ch! ch %CHILD (%spawn command sock (%rn run %ENV) pty (%ch ch %TERM) (%home (%me))))
-                (%ch! ch %OUT #t) (%ch! ch %ERR (null? pty))
-                (%reply c ch want-reply #t)))
+                (def kid (%spawn command sock (%rn run %ENV) pty (%ch ch %TERM) (%home (%me))))
+                (%ch! ch %CHILD kid)
+                (if (null? kid)
+                  (%debug "refused: no pseudo-terminal")
+                  (do (%ch! ch %OUT #t) (%ch! ch %ERR (null? pty))))
+                (%reply c ch want-reply (not (null? kid)))))
             (match
               ((if fresh (str=? name "exec") #f)
                 (do (def command (ssh-get-text in))
                     (%debug (Str8 append "exec: " command))
                     (start! command)))
               ((if fresh (str=? name "shell") #f)
-                (do (%debug (if (null? (%ch ch %PTY)) "shell" (Str8 append "shell on " (rest (%ch ch %PTY)))))
+                (do (%debug (if (null? (%ch ch %PTY)) "shell" (Str8 append "shell on a terminal, " (first (%ch ch %TERM)))))
                     (start! ())))
               ; a terminal for the session (RFC 4254 6.2): TERM, the window
               ; in characters, then in pixels, and the modes, which are
-              ; the terminal's own defaults here
+              ; the terminal's own defaults here; the pseudo-terminal is
+              ; opened as the shell or command starts on it
               ((if fresh (if (str=? name "pty-req") (null? (%ch ch %PTY)) #f) #f)
                 (do (def term (ssh-get-text in))
                     (def cols (ssh-get-uint32 in))
                     (def rows (ssh-get-uint32 in))
-                    (def pty (ssh-pty-open))
-                    (unless (null? pty)
-                      (do (%ch! ch %PTY pty)
-                          (%ch! ch %TERM (list term cols rows))))
-                    (%debug (if (null? pty) "pty-req refused: no pseudo-terminal" (Str8 append "pty-req " term " on " (rest pty))))
-                    (%reply c ch want-reply (not (null? pty)))))
+                    (%ch! ch %PTY #t)
+                    (%ch! ch %TERM (list term cols rows))
+                    (%debug (Str8 append "pty-req " term))
+                    (%reply c ch want-reply #t)))
+              ; a terminal's new window: the started command's, or the
+              ; one it will start with
               ((str=? name "window-change")
                 (do (def cols (ssh-get-uint32 in))
                     (def rows (ssh-get-uint32 in))
-                    (unless (null? (%ch ch %PTY)) (ssh-pty-window! (first (%ch ch %PTY)) cols rows))
+                    (unless (null? (%ch ch %PTY))
+                      (if (null? (%ch ch %CHILD))
+                        (%ch! ch %TERM (list (first (%ch ch %TERM)) cols rows))
+                        (Pty window! (List ref 1 (%ch ch %CHILD)) cols rows)))
                     (%reply c ch want-reply (not (null? (%ch ch %PTY))))))
               ; a variable kept for the command when AcceptEnv's
               ; patterns take its name

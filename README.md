@@ -1,7 +1,7 @@
 # x-ssh
 
 SSH on x-lang, as a lang bundle: OpenSSH's client, server and key tool,
-and scp.
+scp, and the SFTP server.
 
     x -l ssh -- PROGRAM [ARGS]
 
@@ -11,6 +11,7 @@ The first operand names the program, by OpenSSH's name:
     ssh           the client
     ssh-keygen    the key tool
     scp           secure copy
+    sftp-server   the SFTP server
 
 Each takes OpenSSH's options and reads OpenSSH's configuration files.
 The ciphers, digests and key exchange are x-lang codecs, written in x
@@ -69,7 +70,9 @@ nistp521), for host keys and user keys, at either end.
   PermitEmptyPasswords, PermitRootLogin, MaxAuthTries,
   AllowTcpForwarding, DisableForwarding, GatewayPorts,
   ClientAliveInterval, ClientAliveCountMax, ChannelTimeout (`global=`),
-  AcceptEnv, SyslogFacility, LogLevel.  A keyword that would restrict who
+  AcceptEnv, Subsystem (`internal-sftp`, served in a child of the
+  server, or a command run under the user's shell), SyslogFacility,
+  LogLevel.  A keyword that would restrict who
   gets in -- AllowUsers, Match, ForceCommand and the like -- is refused
   rather than passed over; an algorithm list that leaves out the one
   served is refused.  Without `-D` it detaches, writing its PidFile; the
@@ -98,11 +101,21 @@ nistp521), for host keys and user keys, at either end.
   (`-O`).  As the client it spawns the ssh program (`-S`, default `ssh`)
   with OpenSSH's options and passes on `-P`, `-i`, `-o`, `-F` and `-v`,
   `-r` walking directories and `-p` sending times.  As the remote end
-  (`-t`, `-f`, `-d`) it is what an OpenSSH `scp -O` reaches.
+  (`-t`, `-f`, `-d`) it is what an OpenSSH `scp -O` reaches; OpenSSH's
+  scp without `-O` reaches the SFTP server.
+- `sftp-server`: SFTP version 3, as OpenSSH's sftp-server serves it, on
+  standard input and output: files read and written at any offset,
+  attributes and `ls -l` lines, directories, renames, links, and the
+  extensions OpenSSH's sftp and scp ask for (posix-rename, statvfs,
+  fstatvfs, hardlink, fsync, limits, expand-path, copy-data,
+  home-directory).  `-d` names the directory to start in (`%d` the home
+  directory, `%u` the user), `-R` refuses every request that would change
+  a file; `-e`, `-f` and `-l` are taken, and nothing is logged.
 - `-V` on each, and `--help` from its option declaration.
 
-Not served yet: other ciphers, agents, SFTP, terminal
-modes from pty-req, other users than the one a server runs as.
+Not served yet: other ciphers, agents, the sftp client and scp's SFTP
+mode (`-s`), terminal modes from pty-req, other users than the one a
+server runs as.
 
 The oracles in `tests/oracle/` are the live tests: `client.sh` drives
 the client against a built Dropbear, `server.sh` drives the server with
@@ -138,6 +151,7 @@ Set `X=/path/to/x` to use a particular x.
     ssh/known.x       known_hosts
     ssh/keygen.x      ssh-keygen
     ssh/scp.x         scp, either end
+    ssh/sftp.x        SFTP, the server's end
     ssh/cli.x         the command line: ssh-programs, ssh-plan, ssh-main
     tests/            the spec suite and its runner, gate, harness and oracles
 

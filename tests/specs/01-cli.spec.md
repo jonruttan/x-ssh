@@ -11,10 +11,10 @@ and what its line is parsed against.  ssh-plan turns a line into
 
 ```ssh
 (write (List map (fn (_ n) (if (null? (ssh-program n)) () (first (ssh-program n))))
-  (list "sshd" "ssh" "ssh-keygen" "scp" "dropbear" "dbclient")))
+  (list "sshd" "ssh" "ssh-keygen" "scp" "sftp-server" "dropbear" "dbclient")))
 ```
 ---
-    ('server 'client 'keygen 'scp () ())
+    ('server 'client 'keygen 'scp 'sftp () ())
 
 ### no program lists the programs, status 1
 
@@ -29,6 +29,7 @@ Run 'x -l ssh -- <program>' with one of these programs:
 'ssh' - the client
 'ssh-keygen' - the key tool
 'scp' - secure copy
+'sftp-server' - the SFTP server
 ```
 
 ### an unknown program lists them too
@@ -139,6 +140,17 @@ Run 'x -l ssh -- <program>' with one of these programs:
 ```
 ---
     (('to ("dir") #f #f) ('from ("a" "b") #f #t) 1)
+
+## sftp-server
+
+### -d's directory and -R; the log's options are taken; an operand is the usage
+
+```ssh
+(write (List map (fn (_ l) (def p (ssh-plan (pair "sftp-server" l))) (if (pair? (first (rest p))) (first (rest p)) (first (rest (rest p)))))
+  (list () (list "-d" "%d/up" "-R") (list "-e" "-f" "AUTH" "-l" "INFO") (list "extra"))))
+```
+---
+    (('serve () #f) ('serve "%d/up" #t) ('serve () #f) 1)
 
 ## main
 

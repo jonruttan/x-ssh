@@ -7,13 +7,15 @@
 # 300000 random bytes, NULs and all, past every channel window, and each
 # copy is checked with cmp.
 #
-#   up, down   x-ssh's scp to and from a Dropbear, whose remote end is the
+#   up, down   x-ssh's scp -O to and from a Dropbear, whose remote end is the
 #              system's `scp -t` and `scp -f`
 #   many       two files into a directory, the remote end told -d
 #   times      -p carries the modification time
 #   ends       OpenSSH's `scp -O` to and from x-ssh's sshd, whose PATH
 #              finds x-ssh's scp: x-ssh's remote ends, -t and -f, -p keeping
 #              the time at the sink
+#   sftp       x-ssh's scp over SFTP, its default, to and from x-ssh's sshd's
+#              internal-sftp: files, -p, -r, and OpenSSH's refusals
 set -u
 db=${1:?a built Dropbear directory}
 port=${2:-22422}
@@ -54,7 +56,7 @@ fail() {
 	failed=1
 }
 
-xscp() { "$X" -l ssh -- scp -S "$fx/bin/xssh" -P "$port" -i "$fx/userkey" "$@" < /dev/null 2> "$fx/err"; }
+xscp() { "$X" -l ssh -- scp -O -S "$fx/bin/xssh" -P "$port" -i "$fx/userkey" "$@" < /dev/null 2> "$fx/err"; }
 
 # up
 if xscp "$fx/a" "$user@127.0.0.1:$fx/remote/a" && cmp -s "$fx/a" "$fx/remote/a"; then
@@ -113,7 +115,7 @@ fi
 
 # ends: x-ssh's server, its PATH finding x-ssh's scp
 PATH="$fx/bin:$PATH" "$X" -l ssh -- sshd -D -e -f /dev/null -h "$fx/hostkey" -o ListenAddress=127.0.0.1 -p "$xport" \
-	-o AuthorizedKeysFile="$fx/authorized_keys" -o PidFile=none > "$fx/xserver.log" 2>&1 &
+	-o AuthorizedKeysFile="$fx/authorized_keys" -o PidFile=none -o "Subsystem=sftp internal-sftp" > "$fx/xserver.log" 2>&1 &
 xpid=$!
 i=0
 while ! grep -q "Server listening on 127.0.0.1 port $xport." "$fx/xserver.log" 2>/dev/null; do
@@ -145,6 +147,45 @@ if $oscp -r "$user@127.0.0.1:$fx/tree" "$fx/local/tree-x" 2> "$fx/err" && diff -
 	echo "ok: ends -- OpenSSH's scp -r from x-ssh's scp -f"
 else
 	fail "ends: -r from x-ssh's scp -f"; tail -5 "$fx/xserver.log" >&2
+fi
+
+
+# sftp: x-ssh's scp as OpenSSH's is by default, over SFTP, to and from
+# x-ssh's server's internal-sftp: a file each way, two into a directory,
+# -p's time, -r both ways, a directory without -r and a missing source
+# refused as OpenSSH's scp refuses them
+sscp() { "$X" -l ssh -- scp -S "$fx/bin/xssh" -P "$xport" -i "$fx/userkey" "$@" < /dev/null 2> "$fx/err"; }
+mkdir -p "$fx/sremote/many" "$fx/slocal"
+if sscp "$fx/a" "$user@127.0.0.1:$fx/sremote/a" && cmp -s "$fx/a" "$fx/sremote/a" \
+	&& sscp "$user@127.0.0.1:$fx/sremote/a" "$fx/slocal/a" && cmp -s "$fx/a" "$fx/slocal/a"; then
+	echo "ok: sftp -- a file up to and down from x-ssh's server over SFTP"
+else
+	fail "sftp: up and down"; tail -5 "$fx/xserver.log" >&2
+fi
+if sscp "$fx/a" "$fx/b" "$user@127.0.0.1:$fx/sremote/many" && cmp -s "$fx/a" "$fx/sremote/many/a" && cmp -s "$fx/b" "$fx/sremote/many/b" \
+	&& sscp -p "$fx/a" "$user@127.0.0.1:$fx/sremote/timed" \
+	&& [ "$(stat -f %m "$fx/a" 2>/dev/null || stat -c %Y "$fx/a")" = "$(stat -f %m "$fx/sremote/timed" 2>/dev/null || stat -c %Y "$fx/sremote/timed")" ]; then
+	echo "ok: sftp -- two files into a directory; -p carries the modification time"
+else
+	fail "sftp: many and times"
+fi
+if sscp -r "$fx/tree" "$user@127.0.0.1:$fx/sremote" && diff -r "$fx/tree" "$fx/sremote/tree" > /dev/null \
+	&& sscp -r "$user@127.0.0.1:$fx/sremote/tree" "$fx/slocal/tree" && diff -r "$fx/tree" "$fx/slocal/tree" > /dev/null; then
+	echo "ok: sftp -- -r sends and fetches a directory whole"
+else
+	fail "sftp: tree"
+fi
+sscp "$fx/tree" "$user@127.0.0.1:$fx/sremote/flat"
+fstatus=$?
+grep -q "local \"$fx/tree\" is not a regular file" "$fx/err"
+flat=$?
+sscp "$user@127.0.0.1:$fx/sremote/nosuch" "$fx/slocal"
+mstatus=$?
+if [ "$fstatus" = 1 ] && [ "$flat" = 0 ] && [ ! -e "$fx/sremote/flat" ] && [ "$mstatus" = 1 ] \
+	&& grep -q "scp: $fx/sremote/nosuch: No such file or directory" "$fx/err"; then
+	echo "ok: sftp -- a directory without -r and a missing source refused in OpenSSH's words"
+else
+	fail "sftp: refusals, status $fstatus and $mstatus"
 fi
 
 exit $failed

@@ -193,7 +193,6 @@
     (def clear (%yes? lines "clearallforwardings" #f))
     (def forwards (fn (_ kw what) (if clear () (List map (fn (_ l) (%forward l gateway what)) (List filter (fn (_ l) (str=? (first l) kw)) lines)))))
     (def session (%choice lines "sessiontype" (list "default" "none" "subsystem") "default"))
-    (when (str=? session "subsystem") (%bad (%line lines "sessiontype") "SessionType subsystem is not served"))
     (list (pair (lit host) host) (pair (lit hostname) hostname) (pair (lit port) port) (pair (lit user) user)
           (pair (lit identities) (if (null? ids) (List map (fn (_ p) (pair (path p) #f)) (list "~/.ssh/id_rsa" "~/.ssh/id_ecdsa" "~/.ssh/id_ed25519")) (List map (fn (_ p) (pair (path p) #t)) ids)))
           (pair (lit known) (files "userknownhostsfile" (list "~/.ssh/known_hosts" "~/.ssh/known_hosts2")))
@@ -554,9 +553,13 @@
                               (pair (Str8 sub 0 i w) p)))
                           (List ref 4 plan))))
             ; the command: none under SessionType none, the one given or
-            ; RemoteCommand's, or else the user's shell -- unless -W
+            ; RemoteCommand's -- under SessionType subsystem the name of the
+            ; subsystem asked for -- or else the user's shell, unless -W
             ; carries the session's place
             (def command (match ((str=? (%get s (lit session)) "none") ())
+                                ((str=? (%get s (lit session)) "subsystem")
+                                  ((fn (_ name) (if (null? name) (Err raise 'value "ssh: a subsystem needs its name" ()) (pair (lit subsystem) name)))
+                                   (if (null? (List ref 1 plan)) (%get s (lit command)) (List ref 1 plan))))
                                 ((not (null? (List ref 1 plan))) (List ref 1 plan))
                                 ((not (null? (%get s (lit command)))) (%get s (lit command)))
                                 ((null? stdio) (lit shell))

@@ -25,6 +25,9 @@
 #   sftp      OpenSSH's sftp and scp (SFTP) through Subsystem internal-sftp;
 #             sftp-server -R as a Subsystem command refuses a put; an
 #             unconfigured subsystem is refused, as the log says
+#   sftp client  x-ssh's sftp through x-ssh's ssh -s, OpenSSH's sftp carried by
+#             x-ssh's ssh, and x-ssh's sftp -D on OpenSSH's sftp-server: each
+#             batch's output as OpenSSH's sftp prints it
 #   terminal  OpenSSH's -tt and x-ssh's RequestTTY force get a terminal, its
 #             window and TERM; x-ssh at a terminal under expect (shell.exp):
 #             a shell, a resize, its exit status, and the ~. escape
@@ -224,7 +227,7 @@ sftp -q -F none -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFi
 rstatus=$?
 $ossh -i "$fx/osshkey" -s "$user@127.0.0.1" nosuch < /dev/null > /dev/null 2>> "$fx/client.err"
 nstatus=$?
-if [ "$status" = 0 ] && cmp -s "$fx/input" "$fx/sftp.back" && grep -q ' d2$' "$fx/sftp.out" \
+if [ "$status" = 0 ] && cmp -s "$fx/input" "$fx/sftp.back" && grep -Eq ' (dir/)?d2$' "$fx/sftp.out" \
 	&& [ ! -e "$fx/sftp/dir" ] && [ "$sstatus" = 0 ] && cmp -s "$fx/input" "$fx/scp.back" \
 	&& [ "$rstatus" != 0 ] && grep -q 'Permission denied' "$fx/ro.err" && [ ! -e "$fx/sftp/r1" ] \
 	&& [ "$nstatus" = 255 ] && grep -q 'subsystem request for nosuch failed, subsystem not found' "$fx/server.log"; then
@@ -232,6 +235,50 @@ if [ "$status" = 0 ] && cmp -s "$fx/input" "$fx/sftp.back" && grep -q ' d2$' "$f
 else
 	fail "sftp: status $status, scp $sstatus, read-only $rstatus ($(cat "$fx/ro.err")), unknown $nstatus"
 	cat "$fx/sftp.out" >&2
+fi
+
+# sftp client: x-ssh's sftp, its ssh x-ssh's by -S, through the server's
+# internal-sftp, says what OpenSSH's sftp says of one batch and leaves
+# what it leaves; OpenSSH's sftp carried by x-ssh's ssh the same; x-ssh's
+# sftp -D on OpenSSH's sftp-server, where one is installed, as OpenSSH's
+cat > "$fx/xssh-for-sftp" <<XSSH
+#!/bin/sh
+HOME="$fx/home" exec "$X" -l ssh -- ssh -F none -o StrictHostKeyChecking=accept-new -q -p "$port" -i "$fx/dbkey" -l "$user" "\$@"
+XSSH
+chmod +x "$fx/xssh-for-sftp"
+sftp_tree() { rm -rf "$fx/sc" && mkdir -p "$fx/sc/dir" && printf 'one\n' > "$fx/sc/dir/a" && printf 'two\n' > "$fx/sc/dir/b"; }
+printf 'cd %s/sc\nls dir\nput %s up\nmkdir new\nrename up new/moved\nls new\nget new/moved %s/sc/back\nget -r dir %s/sc/copy\nchmod 600 new/moved\nrm new/moved\nrmdir new\npwd\n' \
+	"$fx" "$fx/input" "$fx" "$fx" > "$fx/sc.batch"
+sftp_tree
+sftp -F none -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i "$fx/osshkey" \
+	-P "$port" -b "$fx/sc.batch" "$user@127.0.0.1" > "$fx/sc.want" 2> "$fx/client.err"
+wstatus=$?
+sftp_tree
+"$X" -l ssh -- sftp -S "$fx/xssh-for-sftp" -b "$fx/sc.batch" 127.0.0.1 > "$fx/sc.got" 2>> "$fx/client.err"
+gstatus=$?
+cmp -s "$fx/input" "$fx/sc/back" && cmp -s "$fx/sc/dir/b" "$fx/sc/copy/b" && [ ! -e "$fx/sc/new" ]
+left=$?
+sftp_tree
+sftp -S "$fx/xssh-for-sftp" -b "$fx/sc.batch" 127.0.0.1 > "$fx/sc.carried" 2>> "$fx/client.err"
+cstatus=$?
+dstatus=none
+for s in /usr/libexec/sftp-server /usr/lib/openssh/sftp-server /usr/libexec/openssh/sftp-server; do
+	[ -x "$s" ] || continue
+	sftp_tree
+	sftp -D "$s" -b "$fx/sc.batch" > "$fx/sc.dwant" 2>> "$fx/client.err"
+	sftp_tree
+	"$X" -l ssh -- sftp -D "$s" -b "$fx/sc.batch" > "$fx/sc.dgot" 2>> "$fx/client.err"
+	dstatus=$?
+	cmp -s "$fx/sc.dwant" "$fx/sc.dgot" || dstatus="differs"
+	break
+done
+if [ "$wstatus" = 0 ] && [ "$gstatus" = 0 ] && [ "$left" = 0 ] && cmp -s "$fx/sc.want" "$fx/sc.got" \
+	&& [ "$cstatus" = 0 ] && cmp -s "$fx/sc.want" "$fx/sc.carried" && [ "$dstatus" != differs ] && [ "$dstatus" != 1 ]; then
+	echo "ok: sftp client -- x-ssh's sftp says and does what OpenSSH's does; OpenSSH's sftp carried by x-ssh's ssh; -D on OpenSSH's sftp-server ($dstatus)"
+else
+	fail "sftp client: OpenSSH's $wstatus, x-ssh's $gstatus, files $left, carried $cstatus, -D $dstatus"
+	diff "$fx/sc.want" "$fx/sc.got" >&2
+	[ -f "$fx/sc.dgot" ] && diff "$fx/sc.dwant" "$fx/sc.dgot" >&2
 fi
 
 # env: AcceptEnv XSSH_* takes OpenSSH's SetEnv and x-ssh's SendEnv, and

@@ -53,10 +53,10 @@ tests/oracle/client.sh and tests/oracle/server.sh.
 (import ssh/client ssh-client-settings)
 (import ssh/config ssh-config-options)
 (write (List map (fn (_ o) (guard (e (e msg)) (ssh-client-settings (ssh-config-options (list o)) "h" "u")))
-  (list "Port 0" "StrictHostKeyChecking maybe" "LocalForward 2222:h" "SessionType subsystem")))
+  (list "Port 0" "StrictHostKeyChecking maybe" "LocalForward 2222:h" "ChannelTimeout session=5")))
 ```
 ---
-    ("command-line: line 1: Badly formatted port number." "command-line: line 1: unsupported option \"maybe\"." "command-line: line 1: Bad local forwarding specification '2222:h'" "command-line: line 1: SessionType subsystem is not served")
+    ("command-line: line 1: Badly formatted port number." "command-line: line 1: unsupported option \"maybe\"." "command-line: line 1: Bad local forwarding specification '2222:h'" "command-line: line 1: the channel timeout session=5 is not served; global= is")
 
 ### identity files: the ones named, or ~/.ssh/id_rsa, id_ecdsa and id_ed25519 when none is; tokens expanded
 

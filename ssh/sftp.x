@@ -87,7 +87,7 @@
         (pair "fstatvfs@openssh.com" "2") (pair "hardlink@openssh.com" "1")
         (pair "fsync@openssh.com" "1") (pair "limits@openssh.com" "1")
         (pair "expand-path@openssh.com" "1") (pair "copy-data" "1")
-        (pair "home-directory" "1")))
+        (pair "home-directory" "1") (pair "users-groups-by-id@openssh.com" "1")))
 
 ; --- the descriptors -----------------------------------------------------------
 
@@ -259,12 +259,13 @@
     (List filter (fn (_ fs) (> (List length fs) 2))
       (List map (fn (_ l) (Str8 split ":" l)) (Str8 split "\n" (guard (e "") (File read-all path)))))))
 
-; The name /etc/passwd or /etc/group gives an id, or the id's digits.
+; The name /etc/passwd or /etc/group gives an id, or the id's digits; ""
+; for none where empty says so.
 (def %name-of
-  (fn (_ st slot path id)
+  (fn (_ st slot path id . empty)
     (when (null? (%ref st slot)) (%set st slot (%table path)))
     (def row (List find (fn (_ fs) (str=? (List ref 2 fs) (%num id))) (%ref st slot)))
-    (if (null? row) (%num id) (first row))))
+    (if (null? row) (if (null? empty) (%num id) "") (first row))))
 
 (def %pad-left
   (fn (_ t w) (def n (Str8 length t)) (if (>= n w) t (Str8 append (Str8 repeat (- w n) " ") t))))
@@ -540,6 +541,19 @@
       ((str=? name "expand-path@openssh.com") (%one-name! st id (%canonical (%expand (ssh-get-text in)))))
       ((str=? name "home-directory") (%one-name! st id (%canonical (%home-of (ssh-get-text in)))))
       ((str=? name "copy-data") (do (when ro (%refuse)) (%copy-data! st id in)))
+      ; each id list a string of uint32s, each answer a string of the
+      ; names, empty for an id with none
+      ((str=? name "users-groups-by-id@openssh.com")
+        (do (def ids (fn (_ r) (def sub (ssh-in (ssh-in-buf in) (first r) (rest r)))
+                       ((fn (self acc) (if (< (ssh-in-left sub) 4) (List reverse acc) (self (pair (ssh-get-uint32 sub) acc)))) ())))
+            (def us (ids (ssh-get-string in)))
+            (def gs (ids (ssh-get-string in)))
+            (def names (fn (_ slot path l) (def o (ssh-out)) (List for-each (fn (_ i) (ssh-put-text o (%name-of st slot path i #t))) l) (ssh-out-run o)))
+            (def out (%reply %EXTENDED-REPLY id))
+            (def nu (names 5 "/etc/passwd" us)) (def ng (names 6 "/etc/group" gs))
+            (ssh-put-string out (first nu) 0 (rest nu))
+            (ssh-put-string out (first ng) 0 (rest ng))
+            (%send! st out)))
       (#t (%status! st id %OP-UNSUPPORTED)))))
 
 ; One request served.
@@ -662,4 +676,15 @@
          (#t (Str8 append "internal-sftp: " (first as) " is not served"))))
      args () #f)))
 
-(provide ssh/sftp ssh-sftp-server ssh-sftp-main ssh-sftp-options)
+; The pieces the client shares: the reader and its take, the writer, the
+; 64-bit numbers, the attributes a packet carries, and ls -l's mode.
+(def ssh-sftp-reader %reader)
+(def ssh-sftp-take! %take!)
+(def ssh-sftp-write-all %write-all)
+(def ssh-sftp-put-u64 %put-u64)
+(def ssh-sftp-get-u64 %get-u64)
+(def ssh-sftp-get-attrs %get-attrs)
+(def ssh-sftp-mode-text %mode-text)
+
+(provide ssh/sftp ssh-sftp-server ssh-sftp-main ssh-sftp-options
+  ssh-sftp-reader ssh-sftp-take! ssh-sftp-write-all ssh-sftp-put-u64 ssh-sftp-get-u64 ssh-sftp-get-attrs ssh-sftp-mode-text)

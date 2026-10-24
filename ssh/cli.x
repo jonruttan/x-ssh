@@ -24,6 +24,7 @@
 (import ssh/server ssh-server-main)
 (import ssh/scp ssh-scp-client ssh-scp-remote)
 (import ssh/sftp ssh-sftp-main)
+(import ssh/sftp-client ssh-sftp-client ssh-sftp-destination)
 
 (def %byte-len (prim-ref (lit str) (lit byte-len)))
 (def %byte-ref (prim-ref (lit str) (lit byte-ref)))
@@ -65,6 +66,7 @@
             (Opts arg "-p" "port" "The port to connect to")
             (Opts flag "-q" "Quiet: warnings and diagnostics suppressed")
             (Opts arg "-R" "address" "Remote forwarding: [bind_address:]port:host:hostport")
+            (Opts flag "-s" "Ask for a subsystem, the command naming it, as SessionType subsystem")
             (Opts flag "-T" "Do not ask for a terminal")
             (Opts flag "-t" "Ask for a terminal, as RequestTTY yes: for a command too, when standard input is one")
             (Opts flag "-v" "Verbose: trace the connection on standard error")
@@ -102,7 +104,22 @@
             (Opts hidden (Opts flag "-d" "The target must be a directory (the remote end)"))
             (Opts hidden (Opts flag "-t" "Receive files (the remote end)"))
             (Opts hidden (Opts flag "-f" "Send files (the remote end)"))))
-    (%row (lit sftp) "sftp-server" "the SFTP server" "[options]"
+    (%row (lit sftp) "sftp" "secure file transfer" "[options] destination"
+      (list (Opts arg "-B" "buffer_size" "Bytes a read or write asks for (default 32768)")
+            (Opts arg "-b" "batchfile" "Commands from batchfile, - for standard input; a failure ends it")
+            (Opts arg "-D" "sftp_server_command" "Run this command as the server, in place of ssh")
+            (Opts arg "-F" "ssh_config" "The configuration file, passed to ssh")
+            (Opts arg "-i" "identity_file" "The key to authenticate with, passed to ssh")
+            (Opts arg "-o" "ssh_option" "An option passed to ssh")
+            (Opts arg "-P" "port" "The port to connect to on the remote host")
+            (Opts flag "-p" "Preserve modification times, access times and modes")
+            (Opts flag "-q" "Quiet: no progress meter (x-ssh has none)")
+            (Opts arg "-R" "num_requests" "Requests in flight a transfer keeps (default 64)")
+            (Opts flag "-r" "Copy directories recursively")
+            (Opts arg "-S" "program" "The program to connect with, default ssh")
+            (Opts arg "-s" "subsystem" "The subsystem asked for, default sftp")
+            (Opts flag "-v" "Verbose, passed to ssh")))
+    (%row (lit sftp-server) "sftp-server" "the SFTP server" "[options]"
       (list (Opts arg "-d" "start_directory" "The directory to start in: %d the home directory, %u the user")
             (Opts flag "-e" "Log to standard error (nothing is logged)")
             (Opts arg "-f" "log_facility" "The syslog facility (nothing is logged)")
@@ -138,10 +155,11 @@
       ((eq? (first p) (lit client)) (%client-plan o decl))
       ((eq? (first p) (lit keygen)) (%keygen-plan o decl))
       ((eq? (first p) (lit server)) (%server-plan o decl))
-      ((eq? (first p) (lit sftp))
+      ((eq? (first p) (lit sftp)) (%sftp-plan o decl))
+      ((eq? (first p) (lit sftp-server))
         (if (null? (Opts operands o))
-          (list (lit sftp) (list (lit serve) (%value o "-d") (Opts on? o "-R")) 0)
-          (list (lit sftp) (Opts usage decl) 1)))
+          (list (lit sftp-server) (list (lit serve) (%value o "-d") (Opts on? o "-R")) 0)
+          (list (lit sftp-server) (Opts usage decl) 1)))
       (#t (%scp-plan o decl)))))
 
 (def %value (fn (_ o flag) (if (Opts on? o flag) (Opts value o flag) ())))
@@ -203,6 +221,7 @@
                         (List map (fn (_ f) (Str8 append "RemoteForward " f)) (Opts values o "-R"))
                         (if (Opts on? o "-g") (list "GatewayPorts yes") ())
                         (if (Opts on? o "-N") (list "SessionType none") ())
+                        (if (Opts on? o "-s") (list "SessionType subsystem") ())
                         (if (Opts on? o "-n") (list "StdinNull yes") ())
                         (if (Opts on? o "-t") (list "RequestTTY yes") ())
                         (if (Opts on? o "-T") (list "RequestTTY no") ())
@@ -258,6 +277,43 @@
         (list (lit keygen) "Invalid ECDSA key length: valid lengths are 256, 384 or 521 bits\r\n" 255))
       (#t (plan (list (lit generate) file (%value o "-C") (%value o "-N") (Opts on? o "-q") rounds type bits))))))
 
+; sftp's line: (sftp (client ARGV PATH BATCH (PRESERVE RECURSIVE QUIET) BUFFER
+; REQUESTS) 0), ARGV the ssh program's -- OpenSSH's set first, then what
+; is passed on, -s and the host and subsystem -- or -D's command under
+; /bin/sh; or what it says and its status.
+(def %sftp-plan
+  (fn (_ o decl)
+    (def ops (Opts operands o))
+    (def count (fn (_ flag default) (if (Opts on? o flag) (%count (Opts value o flag)) default)))
+    (def buffer (count "-B" 32768))
+    (def requests (count "-R" 64))
+    (def dest (if (null? ops) () (ssh-sftp-destination (first ops))))
+    (match
+      ((> (List length ops) 1) (list (lit sftp) (Opts usage decl) 1))
+      ((if (null? dest) (not (Opts on? o "-D")) #f) (list (lit sftp) (Opts usage decl) 1))
+      ((if (null? buffer) #t (< buffer 1)) (list (lit sftp) (Str8 append "Invalid buffer size \"" (Opts value o "-B") "\"\n") 1))
+      ((if (null? requests) #t (< requests 1)) (list (lit sftp) (Str8 append "Invalid number of requests \"" (Opts value o "-R") "\"\n") 1))
+      (#t
+        (list (lit sftp)
+          (list (lit client)
+                (if (Opts on? o "-D")
+                  (list "/bin/sh" "-c" (Opts value o "-D"))
+                  (List append
+                    (list (if (Opts on? o "-S") (Opts value o "-S") "ssh")
+                          "-x" "-oPermitLocalCommand=no" "-oClearAllForwardings=yes" "-oForwardAgent=no")
+                    (if (Opts on? o "-v") (list "-v") ())
+                    (if (Opts on? o "-F") (list "-F" (Opts value o "-F")) ())
+                    (List flat-map (fn (_ v) (list "-o" v)) (Opts values o "-o"))
+                    (if (Opts on? o "-P") (list "-p" (Opts value o "-P")) (if (null? (List ref 2 dest)) () (list "-p" (List ref 2 dest))))
+                    (if (Opts on? o "-i") (list "-i" (Opts value o "-i")) ())
+                    (if (null? (first dest)) () (list "-l" (first dest)))
+                    (list "-s" "--" (List ref 1 dest) (if (Opts on? o "-s") (Opts value o "-s") "sftp"))))
+                (if (null? dest) () (List ref 3 dest))
+                (if (Opts on? o "-b") (Opts value o "-b") ())
+                (list (Opts on? o "-p") (Opts on? o "-r") (Opts on? o "-q"))
+                buffer requests)
+          0)))))
+
 ; scp's line: (scp (to OPERANDS PRESERVE RECURSIVE) 0) or (scp (from
 ; OPERANDS PRESERVE RECURSIVE) 0) for the remote ends, (scp (copy
 ; OPERANDS PROGRAM ARGS PRESERVE RECURSIVE) 0) for a client, ARGS what
@@ -300,7 +356,9 @@
           ((eq? (first plan) (lit server)) (ssh-server-main (rest what)))
           ((eq? (first plan) (lit keygen)) (ssh-keygen-main what))
           ; sftp-server's requests on standard input, which the platform keeps on fd 3
-          ((eq? (first plan) (lit sftp)) (ssh-sftp-main (List ref 1 what) (List ref 2 what) 3 1))
+          ((eq? (first plan) (lit sftp-server)) (ssh-sftp-main (List ref 1 what) (List ref 2 what) 3 1))
+          ((eq? (first plan) (lit sftp))
+            (ssh-sftp-client (List ref 1 what) (List ref 2 what) (List ref 3 what) (List ref 4 what) (List ref 5 what) (List ref 6 what)))
           ((eq? (first what) (lit to)) (ssh-scp-remote #t (List ref 1 what) (List ref 2 what) (List ref 3 what)))
           ((eq? (first what) (lit from)) (ssh-scp-remote #f (List ref 1 what) (List ref 2 what) (List ref 3 what)))
           (#t (ssh-scp-client (List ref 1 what) (List ref 2 what) (List ref 3 what) (List ref 4 what) (List ref 5 what)))))

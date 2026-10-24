@@ -11,10 +11,10 @@ and what its line is parsed against.  ssh-plan turns a line into
 
 ```ssh
 (write (List map (fn (_ n) (if (null? (ssh-program n)) () (first (ssh-program n))))
-  (list "sshd" "ssh" "ssh-keygen" "scp" "sftp-server" "dropbear" "dbclient")))
+  (list "sshd" "ssh" "ssh-keygen" "scp" "sftp" "sftp-server" "dropbear" "dbclient")))
 ```
 ---
-    ('server 'client 'keygen 'scp 'sftp () ())
+    ('server 'client 'keygen 'scp 'sftp 'sftp-server () ())
 
 ### no program lists the programs, status 1
 
@@ -29,6 +29,7 @@ Run 'x -l ssh -- <program>' with one of these programs:
 'ssh' - the client
 'ssh-keygen' - the key tool
 'scp' - secure copy
+'sftp' - secure file transfer
 'sftp-server' - the SFTP server
 ```
 
@@ -103,6 +104,14 @@ Run 'x -l ssh -- <program>' with one of these programs:
 ---
     255
 
+### -s names a subsystem: the command is its name
+
+```ssh
+(write (first (rest (ssh-plan (list "ssh" "-s" "h" "sftp")))))
+```
+---
+    ('exec "h" "sftp" ("SessionType subsystem") () () #f)
+
 ## the server
 
 ### its flags become configuration lines ahead of the file's; -d is debug, foreground and standard error
@@ -140,6 +149,34 @@ Run 'x -l ssh -- <program>' with one of these programs:
 ```
 ---
     (('to ("dir") #f #f) ('from ("a" "b") #f #t) 1)
+
+## sftp
+
+### a session: ssh's argv, OpenSSH's set first, ending in the subsystem; the path, the batch, -p -r -q, -B and -R
+
+```ssh
+(write (ssh-plan (list "sftp" "-P" "2222" "-i" "k" "-o" "BatchMode=yes" "-b" "cmds" "-B" "65536" "-R" "16" "-p" "-r" "-v" "me@h:dir")))
+```
+---
+    ('sftp ('client ("ssh" "-x" "-oPermitLocalCommand=no" "-oClearAllForwardings=yes" "-oForwardAgent=no" "-v" "-o" "BatchMode=yes" "-p" "2222" "-i" "k" "-l" "me" "-s" "--" "h" "sftp") "dir" "cmds" (#t #t #f) 65536 16) 0)
+
+### -D runs a server directly; -S names the ssh program and -s the subsystem; no destination is the usage
+
+```ssh
+(write (list (List map (fn (_ l) (first (rest (ssh-plan (pair "sftp" l))))) (list (list "-D" "/usr/libexec/sftp-server -e") (list "-S" "/opt/ssh" "-s" "other" "-q" "h")))
+             (first (rest (rest (ssh-plan (list "sftp")))))))
+```
+---
+    ((('client ("/bin/sh" "-c" "/usr/libexec/sftp-server -e") () () (#f #f #f) 32768 64) ('client ("/opt/ssh" "-x" "-oPermitLocalCommand=no" "-oClearAllForwardings=yes" "-oForwardAgent=no" "-s" "--" "h" "other") () () (#f #f #t) 32768 64)) 1)
+
+### a destination: [user@]host[:path], a bracketed address, sftp://user@host:port/path
+
+```ssh
+(import ssh/sftp-client ssh-sftp-destination)
+(write (List map ssh-sftp-destination (list "h" "me@h:dir" "sftp://me@h:2200/d" "[::1]:x" "sftp://[::1]:22/p" "a@b@h:p")))
+```
+---
+    ((() "h" () ()) ("me" "h" () "dir") ("me" "h" "2200" "d") (() "::1" () "x") (() "::1" "22" "p") ("a@b" "h" () "p"))
 
 ## sftp-server
 

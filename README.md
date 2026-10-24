@@ -1,7 +1,7 @@
 # x-ssh
 
 SSH on x-lang, as a lang bundle: OpenSSH's client, server and key tool,
-scp, and the SFTP server.
+scp, and SFTP's client and server.
 
     x -l ssh -- PROGRAM [ARGS]
 
@@ -11,6 +11,7 @@ The first operand names the program, by OpenSSH's name:
     ssh           the client
     ssh-keygen    the key tool
     scp           secure copy
+    sftp          secure file transfer
     sftp-server   the SFTP server
 
 Each takes OpenSSH's options and reads OpenSSH's configuration files.
@@ -38,7 +39,8 @@ nistp521), for host keys and user keys, at either end.
   then `/etc/ssh/ssh_config`, the first value holding, with `Host` and
   `Match` blocks and `Include`.  Each flag stands for its keyword: `-p`
   Port, `-l` User, `-i` IdentityFile, `-L` LocalForward, `-R`
-  RemoteForward, `-g` GatewayPorts, `-N` SessionType none, `-n` StdinNull,
+  RemoteForward, `-g` GatewayPorts, `-N` SessionType none, `-s` SessionType
+  subsystem (the command its name), `-n` StdinNull,
   `-q` and `-v` LogLevel; `-W host:port` carries standard input and
   output through the server, as a ProxyCommand wants; `-G` prints the
   settings in force.  Served keywords: Hostname, Port, User,
@@ -103,17 +105,27 @@ nistp521), for host keys and user keys, at either end.
   `-r` walking directories and `-p` sending times.  As the remote end
   (`-t`, `-f`, `-d`) it is what an OpenSSH `scp -O` reaches; OpenSSH's
   scp without `-O` reaches the SFTP server.
+- `sftp`: SFTP version 3 from the client's end, as OpenSSH's sftp: the
+  ssh program (`-S`, default `ssh`) spawned with OpenSSH's options and
+  `-P`, `-i`, `-o`, `-F`, `-v` passed on, its subsystem `-s` (default
+  `sftp`), or `-D`'s server run directly.  A destination is
+  `[user@]host[:path]` or `sftp://[user@]host[:port][/path]`, a path to a
+  file fetched.  Commands are read at the terminal or from `-b`'s file
+  (`-` and `@` prefixes as OpenSSH's): cd, lcd, pwd, lpwd, ls (`-1alnrStf`),
+  lls, get and put (`-p`, `-r`, globs), mkdir, lmkdir, rmdir, rm, rename,
+  ln and symlink, chmod, chown, chgrp, df (`-h`), version, `!`, help,
+  bye.  `-B` and `-R` set the request size and how many are in flight.
 - `sftp-server`: SFTP version 3, as OpenSSH's sftp-server serves it, on
   standard input and output: files read and written at any offset,
   attributes and `ls -l` lines, directories, renames, links, and the
   extensions OpenSSH's sftp and scp ask for (posix-rename, statvfs,
   fstatvfs, hardlink, fsync, limits, expand-path, copy-data,
-  home-directory).  `-d` names the directory to start in (`%d` the home
+  home-directory, users-groups-by-id).  `-d` names the directory to start in (`%d` the home
   directory, `%u` the user), `-R` refuses every request that would change
   a file; `-e`, `-f` and `-l` are taken, and nothing is logged.
 - `-V` on each, and `--help` from its option declaration.
 
-Not served yet: other ciphers, agents, the sftp client and scp's SFTP
+Not served yet: other ciphers, agents, scp's SFTP
 mode (`-s`), terminal modes from pty-req, other users than the one a
 server runs as.
 
@@ -152,6 +164,7 @@ Set `X=/path/to/x` to use a particular x.
     ssh/keygen.x      ssh-keygen
     ssh/scp.x         scp, either end
     ssh/sftp.x        SFTP, the server's end
+    ssh/sftp-client.x SFTP, the client's end
     ssh/cli.x         the command line: ssh-programs, ssh-plan, ssh-main
     tests/            the spec suite and its runner, gate, harness and oracles
 

@@ -134,7 +134,12 @@
     (pair type in)))
 
 (def %status-call!
-  (fn (_ c req) (%call! c req %STATUS) ()))
+  (fn (_ c req)
+    (def r (%call! c req %STATUS))
+    (when (= (first r) %STATUS)
+      (do (def code (ssh-get-uint32 (rest r)))
+          (unless (= code %OK) (%fail code))))
+    ()))
 
 (def %put-u64 ssh-sftp-put-u64)
 (def %get-u64 ssh-sftp-get-u64)
@@ -256,6 +261,9 @@
   (fn (_ c p)
     (match
       ((%absolute? p) p)
+      ; scp's connection has no cwd: a path goes as given, the server's
+      ; own directory the empty one's
+      ((null? (%ref c 3)) (if (str=? p "") "." p))
       ((str=? p "") (%ref c 3))
       ((str=? (%ref c 3) "/") (Str8 append "/" p))
       (#t (Str8 append (%ref c 3) "/" p)))))
@@ -340,15 +348,27 @@
 ; A remote file into a local one, -R's reads of -B's bytes in flight: each
 ; reply written where its read began; a short read asks again for the
 ; rest; an end of file stops new reads.
+; A failed call's reason, as strerror says it: errno is read before
+; anything else can change it.
+(def %errno-text
+  (fn (_ r op)
+    (def m (guard (x "Failure") ((Err from-errno (Err errno-of r) op ()) msg)))
+    (def cut (Str8 index-of ": " m))
+    (if (null? cut) m (Str8 sub (+ cut 2) (- (Str8 length m) cut 2) m))))
+
+; A local file that would not open: the sftp's message, and its reason
+; as (local . REASON) for scp's.
+(def %local-fail
+  (fn (_ text why) (Err raise 'sftp (Str8 append text why) (list (pair (lit local) why)))))
+
 (def %download!
   (fn (_ c remote local a preserve)
     (def perm (if (null? (%attr a (lit perm))) 438 (& (%attr a (lit perm)) 511)))
     (def h (%open c remote %F-READ ()))
     (def fd (File open local (list (lit wronly) (lit creat) (lit trunc)) perm))
-    (when (< fd 0)
+    (when (< fd 0) (def why (%errno-text fd (lit open)))
       (do (guard (e ()) (%close c h))
-          (Err raise 'sftp (Str8 append "Couldn't open local file \"" local "\" for writing: "
-                             (guard (x "Failure") ((Err from-errno fd (lit open) local) msg))) ())))
+          (%local-fail (Str8 append "Couldn't open local file \"" local "\" for writing: ") why)))
     (def chunk (%ref c 5))
     (def most (%ref c 6))
     ; in flight: an alist of id to (OFFSET . LEN)
@@ -403,7 +423,7 @@
     (def s (File stat local))
     (def perm (& (Assoc get (lit mode) s) 511))
     (def fd (File open local (lit rdonly)))
-    (when (< fd 0) (Err raise 'sftp (Str8 append "Couldn't open local file \"" local "\" for reading") ()))
+    (when (< fd 0) (%local-fail (Str8 append "Couldn't open local file \"" local "\" for reading: ") (%errno-text fd (lit open))))
     (def h (guard (e (do (File close fd) (error e)))
              (%open c remote (| %F-WRITE (| %F-CREAT %F-TRUNC)) (list (pair (lit perm) perm)))))
     (def chunk (%ref c 5))
@@ -472,7 +492,7 @@
   (fn (self c local remote preserve recursive)
     (def kind (File type local))
     (match
-      ((null? kind) (Err raise 'sftp (Str8 append "stat local \"" local "\": No such file or directory") ()))
+      ((null? kind) (Err raise 'sftp (Str8 append "stat " local ": No such file or directory") ()))
       ((eq? kind (lit dir))
         (if (not recursive)
           (Err raise 'sftp (Str8 append "Cannot upload non-regular file: " local) ())
@@ -780,7 +800,7 @@
       ((str=? cmd "progress") (do (%out "Progress meter disabled\n") ()))
       ((str=? cmd "cd")
         (do (def path (%realpath c (%remote-path c (if (null? ops) "" (first ops)))))
-            (def a (%stat c path))
+            (def a (guard (e (Err raise 'sftp (Str8 append "stat remote: " (e msg)) ())) (%stat c path)))
             (unless (%dir? a) (Err raise 'sftp (Str8 append "Can't change directory: \"" path "\" is not a directory") ()))
             (%set c 3 path)
             ()))
@@ -791,7 +811,7 @@
             ()))
       ((str=? cmd "lmkdir")
         (do (def path (%one-arg cmd ops))
-            (guard (e (Err raise 'sftp (Str8 append "Couldn't create local directory \"" path "\": " (e msg)) ()))
+            (guard (e (Err raise 'sftp (Str8 append "Couldn't create local directory \"" path "\": " (%after-op (e msg))) ()))
               (File mkdir path 511))
             ()))
       ((str=? cmd "lls")
@@ -805,20 +825,20 @@
             ()))
       ((str=? cmd "rmdir")
         (do (def path (%remote-path c (%one-arg cmd ops)))
-            (guard (e (Err raise 'sftp (Str8 append "Couldn't remove directory: " (e msg)) ()))
+            (guard (e (Err raise 'sftp (Str8 append "remote rmdir \"" path "\": " (e msg)) ()))
               (%status-call! c (%path-call! c %RMDIR path)))
             ()))
       ((str=? cmd "rm")
         (do (%each-remote! c (%one-arg cmd ops)
               (fn (_ p)
                 (%info c (Str8 append "Removing " p "\n"))
-                (guard (e (Err raise 'sftp (Str8 append "Couldn't delete file: " (e msg)) ()))
+                (guard (e (Err raise 'sftp (Str8 append "remote delete " p ": " (e msg)) ()))
                   (%status-call! c (%path-call! c %REMOVE p)))))
             ()))
       ((str=? cmd "rename")
         (do (def two (%two-args cmd ops))
             (def from (%remote-path c (first two))) (def to (%remote-path c (List ref 1 two)))
-            (guard (e (Err raise 'sftp (Str8 append "Couldn't rename file \"" from "\" to \"" to "\": " (e msg)) ()))
+            (guard (e (Err raise 'sftp (Str8 append "remote rename \"" from "\" to \"" to "\": " (e msg)) ()))
               (if (%extension? c "posix-rename@openssh.com")
                 (%two-paths! c (%extended c "posix-rename@openssh.com") from to)
                 (%two-paths! c (%request c %RENAME) from to)))
@@ -827,7 +847,7 @@
         (do (def two (%two-args cmd ops))
             ; OpenSSH's order: the target as written, then the link
             (def link (%remote-path c (List ref 1 two)))
-            (guard (e (Err raise 'sftp (Str8 append "Couldn't symlink file \"" (first two) "\" to \"" link "\": " (e msg)) ()))
+            (guard (e (Err raise 'sftp (Str8 append "remote symlink file \"" (first two) "\" to \"" link "\": " (e msg)) ()))
               (%two-paths! c (%request c %SYMLINK) (first two) link))
             ()))
       ((str=? cmd "ln")
@@ -835,7 +855,7 @@
             (def from (%remote-path c (first two))) (def to (%remote-path c (List ref 1 two)))
             (unless (%extension? c "hardlink@openssh.com")
               (Err raise 'sftp "Server does not support the hardlink@openssh.com extension" ()))
-            (guard (e (Err raise 'sftp (Str8 append "Couldn't link file \"" from "\" to \"" to "\": " (e msg)) ()))
+            (guard (e (Err raise 'sftp (Str8 append "remote link \"" from "\" to \"" to "\": " (e msg)) ()))
               (%two-paths! c (%extended c "hardlink@openssh.com") from to))
             ()))
       ((if (str=? cmd "chmod") #t (if (str=? cmd "chown") #t (str=? cmd "chgrp")))
@@ -849,10 +869,11 @@
                              (if (str=? cmd "chown") (list (pair (lit uid) n) (pair (lit gid) (%attr at (lit gid))))
                                (list (pair (lit uid) (%attr at (lit uid))) (pair (lit gid) n))))))
                 (%info c (Str8 append "Changing " (if (str=? cmd "chmod") "mode" (if (str=? cmd "chown") "owner" "group")) " on " p "\n"))
-                (guard (e (Err raise 'sftp (Str8 append "Couldn't setstat on \"" p "\": " (e msg)) ()))
+                (guard (e (Err raise 'sftp (Str8 append "remote setstat \"" p "\": " (e msg)) ()))
                   (%setstat c p a))))
             ()))
-      ((str=? cmd "df") (do (%df! c (has? "h") (%remote-path c (if (null? ops) "" (first ops)))) ()))
+      ; a df that fails says nothing, as OpenSSH's asks quietly
+      ((str=? cmd "df") (do (guard (e (Err raise 'sftp "" ())) (%df! c (has? "h") (%remote-path c (if (null? ops) "" (first ops))))) ()))
       ((str=? cmd "get")
         (do (def from (%one-arg cmd ops))
             (def names (%remote-glob c from))
@@ -919,7 +940,8 @@
                (when (if batch (not quiet) #f) (%out (Str8 append "sftp> " trimmed "\n")))
                (def outcome
                  (if (if (= (Str8 length line) 0) #t (= (%char line 0) 35)) ()
-                   (guard (e (do (%err (Str8 append (%message e) "\n")) (lit failed)))
+                   ; a failure said as OpenSSH's error() says it, \r\n, or not at all
+                   (guard (e (do (unless (str=? (%message e) "") (%err (Str8 append (%message e) "\r\n"))) (lit failed)))
                      (%command! c line opts))))
                (match
                  ((eq? outcome (lit stop)) 0)
@@ -963,6 +985,21 @@
           (if (null? colon) () (Str8 sub (+ colon 1) (- (Str8 length hostport) colon 1) hostport))
           (if (if (null? path) #f (> (Str8 length path) 0)) path ()))))
 
+; The version exchanged, the server's extensions kept.
+(def %hello!
+  (fn (_ c)
+    (def init (ssh-out))
+    (ssh-put-byte init %INIT)
+    (ssh-put-uint32 init 3)
+    (%send! c init)
+    (def r (%reply c))
+    (unless (= (first r) %VERSION) (Err raise 'sftp "Invalid packet back from SSH2_FXP_INIT" ()))
+    (def in (List ref 2 r))
+    (%set c 4 ((fn (self acc)
+                 (if (< (ssh-in-left in) 4) (List reverse acc)
+                   (do (def k (ssh-get-text in)) (self (pair (pair k (ssh-get-text in)) acc)))))
+               ()))))
+
 ; sftp: the child started, the version exchanged, the destination's path
 ; gone to (a directory) or fetched (a file), then the commands.
 ;   argv      the child's argv
@@ -976,19 +1013,9 @@
     (def kid (%spawn argv))
     (def c (%connection (List ref 2 kid) (List ref 1 kid) buffer requests (first kid)))
     (%set c 8 (if (null? batch) (List ref 2 opts) #t))
-    (def init (ssh-out))
-    (ssh-put-byte init %INIT)
-    (ssh-put-uint32 init 3)
     (def status
       (guard (e (do (%err (Str8 append (if (str=? (%message e) "Connection closed") "Connection closed" (%message e)) "\n")) 255))
-        (%send! c init)
-        (def r (%reply c))
-        (unless (= (first r) %VERSION) (Err raise 'sftp "Invalid packet back from SSH2_FXP_INIT" ()))
-        (def in (List ref 2 r))
-        (%set c 4 ((fn (self acc)
-                     (if (< (ssh-in-left in) 4) (List reverse acc)
-                       (do (def k (ssh-get-text in)) (self (pair (pair k (ssh-get-text in)) acc)))))
-                   ()))
+        (%hello! c)
         (%set c 3 (%realpath c "."))
         (def go
           (if (null? path) ()
@@ -996,7 +1023,7 @@
                 (def a (%stat? c full))
                 (if (if (null? a) #f (%dir? a))
                   (do (%set c 3 (%realpath c full)) ())
-                  (guard (e (do (%err (Str8 append (%message e) "\n")) 1))
+                  (guard (e (do (%err (Str8 append (%message e) "\r\n")) 1))
                     (%command! c (Str8 append "get \"" full "\"") opts) 0)))))
         (match
           ((not (null? go)) go)
@@ -1013,4 +1040,140 @@
     (Sys wait (first kid))
     status))
 
-(provide ssh/sftp-client ssh-sftp-client ssh-sftp-destination)
+
+; --- scp's SFTP mode -------------------------------------------------------------
+;
+; OpenSSH's scp speaks SFTP unless told -O: the same subsystem, a path
+; sent as given, so the server's own directory is a relative one's, and
+; each failure said as OpenSSH's scp says it.  A file that fails is said
+; and the copy goes on; a local source not there stops it.
+
+; OpenSSH's scp ends its own lines as a terminal would, \r\n.
+(def %scp-say (fn (_ t) (%err (Str8 append "scp: " t "\r\n"))))
+(def %local-why (fn (_ e) (guard (x ()) (Assoc get (lit local) (e data)))))
+(def %why (fn (_ e) (def l (%local-why e)) (if (null? l) (%message e) l)))
+(def %after-op (fn (_ m) (def cut (Str8 index-of ": " m)) (if (null? cut) m (Str8 sub (+ cut 2) (- (Str8 length m) cut 2) m))))
+
+; One local path sent to remote: a file, or a directory under -r;
+; answers how many failed.
+(def %scp-up-one
+  (fn (_ c local remote preserve recursive)
+    (def kind (File type local))
+    (match
+      ((if (eq? kind (lit dir)) recursive #f) (%scp-up-dir c local remote preserve))
+      ((eq? kind (lit file))
+        (guard (e (do (%scp-say (if (null? (%local-why e))
+                                  (Str8 append "dest open \"" remote "\": " (%why e))
+                                  (Str8 append "local open \"" local "\": " (%why e)))) 1))
+          (%upload! c local remote preserve) 0))
+      (#t (do (%scp-say (Str8 append "local \"" local "\" is not a regular file")) 1)))))
+
+; A directory sent: made at the far end when it is not there, its
+; entries sent, its times set under -p.
+(def %scp-up-dir
+  (fn (_ c local remote preserve)
+    (def s (File stat local))
+    (def a (%stat? c remote))
+    (match
+      ((if (null? a) #f (not (%dir? a)))
+        (do (%scp-say (Str8 append "\"" (guard (e remote) (%realpath c remote)) "\" exists but is not a directory")) 1))
+      ((null? (guard (e (do (%scp-say (Str8 append "remote mkdir \"" remote "\": " (%why e))) ()))
+                (when (null? a)
+                  (do (def req (%path-call! c %MKDIR remote))
+                      (%put-attrs (first req) (list (pair (lit perm) (& (Assoc get (lit mode) s) 511))))
+                      (%status-call! c req)))
+                #t))
+        1)
+      (#t
+        (do (def errs (List fold (fn (_ n name) (+ n (%scp-up-one c (%join local name) (%join remote name) preserve #t))) 0
+                        (List sort (fn (_ x y) (Str8 <? x y)) (File list-dir local))))
+            (when preserve
+              (guard (e ()) (%setstat c remote (list (pair (lit atime) (Assoc get (lit atime) s)) (pair (lit mtime) (Assoc get (lit mtime) s))))))
+            errs)))))
+
+; Local sources up to the target: into it when it is a directory, or
+; when there are several, as a directory made for them.
+(def %scp-put
+  (fn (_ c sources target preserve recursive)
+    (def tgt (if (str=? target "") "." target))
+    (def ta (%stat? c tgt))
+    (def multi (> (List length sources) 1))
+    (when (if multi (if (null? ta) #t (not (%dir? ta))) #f)
+      (do (def req (%path-call! c %MKDIR tgt))
+          (%put-attrs (first req) (list (pair (lit perm) 511)))
+          (guard (e (Err raise 'sftp (Str8 append "remote mkdir \"" tgt "\": " (%why e)) ())) (%status-call! c req))))
+    (def into (if multi #t (if (null? ta) #f (%dir? ta))))
+    (List fold
+      (fn (_ n src)
+        (def kind (File type src))
+        (when (null? kind) (Err raise 'sftp (Str8 append "stat local \"" src "\": No such file or directory") ()))
+        (def f (%scp-up-one c src (if into (%join tgt (%base src)) tgt) preserve recursive))
+        (when (> f 0)
+          (%scp-say (Str8 append "failed to upload " (if (if recursive (eq? kind (lit dir)) #f) "directory " "file ") src " to " target)))
+        (+ n f))
+      0 sources)))
+
+; One remote path fetched: a file, or a directory under -r.
+(def %scp-down-one
+  (fn (_ c remote local a preserve recursive)
+    (match
+      ((if (%dir? a) recursive #f) (%scp-down-dir c remote local a preserve))
+      ((%regular? a)
+        (guard (e (do (%scp-say (if (null? (%local-why e))
+                                  (Str8 append "remote open \"" remote "\": " (%why e))
+                                  (Str8 append "open local \"" local "\": " (%why e)))) 1))
+          (%download! c remote local a preserve) 0))
+      (#t (do (%scp-say (Str8 append "download " (if (if (%dir? a) (not (%slash? remote)) #f) (Str8 append remote "/") remote)
+                                     ": not a regular file")) 1)))))
+
+(def %scp-down-dir
+  (fn (_ c remote local a preserve)
+    (def made (if (not (null? (File type local))) #t
+                (guard (e (do (%scp-say (Str8 append "mkdir " local ": " (%after-op (%message e)))) #f))
+                  (File mkdir local (& (%attr a (lit perm)) 511)) #t)))
+    (if (not made) 1
+      (do (def errs (List fold
+                      (fn (_ n e)
+                        (def name (first e))
+                        (if (if (str=? name ".") #t (str=? name "..")) n
+                          (+ n (%scp-down-one c (%join remote name) (%join local name) (List ref 2 e) preserve #t))))
+                      0 (%readdir c remote)))
+          (when preserve (guard (e ()) (File set-times local (%attr a (lit atime)) (%attr a (lit mtime)))))
+          errs))))
+
+; Remote sources, globs among them, down to the local target: into it
+; when it is a directory, which several sources need it to be.
+(def %scp-get
+  (fn (_ c sources target preserve recursive)
+    (def kind (File type target))
+    (def into (eq? kind (lit dir)))
+    (if (if (> (List length sources) 1) (not into) #f)
+      (do (%err (Str8 append target ": " (if (null? kind) "No such file or directory" "Not a directory") "\n")) 1)
+      (List fold
+        (fn (_ n src)
+          (def found (List filter (fn (_ f) (not (null? (rest f))))
+                       (List map (fn (_ p) (pair p (%stat? c p))) (guard (e ()) (%remote-glob c src)))))
+          (if (null? found)
+            (do (%scp-say (Str8 append (if (str=? src "") "." src) ": No such file or directory")) (+ n 1))
+            (List fold (fn (_ k f) (+ k (%scp-down-one c (first f) (if into (%join target (%base (first f))) target) (rest f) preserve recursive)))
+              n found)))
+        0 sources))))
+
+; scp's copy over SFTP: the child spawned on argv, the sources sent up to
+; target's remote path when upload, else fetched down into the local
+; target; 0, 1 when a file failed, 255 when the copy stopped.
+(def ssh-sftp-scp
+  (fn (_ argv sources target upload preserve recursive)
+    (def kid (%spawn argv))
+    (def c (%connection (List ref 2 kid) (List ref 1 kid) 32768 64 (first kid)))
+    (%set c 8 #t)
+    (def status
+      (guard (e (do (%scp-say (%message e)) 255))
+        (%hello! c)
+        (if (= 0 (if upload (%scp-put c sources target preserve recursive) (%scp-get c sources target preserve recursive))) 0 1)))
+    (guard (e ()) (Sys close (%ref c 1)))
+    (guard (e ()) (Sys close (List ref 2 kid)))
+    (Sys wait (first kid))
+    status))
+
+(provide ssh/sftp-client ssh-sftp-client ssh-sftp-destination ssh-sftp-scp)

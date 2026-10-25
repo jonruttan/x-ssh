@@ -133,22 +133,22 @@ Run 'x -l ssh -- <program>' with one of these programs:
 
 ## scp
 
-### a copy: the operands, the ssh program, and what it is given, OpenSSH's set first
+### a copy: the operands, the ssh program, and what it is given, OpenSSH's set first; SFTP by default
 
 ```ssh
 (write (ssh-plan (list "scp" "-p" "-P" "2222" "-i" "k" "-o" "BatchMode=yes" "a" "b" "h:dir")))
 ```
 ---
-    ('scp ('copy ("a" "b" "h:dir") "ssh" ("-x" "-oPermitLocalCommand=no" "-oClearAllForwardings=yes" "-oRemoteCommand=none" "-oRequestTTY=no" "-oForwardAgent=no" "-o" "BatchMode=yes" "-p" "2222" "-i" "k") #t #f) 0)
+    ('scp ('copy ("a" "b" "h:dir") "ssh" ("-x" "-oPermitLocalCommand=no" "-oClearAllForwardings=yes" "-oRemoteCommand=none" "-oRequestTTY=no" "-oForwardAgent=no" "-o" "BatchMode=yes" "-p" "2222" "-i" "k") #t #f #t) 0)
 
-### -t and -f are the remote ends; -r rides along to either; -s is refused
+### -t and -f are the remote ends; -r rides along to either; -O is the original protocol, -s SFTP
 
 ```ssh
 (write (list (first (rest (ssh-plan (list "scp" "-t" "dir")))) (first (rest (ssh-plan (list "scp" "-rf" "a" "b"))))
-             (first (rest (rest (ssh-plan (list "scp" "-s" "a" "h:b")))))))
+             (List map (fn (_ f) (List ref 6 (first (rest (ssh-plan (list "scp" f "a" "h:b")))))) (list "-O" "-s"))))
 ```
 ---
-    (('to ("dir") #f #f) ('from ("a" "b") #f #t) 1)
+    (('to ("dir") #f #f) ('from ("a" "b") #f #t) (#f #t))
 
 ## sftp
 

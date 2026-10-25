@@ -6,6 +6,10 @@
 ; @copyright 2026 Jon Ruttan
 ; @license MIT No Attribution (MIT-0)
 ;
+; Two protocols, as OpenSSH's scp has them.  SFTP, the default (-s): the
+; ssh program asked for the sftp subsystem, the copy made with SFTP's
+; requests (ssh/sftp-client.x).  Under -O, the classic one, below.
+;
 ; OpenSSH's classic scp, the protocol `scp -O` speaks: the client
 ; runs `PROGRAM [OPTIONS] [-l USER] -- HOST "scp -t PATH"` (or -f to
 ; fetch), PROGRAM the ssh client (-S, default ssh), and speaks the scp
@@ -28,6 +32,7 @@
 (import x/sys/file)
 (import x/sys/posix)
 (import x/sys/gc)
+(import ssh/sftp-client ssh-sftp-scp)
 
 (def %byte-ref (prim-ref (lit str) (lit byte-ref)))
 (def %char->int (prim-ref (lit char) (lit ->int)))
@@ -321,14 +326,38 @@
       (if (null? user) () (list "-l" user))
       (list "--" host command))))
 
+; The copy over SFTP, OpenSSH's default: the ssh program asked for the
+; sftp subsystem, the sources local and the target remote or the sources
+; remote, one host's, and the target local.
+(def %sftp-copy
+  (fn (_ sources target program args preserve recursive)
+    (def t (%remote target))
+    (def ss (List map %remote sources))
+    (def argv (fn (_ r) (List append (list program) args (if (null? (first r)) () (list "-l" (first r)))
+                          (list "-s" "--" (List ref 1 r) "sftp"))))
+    (match
+      ((not (null? t))
+        (if (List any? (fn (_ s) (not (null? s))) ss)
+          (do (%say "scp: copies between two remote hosts are not served yet\n") 1)
+          (ssh-sftp-scp (argv t) sources (List ref 2 t) #t preserve recursive)))
+      ((List any? null? ss) (do (%say "scp: a local copy is cp's\n") 1))
+      ((List any? (fn (_ s) (not (if (str=? (List ref 1 s) (List ref 1 (first ss)))
+                                   (if (null? (first s)) (null? (first (first ss)))
+                                     (if (null? (first (first ss))) #f (str=? (first s) (first (first ss)))))
+                                   #f)))
+                  ss)
+        (do (%say "scp: remote sources on more than one host are not served yet\n") 1))
+      (#t (ssh-sftp-scp (argv (first ss)) (List map (fn (_ s) (List ref 2 s)) ss) target #f preserve recursive)))))
+
 ; The copy a client line asks for; answers the exit status.
 (def ssh-scp-client
-  (fn (_ operands program args preserve recursive)
+  (fn (_ operands program args preserve recursive sftp)
     (def target (List ref (- (List length operands) 1) operands))
     (def sources (List take (- (List length operands) 1) operands))
     (def t (%remote target))
     (def flags (Str8 append (if preserve " -p" "") (if recursive " -r" "") (if (> (List length sources) 1) " -d" "")))
     (match
+      (sftp (%sftp-copy sources target program args preserve recursive))
       ((not (null? t))
         (if (List any? (fn (_ s) (not (null? (%remote s)))) sources)
           (do (%say "scp: copies between two remote hosts are not served yet\n") 1)

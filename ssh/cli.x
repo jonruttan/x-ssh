@@ -92,14 +92,14 @@
     (%row (lit scp) "scp" "secure copy" "[options] source ... target"
       (list (Opts arg "-F" "ssh_config" "The configuration file, passed to ssh")
             (Opts arg "-i" "identity_file" "The key to authenticate with, passed to ssh")
-            (Opts flag "-O" "The original scp protocol (the only one served)")
+            (Opts flag "-O" "The original scp protocol, in place of SFTP")
             (Opts arg "-o" "ssh_option" "An option passed to ssh")
             (Opts arg "-P" "port" "The port to connect to on the remote host")
             (Opts flag "-p" "Preserve modification times")
             (Opts flag "-q" "Quiet: no progress meter (x-ssh has none)")
             (Opts flag "-r" "Copy directories recursively")
             (Opts arg "-S" "program" "The program to connect with, default ssh")
-            (Opts flag "-s" "The SFTP protocol (not served)")
+            (Opts flag "-s" "The SFTP protocol, the default")
             (Opts flag "-v" "Verbose, passed to ssh")
             (Opts hidden (Opts flag "-d" "The target must be a directory (the remote end)"))
             (Opts hidden (Opts flag "-t" "Receive files (the remote end)"))
@@ -316,9 +316,9 @@
 
 ; scp's line: (scp (to OPERANDS PRESERVE RECURSIVE) 0) or (scp (from
 ; OPERANDS PRESERVE RECURSIVE) 0) for the remote ends, (scp (copy
-; OPERANDS PROGRAM ARGS PRESERVE RECURSIVE) 0) for a client, ARGS what
+; OPERANDS PROGRAM ARGS PRESERVE RECURSIVE SFTP) 0) for a client, ARGS what
 ; the ssh program is given before the host, or what it says and its
-; status.
+; status.  SFTP is OpenSSH's default; -O is the original protocol.
 (def %scp-plan
   (fn (_ o decl)
     (def ops (Opts operands o))
@@ -327,7 +327,6 @@
     (match
       ((Opts on? o "-t") (list (lit scp) (list (lit to) ops preserve recursive) 0))
       ((Opts on? o "-f") (list (lit scp) (list (lit from) ops preserve recursive) 0))
-      ((Opts on? o "-s") (list (lit scp) "scp: the SFTP protocol is not served; the original one is, as under -O\n" 1))
       ((< (List length ops) 2) (list (lit scp) (Opts usage decl) 1))
       (#t (list (lit scp)
                 (list (lit copy) ops
@@ -340,7 +339,7 @@
                         (List flat-map (fn (_ v) (list "-o" v)) (Opts values o "-o"))
                         (if (Opts on? o "-P") (list "-p" (Opts value o "-P")) ())
                         (if (Opts on? o "-i") (list "-i" (Opts value o "-i")) ()))
-                      preserve recursive)
+                      preserve recursive (if (Opts on? o "-s") #t (not (Opts on? o "-O"))))
                 0)))))
 
 ; A plan done: text to standard error and the status, or what it names
@@ -361,7 +360,7 @@
             (ssh-sftp-client (List ref 1 what) (List ref 2 what) (List ref 3 what) (List ref 4 what) (List ref 5 what) (List ref 6 what)))
           ((eq? (first what) (lit to)) (ssh-scp-remote #t (List ref 1 what) (List ref 2 what) (List ref 3 what)))
           ((eq? (first what) (lit from)) (ssh-scp-remote #f (List ref 1 what) (List ref 2 what) (List ref 3 what)))
-          (#t (ssh-scp-client (List ref 1 what) (List ref 2 what) (List ref 3 what) (List ref 4 what) (List ref 5 what)))))
+          (#t (ssh-scp-client (List ref 1 what) (List ref 2 what) (List ref 3 what) (List ref 4 what) (List ref 5 what) (List ref 6 what)))))
       (do (File write 2 what (%byte-len what))
           (Sys exit (first (rest (rest plan))))))))
 

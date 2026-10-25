@@ -1,7 +1,7 @@
 # x-ssh
 
 SSH on x-lang, as a lang bundle: OpenSSH's client, server and key tool,
-scp, and SFTP's client and server.
+scp, SFTP's client and server, and the authentication agent.
 
     x -l ssh -- PROGRAM [ARGS]
 
@@ -13,6 +13,8 @@ The first operand names the program, by OpenSSH's name:
     scp           secure copy
     sftp          secure file transfer
     sftp-server   the SFTP server
+    ssh-agent     the authentication agent
+    ssh-add       adds keys to the agent
 
 Each takes OpenSSH's options and reads OpenSSH's configuration files.
 The ciphers, digests and key exchange are x-lang codecs, written in x
@@ -46,7 +48,9 @@ nistp521), for host keys and user keys, at either end.
   settings in force.  Served keywords: Hostname, Port, User,
   IdentityFile (`~/.ssh/id_rsa`, `id_ecdsa` and `id_ed25519` by default;
   OpenSSH's or Dropbear's key files, a key under a passphrase among
-  them), StrictHostKeyChecking,
+  them), IdentityAgent (SSH_AUTH_SOCK by default; the agent's keys
+  offered first, as OpenSSH orders them), IdentitiesOnly,
+  StrictHostKeyChecking,
   UserKnownHostsFile,
   GlobalKnownHostsFile, HostKeyAlias, BatchMode, PasswordAuthentication,
   PubkeyAuthentication, NumberOfPasswordPrompts, LocalForward,
@@ -126,14 +130,28 @@ nistp521), for host keys and user keys, at either end.
   home-directory, users-groups-by-id).  `-d` names the directory to start in (`%d` the home
   directory, `%u` the user), `-R` refuses every request that would change
   a file; `-e`, `-f` and `-l` are taken, and nothing is logged.
+- `ssh-agent`: OpenSSH's agent protocol on a unix-domain socket (`-a`,
+  by default `~/.ssh/agent/s.*`): keys added, listed, signed with,
+  removed, and the agent locked under a password; a key's lifetime from
+  ssh-add or `-t`.  It detaches and prints the variables' lines, sh's
+  (`-s`) or csh's (`-c`, or a SHELL ending in csh); `-D` stays in the
+  foreground, `-d` traces too; with a command it runs the command with
+  the variables set and ends when it does; `-k` ends the agent
+  SSH_AGENT_PID names.
+- `ssh-add`: keys added to the agent SSH_AUTH_SOCK names, the files
+  named or `~/.ssh/id_*`, a sealed one's passphrase asked for; `-t`
+  their lifetime, `-l` and `-L` the agent's keys, `-d` and `-D` removal,
+  `-x` and `-X` the lock, `-q` quiet.  OpenSSH's agent and ssh-add work
+  with either.
 - `-V` on each, and `--help` from its option declaration.
 
-Not served yet: other ciphers, agents, terminal modes from pty-req, other
+Not served yet: other ciphers, agent forwarding, terminal modes from pty-req, other
 users than the one a server runs as.
 
 The oracles in `tests/oracle/` are the live tests: `client.sh` drives
 the client against a built Dropbear, `server.sh` drives the server with
-Dropbear's and OpenSSH's clients, and `scp.sh` runs scp from either end.
+Dropbear's and OpenSSH's clients, `scp.sh` runs scp from either end, and
+`agent.sh` pairs ssh-agent and ssh-add with OpenSSH's.
 Each takes a built Dropbear's directory.
 
 `tests/linux/run.sh` is the Linux leg: password logins, which want a
@@ -167,6 +185,7 @@ Set `X=/path/to/x` to use a particular x.
     ssh/scp.x         scp, either end
     ssh/sftp.x        SFTP, the server's end
     ssh/sftp-client.x SFTP, the client's end
+    ssh/agent.x       ssh-agent and ssh-add, and the agent's protocol from the client's end
     ssh/cli.x         the command line: ssh-programs, ssh-plan, ssh-main
     tests/            the spec suite and its runner, gate, harness and oracles
 

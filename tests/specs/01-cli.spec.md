@@ -11,10 +11,10 @@ and what its line is parsed against.  ssh-plan turns a line into
 
 ```ssh
 (write (List map (fn (_ n) (if (null? (ssh-program n)) () (first (ssh-program n))))
-  (list "sshd" "ssh" "ssh-keygen" "scp" "sftp" "sftp-server" "dropbear" "dbclient")))
+  (list "sshd" "ssh" "ssh-keygen" "scp" "sftp" "sftp-server" "ssh-agent" "ssh-add" "dropbear" "dbclient")))
 ```
 ---
-    ('server 'client 'keygen 'scp 'sftp 'sftp-server () ())
+    ('server 'client 'keygen 'scp 'sftp 'sftp-server 'agent 'add () ())
 
 ### no program lists the programs, status 1
 
@@ -31,6 +31,8 @@ Run 'x -l ssh -- <program>' with one of these programs:
 'scp' - secure copy
 'sftp' - secure file transfer
 'sftp-server' - the SFTP server
+'ssh-agent' - the authentication agent
+'ssh-add' - adds keys to the agent
 ```
 
 ### an unknown program lists them too
@@ -188,6 +190,46 @@ Run 'x -l ssh -- <program>' with one of these programs:
 ```
 ---
     (('serve () #f) ('serve "%d/up" #t) ('serve () #f) 1)
+
+## ssh-agent
+
+### the mode: a daemon, -D, -d, a command, -k; -a's socket, -t's lifetime, -s and -c
+
+```ssh
+(write (List map (fn (_ l) (first (rest (ssh-plan (pair "ssh-agent" l)))))
+  (list (list "-s") (list "-c" "-D" "-a" "a.sock") (list "-s" "-d" "-t" "1h30m") (list "-s" "sh" "-c" "ssh-add -l") (list "-c" "-k"))))
+```
+---
+    (('daemon #f () () ()) ('foreground #t "a.sock" () ()) ('debug #f () 5400 ()) ('command #f () () ("sh" "-c" "ssh-add -l")) ('kill #t () () ()))
+
+### -c with -s, -d or -D with a command, and a lifetime that does not read are refused, status 1
+
+```ssh
+(write (List map (fn (_ l) (def p (ssh-plan (pair "ssh-agent" l))) (list (Str8 sub 0 6 (first (rest p))) (first (rest (rest p)))))
+  (list (list "-c" "-s") (list "-D" "sh") (list "-t" "1x"))))
+```
+---
+    (("Usage:" 1) ("Usage:" 1) ("Invali" 1))
+
+### a lifetime as OpenSSH's convtime reads it
+
+```ssh
+(import ssh/agent ssh-agent-seconds)
+(write (List map ssh-agent-seconds (list "90" "30m" "1h30m" "2d" "1w" "1H" "" "h" "1x" "1h1")))
+```
+---
+    (90 1800 5400 172800 604800 3600 () () () 3601)
+
+## ssh-add
+
+### the action: add, -l, -L, -d, -D, -x, -X; the files, -t's lifetime and -q
+
+```ssh
+(write (List map (fn (_ l) (first (rest (ssh-plan (pair "ssh-add" l)))))
+  (list () (list "-t" "30m" "k1" "k2") (list "-l") (list "-L") (list "-q" "-d" "k1") (list "-D") (list "-x") (list "-X"))))
+```
+---
+    (('add () () #f) ('add ("k1" "k2") 1800 #f) ('list () () #f) ('public () () #f) ('delete ("k1") () #t) ('delete-all () () #f) ('lock () () #f) ('unlock () () #f))
 
 ## main
 

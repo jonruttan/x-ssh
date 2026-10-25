@@ -21,6 +21,7 @@
 (import x/sys/file File)
 (import ssh/client ssh-client-main)
 (import ssh/keygen ssh-keygen-main)
+(import ssh/agent ssh-agent-main ssh-add-main ssh-agent-seconds)
 (import ssh/server ssh-server-main)
 (import ssh/scp ssh-scp-client ssh-scp-remote)
 (import ssh/sftp ssh-sftp-main)
@@ -125,7 +126,28 @@
             (Opts flag "-e" "Log to standard error (nothing is logged)")
             (Opts arg "-f" "log_facility" "The syslog facility (nothing is logged)")
             (Opts arg "-l" "log_level" "The log level (nothing is logged)")
-            (Opts flag "-R" "Read-only: every request that would change a file is refused")))))
+            (Opts flag "-R" "Read-only: every request that would change a file is refused")))
+    (%row (lit agent) "ssh-agent" "the authentication agent" "[-c | -s] [-Dd] [-a bind_address] [-t life] [command [arg ...]]"
+      (list (Opts arg "-a" "bind_address" "The socket to listen on, default ~/.ssh/agent/s.*")
+            (Opts flag "-c" "Print csh's commands")
+            (Opts flag "-D" "Do not fork: stay in the foreground")
+            (Opts flag "-d" "Debug mode: in the foreground, tracing on standard error")
+            (Opts arg "-E" "fingerprint_hash" "The fingerprint hash: sha256, the one served")
+            (Opts flag "-k" "Kill the agent SSH_AGENT_PID names")
+            (Opts arg "-O" "option" "An option (none is served)")
+            (Opts arg "-P" "allowed_providers" "PKCS#11 providers allowed (none is served)")
+            (Opts flag "-s" "Print sh's commands")
+            (Opts arg "-t" "life" "The lifetime of a key added without one, as 90, 30m or 1h30m")))
+    (%row (lit add) "ssh-add" "adds keys to the agent" "[-DdLlqXx] [-t life] [file ...]"
+      (list (Opts flag "-D" "Delete all the agent's keys")
+            (Opts flag "-d" "Delete the keys of the files named, or the default ones")
+            (Opts arg "-E" "fingerprint_hash" "The fingerprint hash: sha256, the one served")
+            (Opts flag "-L" "List the agent's public keys")
+            (Opts flag "-l" "List the agent's keys' fingerprints")
+            (Opts flag "-q" "Quiet")
+            (Opts arg "-t" "life" "The lifetime of the keys added, as 90, 30m or 1h30m")
+            (Opts flag "-X" "Unlock the agent")
+            (Opts flag "-x" "Lock the agent under a password")))))
 
 ; The program row a name answers to, or ().
 (def ssh-program
@@ -146,7 +168,8 @@
   (fn (_ ops)
     (def p (if (null? ops) () (ssh-program (first ops))))
     (def decl (if (null? p) () (List ref 3 p)))
-    (def o (if (null? p) () (Opts parse decl (rest ops))))
+    ; ssh-agent's command keeps its own options
+    (def o (match ((null? p) ()) ((eq? (first p) (lit agent)) (Opts parse-leading decl (rest ops))) (#t (Opts parse decl (rest ops)))))
     (match
       ((null? p) (list () (%programs) 1))
       ((Opts help? decl (rest ops)) (list (first p) (Opts usage decl) 0))
@@ -161,7 +184,51 @@
         (if (null? (Opts operands o))
           (list (lit sftp-server) (list (lit serve) (%value o "-d") (Opts on? o "-R")) 0)
           (list (lit sftp-server) (Opts usage decl) 1)))
+      ((eq? (first p) (lit agent)) (%agent-plan o decl))
+      ((eq? (first p) (lit add)) (%add-plan o decl))
       (#t (%scp-plan o decl)))))
+
+; A lifetime, -t's, in seconds: () when absent, bad when it does not read.
+(def %life
+  (fn (_ o)
+    (if (not (Opts on? o "-t")) ()
+      ((fn (_ s) (if (if (null? s) #t (< s 1)) (lit bad) s)) (ssh-agent-seconds (Opts value o "-t"))))))
+
+; ssh-agent's line: (agent (MODE CSH SOCKET LIFE COMMAND) 0), MODE kill,
+; debug (-d), foreground (-D), command or daemon; CSH from -c, -s, or a
+; SHELL ending csh.
+(def %agent-plan
+  (fn (_ o decl)
+    (def ops (Opts operands o))
+    (def shell (Sys getenv "SHELL"))
+    (def csh (match ((Opts on? o "-c") #t)
+                    ((Opts on? o "-s") #f)
+                    (#t (if (null? shell) #f (if (>= (Str8 length shell) 3) (str=? (Str8 sub (- (Str8 length shell) 3) 3 shell) "csh") #f)))))
+    (def life (%life o))
+    (def plan (fn (_ mode) (list (lit agent) (list mode csh (%value o "-a") life ops) 0)))
+    (match
+      ((if (Opts on? o "-c") (Opts on? o "-s") #f) (list (lit agent) (Opts usage decl) 1))
+      ((if (null? ops) #f (if (Opts on? o "-d") #t (Opts on? o "-D"))) (list (lit agent) (Opts usage decl) 1))
+      ((Opts on? o "-k") (plan (lit kill)))
+      ((eq? life (lit bad)) (list (lit agent) "Invalid lifetime\n" 1))
+      ((Opts on? o "-d") (plan (lit debug)))
+      ((Opts on? o "-D") (plan (lit foreground)))
+      ((not (null? ops)) (plan (lit command)))
+      (#t (plan (lit daemon))))))
+
+; ssh-add's line: (add (ACTION FILES LIFE QUIET) 0), ACTION list (-l),
+; public (-L), delete-all (-D), lock (-x), unlock (-X), delete (-d) or
+; add.
+(def %add-plan
+  (fn (_ o decl)
+    (def life (%life o))
+    (if (eq? life (lit bad)) (list (lit add) "Invalid lifetime\n" 1)
+      (list (lit add)
+            (list (match ((Opts on? o "-l") (lit list)) ((Opts on? o "-L") (lit public)) ((Opts on? o "-D") (lit delete-all))
+                         ((Opts on? o "-x") (lit lock)) ((Opts on? o "-X") (lit unlock)) ((Opts on? o "-d") (lit delete))
+                         (#t (lit add)))
+                  (Opts operands o) life (Opts on? o "-q"))
+            0))))
 
 (def %value (fn (_ o flag) (if (Opts on? o flag) (Opts value o flag) ())))
 
@@ -355,6 +422,8 @@
           ((eq? (first plan) (lit client)) (ssh-client-main (rest what)))
           ((eq? (first plan) (lit server)) (ssh-server-main (rest what)))
           ((eq? (first plan) (lit keygen)) (ssh-keygen-main what))
+          ((eq? (first plan) (lit agent)) (ssh-agent-main what))
+          ((eq? (first plan) (lit add)) (ssh-add-main what))
           ; sftp-server's requests on standard input, which the platform keeps on fd 3
           ((eq? (first plan) (lit sftp-server)) (ssh-sftp-main (List ref 1 what) (List ref 2 what) 3 1))
           ((eq? (first plan) (lit sftp))

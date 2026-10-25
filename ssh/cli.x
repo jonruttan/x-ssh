@@ -90,7 +90,8 @@
             (Opts flag "-v" "Verbose: with -l, the key's randomart too")
             (Opts flag "-y" "Print the public key of a private key file")))
     (%row (lit scp) "scp" "secure copy" "[options] source ... target"
-      (list (Opts arg "-F" "ssh_config" "The configuration file, passed to ssh")
+      (list (Opts flag "-3" "Copies between two remote hosts through this one (the default)")
+            (Opts arg "-F" "ssh_config" "The configuration file, passed to ssh")
             (Opts arg "-i" "identity_file" "The key to authenticate with, passed to ssh")
             (Opts flag "-O" "The original scp protocol, in place of SFTP")
             (Opts arg "-o" "ssh_option" "An option passed to ssh")

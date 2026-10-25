@@ -361,14 +361,11 @@
 (def %local-fail
   (fn (_ text why) (Err raise 'sftp (Str8 append text why) (list (pair (lit local) why)))))
 
-(def %download!
-  (fn (_ c remote local a preserve)
-    (def perm (if (null? (%attr a (lit perm))) 438 (& (%attr a (lit perm)) 511)))
-    (def h (%open c remote %F-READ ()))
-    (def fd (File open local (list (lit wronly) (lit creat) (lit trunc)) perm))
-    (when (< fd 0) (def why (%errno-text fd (lit open)))
-      (do (guard (e ()) (%close c h))
-          (%local-fail (Str8 append "Couldn't open local file \"" local "\" for writing: ") why)))
+; An open remote file read to its end, -R's reads of -B's bytes in
+; flight, each block handed to write! as (OFFSET BUF START LEN), in
+; whatever order the replies come; answers the failure, or ().
+(def %read-all!
+  (fn (_ c h write!)
     (def chunk (%ref c 5))
     (def most (%ref c 6))
     ; in flight: an alist of id to (OFFSET . LEN)
@@ -399,8 +396,7 @@
                  (match
                    ((= (first r) %DATA)
                      (do (def d (ssh-get-string in))
-                         (File seek fd offset)
-                         (ssh-sftp-write-all fd (ssh-copy (ssh-in-buf in) (first d) (rest d)) 0 (rest d))
+                         (write! offset (ssh-in-buf in) (first d) (rest d))
                          (when (< (rest d) len) (ask! (+ offset (rest d)) (- len (rest d))))))
                    ((= (first r) %STATUS)
                      (do (def code (ssh-get-uint32 in))
@@ -409,12 +405,51 @@
                  (when (= (& id 31) 0) (Heap collect))
                  (self)))))
         ()))
+    failure))
+
+(def %download!
+  (fn (_ c remote local a preserve)
+    (def perm (if (null? (%attr a (lit perm))) 438 (& (%attr a (lit perm)) 511)))
+    (def h (%open c remote %F-READ ()))
+    (def fd (File open local (list (lit wronly) (lit creat) (lit trunc)) perm))
+    (when (< fd 0) (def why (%errno-text fd (lit open)))
+      (do (guard (e ()) (%close c h))
+          (%local-fail (Str8 append "Couldn't open local file \"" local "\" for writing: ") why)))
+    (def failure
+      (%read-all! c h (fn (_ offset buf start len)
+                        (File seek fd offset)
+                        (ssh-sftp-write-all fd (ssh-copy buf start len) 0 len))))
     (File close fd)
     (guard (e ()) (%close c h))
     (unless (null? failure) (error failure))
     (when preserve
       (unless (null? (%attr a (lit mtime))) (guard (e ()) (File set-times local (%attr a (lit atime)) (%attr a (lit mtime)))))
       (guard (e ()) (File chmod local perm)))))
+
+; A remote file of one server written into another's, the reads in
+; flight as a download keeps them, each block written as it comes;
+; -p's times and permissions set after.  A source that will not open
+; raises with (from . #t) in its data, for scp's words.
+(def %crossload!
+  (fn (_ c from-c from to a preserve)
+    (def perm (if (null? (%attr a (lit perm))) 438 (& (%attr a (lit perm)) 511)))
+    (def h (guard (e (Err raise 'sftp (%message e) (list (pair (lit from) #t)))) (%open from-c from %F-READ ())))
+    (def out (guard (e (do (guard (x ()) (%close from-c h)) (error e)))
+               (%open c to (| %F-WRITE (| %F-CREAT %F-TRUNC)) (list (pair (lit perm) perm)))))
+    (def failure
+      (%read-all! from-c h (fn (_ offset buf start len)
+                             (def req (%request c %WRITE))
+                             (%put-handle (first req) out)
+                             (%put-u64 (first req) offset)
+                             (ssh-put-string (first req) buf start len)
+                             (%status-call! c req))))
+    (guard (e ()) (%close from-c h))
+    (guard (e ()) (%close c out))
+    (unless (null? failure) (error failure))
+    (when preserve
+      (%setstat c to (List append (list (pair (lit perm) perm))
+                       (if (null? (%attr a (lit mtime))) ()
+                         (list (pair (lit atime) (%attr a (lit atime))) (pair (lit mtime) (%attr a (lit mtime))))))))))
 
 ; A local file into a remote one, -R's writes of -B's bytes in flight;
 ; -p's times (and permissions) set after.
@@ -1159,21 +1194,114 @@
               n found)))
         0 sources))))
 
+; One remote path of one server copied into another's: a file, or a
+; directory under -r.
+(def %scp-cross-one
+  (fn (_ c from-c from to a preserve recursive)
+    (match
+      ((if (%dir? a) recursive #f) (%scp-cross-dir c from-c from to a preserve))
+      ((%regular? a)
+        (guard (e (do (%scp-say (if (null? (guard (x ()) (Assoc get (lit from) (e data))))
+                                  (Str8 append "dest open \"" to "\": " (%why e))
+                                  (Str8 append "remote open \"" from "\": " (%why e)))) 1))
+          (%crossload! c from-c from to a preserve) 0))
+      (#t (do (%scp-say (Str8 append "download \"" (if (if (%dir? a) (not (%slash? from)) #f) (Str8 append from "/") from)
+                                     "\": not a regular file")) 1)))))
+
+(def %scp-cross-dir
+  (fn (_ c from-c from to a preserve)
+    (def ta (%stat? c to))
+    (match
+      ((if (null? ta) #f (not (%dir? ta)))
+        (do (%scp-say (Str8 append "\"" (guard (e to) (%realpath c to)) "\" exists but is not a directory")) 1))
+      ((null? (guard (e (do (%scp-say (Str8 append "remote mkdir \"" to "\": " (%why e))) ()))
+                (when (null? ta)
+                  (do (def req (%path-call! c %MKDIR to))
+                      (%put-attrs (first req) (list (pair (lit perm) (& (%attr a (lit perm)) 511))))
+                      (%status-call! c req)))
+                #t))
+        1)
+      (#t
+        (do (def errs (List fold
+                        (fn (_ n e)
+                          (def name (first e))
+                          (if (if (str=? name ".") #t (str=? name "..")) n
+                            (+ n (%scp-cross-one c from-c (%join from name) (%join to name) (List ref 2 e) preserve #t))))
+                        0 (List sort (fn (_ x y) (Str8 <? (first x) (first y))) (%readdir from-c from))))
+            (when preserve
+              (guard (e ()) (%setstat c to (list (pair (lit atime) (%attr a (lit atime))) (pair (lit mtime) (%attr a (lit mtime)))))))
+            errs)))))
+
+; A connection to the server argv's child serves, the version exchanged:
+; (C . KID), KID the child's (PID TO FROM).
+(def %scp-open
+  (fn (_ argv)
+    (def kid (%spawn argv))
+    (def c (%connection (List ref 2 kid) (List ref 1 kid) 32768 64 (first kid)))
+    (%set c 8 #t)
+    (%hello! c)
+    (pair c kid)))
+
+(def %scp-close
+  (fn (_ ck)
+    (guard (e ()) (Sys close (List ref 1 (rest ck))))
+    (guard (e ()) (Sys close (List ref 2 (rest ck))))
+    (Sys wait (first (rest ck)))))
+
 ; scp's copy over SFTP: the child spawned on argv, the sources sent up to
 ; target's remote path when upload, else fetched down into the local
 ; target; 0, 1 when a file failed, 255 when the copy stopped.
 (def ssh-sftp-scp
   (fn (_ argv sources target upload preserve recursive)
-    (def kid (%spawn argv))
-    (def c (%connection (List ref 2 kid) (List ref 1 kid) 32768 64 (first kid)))
-    (%set c 8 #t)
+    (def cell (Vector make 1 ()))
     (def status
       (guard (e (do (%scp-say (%message e)) 255))
-        (%hello! c)
+        (%set cell 0 (%scp-open argv))
+        (def c (first (%ref cell 0)))
         (if (= 0 (if upload (%scp-put c sources target preserve recursive) (%scp-get c sources target preserve recursive))) 0 1)))
-    (guard (e ()) (Sys close (%ref c 1)))
-    (guard (e ()) (Sys close (List ref 2 kid)))
-    (Sys wait (first kid))
+    (unless (null? (%ref cell 0)) (%scp-close (%ref cell 0)))
     status))
 
-(provide ssh/sftp-client ssh-sftp-client ssh-sftp-destination ssh-sftp-scp)
+; scp between two remote hosts, through this one, as OpenSSH's does by
+; default: argv's server the target's, each source (ARGV . PATH), ARGV
+; its server's child, or () for a local path, which is sent up.  A
+; source's server stays open while the next source is on it too.
+; Several sources need the target to be a directory already.
+(def ssh-sftp-scp3
+  (fn (_ argv sources target preserve recursive)
+    (def cells (Vector make 3 ()))
+    (def status
+      (guard (e (do (%scp-say (%message e)) 255))
+        (%set cells 0 (%scp-open argv))
+        (def c (first (%ref cells 0)))
+        (def tgt (if (str=? target "") "." target))
+        (def ta (%stat? c tgt))
+        (def into (if (null? ta) #f (%dir? ta)))
+        (def multi (> (List length sources) 1))
+        (def errs
+          (List fold
+            (fn (_ n s)
+              (match
+                ((if multi (not into) #f) (do (%scp-say (Str8 append tgt ": destination is not a directory")) (+ n 1)))
+                ((null? (first s))
+                  (do (when (null? (File type (rest s))) (Err raise 'sftp (Str8 append "stat local \"" (rest s) "\": No such file or directory") ()))
+                      (+ n (%scp-up-one c (rest s) (if into (%join tgt (%base (rest s))) tgt) preserve recursive))))
+                (#t
+                  (do (unless (if (null? (%ref cells 1)) #f (str=? (%ref cells 2) (Str8 join " " (first s))))
+                        (do (unless (null? (%ref cells 1)) (%scp-close (%ref cells 1)))
+                            (%set cells 1 ()) (%set cells 1 (%scp-open (first s))) (%set cells 2 (Str8 join " " (first s)))))
+                      (def from-c (first (%ref cells 1)))
+                      (def src (rest s))
+                      (def found (List filter (fn (_ f) (not (null? (rest f))))
+                                   (List map (fn (_ p) (pair p (%stat? from-c p))) (guard (e ()) (%remote-glob from-c src)))))
+                      (if (null? found)
+                        (do (%scp-say (Str8 append (if (str=? src "") "." src) ": No such file or directory")) (+ n 1))
+                        (List fold (fn (_ k f) (+ k (%scp-cross-one c from-c (first f) (if into (%join tgt (%base (first f))) tgt) (rest f) preserve recursive)))
+                          n found))))))
+            0 sources))
+        (if (= errs 0) 0 1)))
+    (unless (null? (%ref cells 1)) (%scp-close (%ref cells 1)))
+    (unless (null? (%ref cells 0)) (%scp-close (%ref cells 0)))
+    status))
+
+(provide ssh/sftp-client ssh-sftp-client ssh-sftp-destination ssh-sftp-scp ssh-sftp-scp3)

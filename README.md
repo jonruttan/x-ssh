@@ -103,10 +103,11 @@ nistp521), for host keys and user keys, at either end.
   scp (`-s`), or in the original protocol (`-O`).  As the client it
   spawns the ssh program (`-S`, default `ssh`) with OpenSSH's options and
   passes on `-P`, `-i`, `-o`, `-F` and `-v`, `-r` walking directories
-  and `-p` sending times; over SFTP it asks for the sftp subsystem and
-  says each failure in OpenSSH's words.  As the remote end (`-t`, `-f`,
-  `-d`) it is what an OpenSSH `scp -O` reaches; OpenSSH's scp without
-  `-O` reaches the SFTP server.
+  and `-p` sending times; a copy between two remote hosts is carried
+  through this one (`-3`, the default).  Over SFTP it asks for the sftp
+  subsystem and says each failure in OpenSSH's words.  As the remote end
+  (`-t`, `-f`, `-d`) it is what an OpenSSH `scp -O` reaches; OpenSSH's
+  scp without `-O` reaches the SFTP server.
 - `sftp`: SFTP version 3 from the client's end, as OpenSSH's sftp: the
   ssh program (`-S`, default `ssh`) spawned with OpenSSH's options and
   `-P`, `-i`, `-o`, `-F`, `-v` passed on, its subsystem `-s` (default
@@ -127,9 +128,8 @@ nistp521), for host keys and user keys, at either end.
   a file; `-e`, `-f` and `-l` are taken, and nothing is logged.
 - `-V` on each, and `--help` from its option declaration.
 
-Not served yet: other ciphers, agents, copies between two remote hosts
-(`-3`), terminal modes from pty-req, other users than the one a
-server runs as.
+Not served yet: other ciphers, agents, terminal modes from pty-req, other
+users than the one a server runs as.
 
 The oracles in `tests/oracle/` are the live tests: `client.sh` drives
 the client against a built Dropbear, `server.sh` drives the server with

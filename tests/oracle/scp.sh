@@ -16,6 +16,8 @@
 #              the time at the sink
 #   sftp       x-ssh's scp over SFTP, its default, to and from x-ssh's sshd's
 #              internal-sftp: files, -p, -r, and OpenSSH's refusals
+#   three      between two remote hosts through this one, both x-ssh's
+#              server: over SFTP, and in the classic protocol (-O)
 set -u
 db=${1:?a built Dropbear directory}
 port=${2:-22422}
@@ -186,6 +188,24 @@ if [ "$fstatus" = 1 ] && [ "$flat" = 0 ] && [ ! -e "$fx/sremote/flat" ] && [ "$m
 	echo "ok: sftp -- a directory without -r and a missing source refused in OpenSSH's words"
 else
 	fail "sftp: refusals, status $fstatus and $mstatus"
+fi
+
+
+# three: a copy between two remote hosts, through this one, as OpenSSH's
+# scp makes it by default -- both ends x-ssh's server: over SFTP, a file
+# and a tree, and in the classic protocol, x-ssh's scp -f relayed to its
+# scp -t
+mkdir -p "$fx/three"
+if sscp "$user@127.0.0.1:$fx/a" "$user@127.0.0.1:$fx/three/a" && cmp -s "$fx/a" "$fx/three/a" \
+	&& sscp -r "$user@127.0.0.1:$fx/tree" "$user@127.0.0.1:$fx/three" && diff -r "$fx/tree" "$fx/three/tree" > /dev/null; then
+	echo "ok: three -- a file and a tree between two remote hosts over SFTP"
+else
+	fail "three: over SFTP"
+fi
+if sscp -O "$user@127.0.0.1:$fx/b" "$user@127.0.0.1:$fx/three/b" && cmp -s "$fx/b" "$fx/three/b"; then
+	echo "ok: three -- a file between two remote hosts in the classic protocol"
+else
+	fail "three: classic"
 fi
 
 exit $failed

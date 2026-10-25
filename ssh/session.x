@@ -139,9 +139,10 @@
 ; the order asked, 8 the environment sent, 9 the terminal asked for, as
 ; (TERM WINDOW), WINDOW a function answering (COLUMNS . ROWS), or (), 10
 ; the window last sent, 11 where the escape character stands: 1 at a
-; line's start, 2 just after a tilde there, 0 elsewhere.
+; line's start, 2 just after a tilde there, 0 elsewhere, 12 the agent's
+; socket forwarded, or ().
 (def %CHANNELS 1) (def %NEXT 2) (def %MOVED 3) (def %LISTENERS 4) (def %SESSION 5)
-(def %REMOTES 6) (def %UNANSWERED 7) (def %ENV 8) (def %TTY 9) (def %SIZE 10) (def %ESC 11)
+(def %REMOTES 6) (def %UNANSWERED 7) (def %ENV 8) (def %TTY 9) (def %SIZE 10) (def %ESC 11) (def %AGENT 12)
 (def %rn (fn (_ run i) (%oref run i)))
 (def %rn! (fn (_ run i v) (%oset! run i v)))
 
@@ -261,23 +262,28 @@
                               " -> " (List ref 2 r) ":" (%num (List ref 3 r)) ")\n")))))))
 
 ; A channel the server opens: a forwarded-tcpip for a remote forward's
-; port, connected here to the forward's host and port and confirmed; any
-; other, or a connect that fails, refused.
+; port, connected here to the forward's host and port, or an
+; auth-agent@openssh.com, connected to the agent forwarded, and
+; confirmed; any other, or a connect that fails, refused.
 (def %opened!
   (fn (_ c run in)
     (def type (ssh-get-text in))
     (def sender (ssh-get-uint32 in))
     (def window (ssh-get-uint32 in))
     (def max (ssh-get-uint32 in))
+    (def agent? (if (str=? type "auth-agent@openssh.com") (not (null? (%rn run %AGENT))) #f))
     (def port (if (str=? type "forwarded-tcpip") (do (ssh-get-text in) (ssh-get-uint32 in)) ()))
     (def remote (if (null? port) () (List find (fn (_ r) (= (List ref 1 r) port)) (%rn run %REMOTES))))
-    (def fd (if (null? remote) ()
-              (guard (e ()) (Socket tcp-connect (%address (List ref 2 remote)) (List ref 3 remote)))))
+    (def fd (match
+              (agent? (guard (e ()) (Socket unix-connect (%rn run %AGENT))))
+              ((null? remote) ())
+              (#t (guard (e ()) (Socket tcp-connect (%address (List ref 2 remote)) (List ref 3 remote))))))
+    (def asked (if agent? #t (not (null? remote))))
     (if (null? fd)
       (do (def no (%packet-of %msg-channel-open-failure))
           (ssh-put-uint32 no sender)
-          (ssh-put-uint32 no (if (null? remote) 1 2))
-          (ssh-put-text no (if (null? remote) (Str8 append "unrequested channel: " type) "connect failed"))
+          (ssh-put-uint32 no (if asked 2 1))
+          (ssh-put-text no (if asked "connect failed" (Str8 append "unrequested channel: " type)))
           (ssh-put-text no "")
           (%send c no))
       (do (def ch (%forward-channel! run fd))
@@ -412,7 +418,14 @@
             (%ch! ch %WINDOW (ssh-get-uint32 in))
             (%ch! ch %MAX (ssh-get-uint32 in))
             (when (eq? (%ch ch %KIND) (lit session))
-              (do ; the environment first, each variable a request
+              (do ; the agent forwarded first, as OpenSSH asks, wanting no answer
+                  (unless (null? (%rn run %AGENT))
+                    (do (def a (%packet-of %msg-channel-request))
+                        (ssh-put-uint32 a (%ch ch %SERVER))
+                        (ssh-put-text a "auth-agent-req@openssh.com")
+                        (ssh-put-bool a #f)
+                        (%send c a)))
+                  ; then the environment, each variable a request
                   ; wanting no answer: a server may refuse any of them
                   (List for-each
                     (fn (_ v)
@@ -512,17 +525,18 @@
 ; remote (ADDRESS PORT HOST PORT) asked of the server, ADDRESS () for
 ; every one, the connections it opens carried to HOST:PORT from here;
 ; and netcat (HOST . PORT) or (), -W's: a direct-tcpip channel to
-; HOST:PORT whose two ways are input and on-out, in a session's place.
+; HOST:PORT whose two ways are input and on-out, in a session's place;
+; and agent, the agent socket forwarded to the session, or ().
 ; Runs until the session channel closes, or, with no command, until the
 ; connection ends.  Answers the exit status, or () when the server gave
 ; none.
 (def ssh-session-run!
-  (fn (_ c command input on-out on-err forwards remotes netcat limits env tty)
-    (def run (Vector make 11 ()))
+  (fn (_ c command input on-out on-err forwards remotes netcat limits env tty agent)
+    (def run (Vector make 12 ()))
     (%clocks-start!)
     (%rn! run %CHANNELS ()) (%rn! run %NEXT 0) (%rn! run %MOVED 0)
     (%rn! run %REMOTES remotes) (%rn! run %UNANSWERED ()) (%rn! run %ENV env)
-    (%rn! run %TTY tty) (%rn! run %SIZE (if (null? tty) () ((List ref 1 tty)))) (%rn! run %ESC 1)
+    (%rn! run %TTY tty) (%rn! run %SIZE (if (null? tty) () ((List ref 1 tty)))) (%rn! run %ESC 1) (%rn! run %AGENT agent)
     (%rn! run %LISTENERS
       (List map (fn (_ f) (list (if (null? (first f)) (Socket tcp-listen (List ref 1 f))
                                   (Socket tcp-listen-on (first f) (List ref 1 f)))

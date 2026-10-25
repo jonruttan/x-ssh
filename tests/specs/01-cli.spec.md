@@ -114,6 +114,14 @@ Run 'x -l ssh -- <program>' with one of these programs:
 ---
     ('exec "h" "sftp" ("SessionType subsystem") () () #f)
 
+### -A and -a forward the agent and do not
+
+```ssh
+(write (List map (fn (_ f) (List ref 3 (first (rest (ssh-plan (list "ssh" f "h")))))) (list "-A" "-a")))
+```
+---
+    (("ForwardAgent yes") ("ForwardAgent no"))
+
 ## the server
 
 ### its flags become configuration lines ahead of the file's; -d is debug, foreground and standard error

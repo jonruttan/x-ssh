@@ -14,6 +14,10 @@
 #   login    x-ssh's client and OpenSSH's logging in to a Dropbear with
 #            no key file, the key in x-ssh's agent; x-ssh's client with
 #            OpenSSH's agent
+#   forward  -A: x-ssh's client to a Dropbear and to x-ssh's server, OpenSSH's
+#            to x-ssh's, OpenSSH's ssh-add there finding the key; -a, and
+#            AllowAgentForwarding no, give the session no agent; the
+#            server's socket gone with the session
 set -u
 db=${1:?a built Dropbear directory}
 port=${2:-22432}
@@ -29,7 +33,9 @@ kill_tree() {
 dbpid=
 xpid=
 opid=
-trap 'kill $dbpid $opid 2>/dev/null; kill_tree $xpid; rm -rf "$fx"' EXIT
+xdpid=
+ndpid=
+trap 'kill $dbpid $opid 2>/dev/null; kill_tree $xpid; kill_tree $xdpid; kill_tree $ndpid; rm -rf "$fx"' EXIT
 mkdir -p "$fx/home/.ssh" "$fx/bin"
 # socket paths relative to $fx: a temporary directory's absolute one can
 # pass the 104 bytes a unix-domain socket's path holds
@@ -163,17 +169,50 @@ user=$(id -un)
 SSH_AUTH_SOCK=x.sock ssh-add -q k1
 SSH_AUTH_SOCK=o.sock ssh-add -q k1
 xssh() { HOME=$fx/home "$X" -l ssh -- ssh -F none -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-	-o IdentityFile=none -o PasswordAuthentication=no -o LogLevel=ERROR -p "$port" "$@"; }
+	-o IdentityFile=none -o PasswordAuthentication=no -o LogLevel=ERROR "$@"; }
 ossh() { HOME=$fx/home ssh -F none -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-	-o IdentityFile=none -o PasswordAuthentication=no -o LogLevel=ERROR -p "$port" "$@"; }
+	-o IdentityFile=none -o PasswordAuthentication=no -o LogLevel=ERROR "$@"; }
 for who in "xssh x" "xssh o" "ossh x"; do
 	set -- $who
-	out=$(SSH_AUTH_SOCK=$2.sock $1 "$user@127.0.0.1" echo in 2> err)
+	out=$(SSH_AUTH_SOCK=$2.sock $1 -p "$port" "$user@127.0.0.1" echo in 2> err)
 	[ "$out" = in ] || fail "login: $1 with the $2 agent"
 done
 # no agent: the key is not there to offer
 out=$(env -u SSH_AUTH_SOCK sh -c "HOME=$fx/home \"$X\" -l ssh -- ssh -F none -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o IdentityFile=none -o PasswordAuthentication=no -o BatchMode=yes -p $port $user@127.0.0.1 echo in" 2> err)
 [ -z "$out" ] || fail "login: in with no agent"
 [ $failed = 0 ] && echo "ok: login"
+
+
+# --- forward -------------------------------------------------------------------
+
+# x-ssh's server, its agent forwarding on and off
+xport=$((port + 1))
+nport=$((port + 2))
+env -u SSH_AUTH_SOCK "$X" -l ssh -- sshd -D -e -f /dev/null -h hostkey -o ListenAddress=127.0.0.1 -p "$xport" \
+	-o AuthorizedKeysFile="$fx/authorized_keys" -o PidFile=none > xserver.log 2>&1 &
+xdpid=$!
+env -u SSH_AUTH_SOCK "$X" -l ssh -- sshd -D -e -f /dev/null -h hostkey -o ListenAddress=127.0.0.1 -p "$nport" \
+	-o AuthorizedKeysFile="$fx/authorized_keys" -o PidFile=none -o AllowAgentForwarding=no > nserver.log 2>&1 &
+ndpid=$!
+i=0
+while ! nc -z 127.0.0.1 "$nport" 2> /dev/null && [ $i -lt 300 ]; do sleep 0.2; i=$((i + 1)); done
+# the remote end: the socket it was given, and what OpenSSH's ssh-add finds there
+remote='printf "%s\n" "${SSH_AUTH_SOCK:-none}"; ssh-add -l 2>&1 | cut -d" " -f3-'
+for case in "xssh x $port -A" "xssh o $xport -A" "ossh x $xport -A" "xssh x $xport -a" "xssh x $nport -A"; do
+	set -- $case
+	out=$(SSH_AUTH_SOCK=$2.sock $1 -p "$3" $4 "$user@127.0.0.1" "$remote" 2> err)
+	sock=$(echo "$out" | sed -n 1p)
+	keys=$(echo "$out" | sed -n 2p)
+	case "$4:$3" in
+	-a:*|*:$nport) [ "$sock" = none ] || fail "forward: $case gave the agent" ;;
+	*)	[ "$keys" = "first-key (ED25519)" ] || fail "forward: $case: $out"
+		i=0
+		while [ "$3" != "$port" ] && [ -e "$sock" ] && [ $i -lt 30 ]; do sleep 0.1; i=$((i + 1)); done
+		[ "$3" = "$port" ] || [ ! -e "$sock" ] || fail "forward: $case left $sock" ;;
+	esac
+done
+kill_tree $xdpid
+kill_tree $ndpid
+[ $failed = 0 ] && echo "ok: forward"
 
 exit $failed

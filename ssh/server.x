@@ -30,7 +30,7 @@
 (import x/codec/base64)
 (import ssh/bytes ssh-out ssh-put-byte ssh-put-bool ssh-put-uint32 ssh-put-text ssh-put-string ssh-put-bytes ssh-put-names ssh-out-run
   ssh-in ssh-in-buf ssh-get-byte ssh-get-bool ssh-get-uint32 ssh-get-string ssh-get-bytes ssh-get-text ssh-copy)
-(import ssh/transport ssh-open ssh-fd ssh-session-id ssh-pending? ssh-engines! ssh-exchange-versions! ssh-kex-server!
+(import ssh/transport ssh-open ssh-fd ssh-session-id ssh-pending? ssh-engines! ssh-exchange-versions! ssh-kex-server! ssh-random
   ssh-send-packet! ssh-next-packet! ssh-expect! ssh-msg-service-request ssh-msg-service-accept
   ssh-msg-userauth-request ssh-msg-userauth-failure ssh-msg-userauth-success ssh-msg-disconnect
   ssh-msg-global-request ssh-msg-request-success ssh-msg-request-failure)
@@ -293,6 +293,7 @@
           (pair (lit tcp) ((fn (_ v) (if (%yes? lines "disableforwarding" #f) "no" (if (str=? v "yes") "all" v)))
                             (%choice lines "allowtcpforwarding" (list "yes" "all" "no" "local" "remote") "yes")))
           (pair (lit gateway) (%choice lines "gatewayports" (list "no" "yes" "clientspecified") "no"))
+          (pair (lit agent) (if (%yes? lines "disableforwarding" #f) #f (%yes? lines "allowagentforwarding" #t)))
           (pair (lit limits) (list (%seconds lines "clientaliveinterval" 0) (%count lines "clientalivecountmax" 3) (%channel-timeout lines)))
           (pair (lit facility) (%choice lines "syslogfacility"
                                  (list "daemon" "user" "auth" "authpriv" "local0" "local1" "local2" "local3" "local4" "local5" "local6" "local7") "auth"))
@@ -663,9 +664,12 @@
 ; forwards are served, 7 GatewayPorts, as the settings spell it, 8 the
 ; listeners as (FD ADDRESS PORT), ADDRESS as the client asked, 9
 ; AcceptEnv's patterns, 10 the variables the client sent that they
-; accept, as (NAME . VALUE).
+; accept, as (NAME . VALUE), 11 the Subsystem lines, 12 whether
+; AllowAgentForwarding serves the client's agent, 13 the forwarded
+; agent's socket as (FD PATH DIRECTORY), or ().
 (def %CHANNELS 1) (def %NEXT 2) (def %MOVED 3) (def %FORWARDING 4) (def %SESSION 5)
 (def %REMOTE 6) (def %GATEWAY 7) (def %LISTENERS 8) (def %ACCEPT 9) (def %ENV 10) (def %SUBSYSTEMS 11)
+(def %AGENT-OK 12) (def %AGENT 13)
 (def %rn (fn (_ run i) (%oref run i)))
 (def %rn! (fn (_ run i v) (%oset! run i v)))
 (def %min (fn (_ a b) (if (< a b) a b)))
@@ -814,6 +818,48 @@
     (ssh-put-uint32 open (rest peer))
     (%send c open)))
 
+; The client's agent forwarded, as OpenSSH's sshd forwards it: a socket
+; agent.PID in a private directory /tmp/ssh-XXXXXXXXXX, SSH_AUTH_SOCK to
+; the session's command, each connection to it an auth-agent@openssh.com
+; channel to the client.  Whether it listens.
+(def %letters "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
+(def %agent-listen!
+  (fn (_ run)
+    (def r (ssh-random 10))
+    (def dir ((fn (self i acc) (if (= i 10) acc (self (+ i 1) (Str8 append acc (Str8 sub (% (%byte r i) 62) 1 %letters)))))
+              0 "/tmp/ssh-"))
+    (def path (Str8 append dir "/agent." (%num (Sys getpid))))
+    (def fd (guard (e ()) (File mkdir dir 448) (Socket unix-listen path)))
+    (unless (null? fd)
+      (do (File chmod path 384)
+          (%rn! run %AGENT (list fd path dir))
+          (%rn! run %ENV (List append (%rn run %ENV) (list (pair "SSH_AUTH_SOCK" path))))
+          (%debug (Str8 append "agent forwarding on " path))))
+    (not (null? fd))))
+
+; The forwarded agent's socket and directory removed.
+(def %agent-gone!
+  (fn (_ run)
+    (def a (%rn run %AGENT))
+    (unless (null? a)
+      (do (guard (e ()) (Socket close (first a)))
+          (File unlink (List ref 1 a))
+          (File rmdir (List ref 2 a))
+          (%rn! run %AGENT ())))))
+
+; A connection to the forwarded agent's socket opened to the client as an
+; auth-agent@openssh.com channel, the connection its two ways.
+(def %open-agent!
+  (fn (_ c run fd)
+    (def ch (%channel! run (lit forward) () 0 32768))
+    (%ch! ch %FD fd)
+    (def open (%packet-of %msg-channel-open))
+    (ssh-put-text open "auth-agent@openssh.com")
+    (ssh-put-uint32 open (%ch ch %OURS))
+    (ssh-put-uint32 open %window)
+    (ssh-put-uint32 open %max-packet)
+    (%send c open)))
+
 ; One read of a session's output or error, or of a forward's connection,
 ; sent as the channel's data; a read of nothing is its end: a session's
 ; pipe closes, a forward's far end has no more, so EOF goes, and CLOSE
@@ -958,6 +1004,9 @@
                     (def ok (ssh-config-patterns? (%rn run %ACCEPT) var))
                     (when ok (%rn! run %ENV (List append (%rn run %ENV) (list (pair var value)))))
                     (%reply c ch want-reply ok)))
+              ; the client's agent, once, when AllowAgentForwarding serves it
+              ((if fresh (str=? name "auth-agent-req@openssh.com") #f)
+                (%reply c ch want-reply (if (if (%rn run %AGENT-OK) (null? (%rn run %AGENT)) #f) (%agent-listen! run) #f)))
               (#t (%reply c ch want-reply #f)))))
       ((= t %msg-channel-window-adjust)
         (%ch! ch %WINDOW (+ (%ch ch %WINDOW) (ssh-get-uint32 in))))
@@ -1005,7 +1054,7 @@
 ; GatewayPorts, AcceptEnv and the clocks.
 (def %serve-session
   (fn (_ c sock s)
-    (def run (Vector make 11 ()))
+    (def run (Vector make 13 ()))
     (def tcp (%get s (lit tcp)))
     (def limits (%get s (lit limits)))
     (%clocks-start!)
@@ -1014,42 +1063,49 @@
     (%rn! run %REMOTE (if (str=? tcp "all") #t (str=? tcp "remote"))) (%rn! run %GATEWAY (%get s (lit gateway)))
     (%rn! run %LISTENERS ()) (%rn! run %ACCEPT (%get s (lit accept))) (%rn! run %ENV ())
     (%rn! run %SUBSYSTEMS (%get s (lit subsystems)))
-    ((fn (self)
-       (def session (%rn run %SESSION))
-       (unless (if (null? session) #f
-                 (if (%ch session %PEER-CLOSED) (if (%ch session %CLOSED) (null? (%forwards run)) #f) #f))
-         (do (def child (if (null? session) () (%ch session %CHILD)))
-             (def room (if (null? session) #f (> (%ch session %WINDOW) 0)))
-             (def out (if (if room (%ch session %OUT) #f) (List ref 2 child) ()))
-             (def err (if (if room (%ch session %ERR) #f) (List ref 3 child) ()))
-             (def open-forwards
-               (List filter (fn (_ ch) (if (null? (%ch ch %PEER)) #f (if (%ch ch %CLOSED) #f (if (%ch ch %OUT) (> (%ch ch %WINDOW) 0) #f))))
-                 (%forwards run)))
-             (if (ssh-pending? c)
-               (%handle! c run sock)
-               (do (def ready
-                     (Sys poll (List append (list (pair sock (list (lit in))))
-                                            (if (null? out) () (list (pair out (list (lit in)))))
-                                            (if (null? err) () (list (pair err (list (lit in)))))
-                                            (List map (fn (_ l) (pair (first l) (list (lit in)))) (%rn run %LISTENERS))
-                                            (List map (fn (_ ch) (pair (%ch ch %FD) (list (lit in)))) open-forwards))
-                               (%wait-ms limits)))
-                   (when (if (null? out) #f (%ready? ready out)) (%pump! c run session out %OUT #f))
-                   (when (if (null? err) #f (%ready? ready err)) (%pump! c run session err %ERR #t))
-                   (List for-each
-                     (fn (_ l) (when (%ready? ready (first l))
-                                 (%open-forwarded! c run (Socket accept (first l)) (List ref 1 l) (List ref 2 l))))
-                     (%rn run %LISTENERS))
-                   (List for-each
-                     (fn (_ ch) (when (%ready? ready (%ch ch %FD)) (%pump! c run ch (%ch ch %FD) %FD #f)))
-                     open-forwards)
-                   (when (%ready? ready sock) (%handle! c run sock))
-                   (%clocks! c limits)))
-             (when (if (null? child) #f
-                     (if (%ch session %CLOSED) #f (if (%ch session %OUT) #f (not (%ch session %ERR)))))
-               (%debug (Str8 append "exit status " (%num (%finish! c session)))))
-             (when (> (%rn run %MOVED) %chunk) (do (Heap collect) (%rn! run %MOVED 0)))
-             (self)))))))
+    (%rn! run %AGENT-OK (%get s (lit agent))) (%rn! run %AGENT ())
+    ; the forwarded agent's socket goes however the connection ends
+    (guard (e (do (%agent-gone! run) (error e)))
+      ((fn (self)
+         (def session (%rn run %SESSION))
+         (unless (if (null? session) #f
+                   (if (%ch session %PEER-CLOSED) (if (%ch session %CLOSED) (null? (%forwards run)) #f) #f))
+           (do (def child (if (null? session) () (%ch session %CHILD)))
+               (def room (if (null? session) #f (> (%ch session %WINDOW) 0)))
+               (def out (if (if room (%ch session %OUT) #f) (List ref 2 child) ()))
+               (def err (if (if room (%ch session %ERR) #f) (List ref 3 child) ()))
+               (def open-forwards
+                 (List filter (fn (_ ch) (if (null? (%ch ch %PEER)) #f (if (%ch ch %CLOSED) #f (if (%ch ch %OUT) (> (%ch ch %WINDOW) 0) #f))))
+                   (%forwards run)))
+               (if (ssh-pending? c)
+                 (%handle! c run sock)
+                 (do (def ready
+                       (Sys poll (List append (list (pair sock (list (lit in))))
+                                              (if (null? out) () (list (pair out (list (lit in)))))
+                                              (if (null? err) () (list (pair err (list (lit in)))))
+                                              (List map (fn (_ l) (pair (first l) (list (lit in)))) (%rn run %LISTENERS))
+                                              (if (null? (%rn run %AGENT)) () (list (pair (first (%rn run %AGENT)) (list (lit in)))))
+                                              (List map (fn (_ ch) (pair (%ch ch %FD) (list (lit in)))) open-forwards))
+                                 (%wait-ms limits)))
+                     (when (if (null? out) #f (%ready? ready out)) (%pump! c run session out %OUT #f))
+                     (when (if (null? err) #f (%ready? ready err)) (%pump! c run session err %ERR #t))
+                     (List for-each
+                       (fn (_ l) (when (%ready? ready (first l))
+                                   (%open-forwarded! c run (Socket accept (first l)) (List ref 1 l) (List ref 2 l))))
+                       (%rn run %LISTENERS))
+                     (List for-each
+                       (fn (_ ch) (when (%ready? ready (%ch ch %FD)) (%pump! c run ch (%ch ch %FD) %FD #f)))
+                       open-forwards)
+                     (when (if (null? (%rn run %AGENT)) #f (%ready? ready (first (%rn run %AGENT))))
+                       ((fn (_ fd) (unless (null? fd) (%open-agent! c run fd))) (guard (e ()) (Socket accept (first (%rn run %AGENT))))))
+                     (when (%ready? ready sock) (%handle! c run sock))
+                     (%clocks! c limits)))
+               (when (if (null? child) #f
+                       (if (%ch session %CLOSED) #f (if (%ch session %OUT) #f (not (%ch session %ERR)))))
+                 (%debug (Str8 append "exit status " (%num (%finish! c session)))))
+               (when (> (%rn run %MOVED) %chunk) (do (Heap collect) (%rn! run %MOVED 0)))
+               (self))))))
+    (%agent-gone! run)))
 
 ; --- the listener ----------------------------------------------------------
 

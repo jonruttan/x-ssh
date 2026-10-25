@@ -42,14 +42,16 @@ nistp521), for host keys and user keys, at either end.
   `Match` blocks and `Include`.  Each flag stands for its keyword: `-p`
   Port, `-l` User, `-i` IdentityFile, `-L` LocalForward, `-R`
   RemoteForward, `-g` GatewayPorts, `-N` SessionType none, `-s` SessionType
-  subsystem (the command its name), `-n` StdinNull,
+  subsystem (the command its name), `-n` StdinNull, `-A` and `-a`
+  ForwardAgent,
   `-q` and `-v` LogLevel; `-W host:port` carries standard input and
   output through the server, as a ProxyCommand wants; `-G` prints the
   settings in force.  Served keywords: Hostname, Port, User,
   IdentityFile (`~/.ssh/id_rsa`, `id_ecdsa` and `id_ed25519` by default;
   OpenSSH's or Dropbear's key files, a key under a passphrase among
   them), IdentityAgent (SSH_AUTH_SOCK by default; the agent's keys
-  offered first, as OpenSSH orders them), IdentitiesOnly,
+  offered first, as OpenSSH orders them), IdentitiesOnly, ForwardAgent
+  (yes for IdentityAgent's socket, or a socket of its own),
   StrictHostKeyChecking,
   UserKnownHostsFile,
   GlobalKnownHostsFile, HostKeyAlias, BatchMode, PasswordAuthentication,
@@ -74,7 +76,9 @@ nistp521), for host keys and user keys, at either end.
   `/etc/shadow` with crypt(3)'s
   DES, `$1$`, `$5$` or `$6$`), PubkeyAuthentication,
   PermitEmptyPasswords, PermitRootLogin, MaxAuthTries,
-  AllowTcpForwarding, DisableForwarding, GatewayPorts,
+  AllowTcpForwarding, AllowAgentForwarding (the session's SSH_AUTH_SOCK
+  a socket in a private /tmp/ssh-* directory, each connection to it
+  carried to the client's agent), DisableForwarding, GatewayPorts,
   ClientAliveInterval, ClientAliveCountMax, ChannelTimeout (`global=`),
   AcceptEnv, Subsystem (`internal-sftp`, served in a child of the
   server, or a command run under the user's shell), SyslogFacility,
@@ -145,13 +149,13 @@ nistp521), for host keys and user keys, at either end.
   with either.
 - `-V` on each, and `--help` from its option declaration.
 
-Not served yet: other ciphers, agent forwarding, terminal modes from pty-req, other
+Not served yet: other ciphers, terminal modes from pty-req, other
 users than the one a server runs as.
 
 The oracles in `tests/oracle/` are the live tests: `client.sh` drives
 the client against a built Dropbear, `server.sh` drives the server with
 Dropbear's and OpenSSH's clients, `scp.sh` runs scp from either end, and
-`agent.sh` pairs ssh-agent and ssh-add with OpenSSH's.
+`agent.sh` pairs ssh-agent and ssh-add with OpenSSH's and forwards the agent.
 Each takes a built Dropbear's directory.
 
 `tests/linux/run.sh` is the Linux leg: password logins, which want a

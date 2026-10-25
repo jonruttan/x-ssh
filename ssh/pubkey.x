@@ -156,10 +156,17 @@
 ; A signature blob by an identity over data's region, with alg -- one of
 ; (ssh-pubkey-algorithms of its key) -- as a region: string alg, string the
 ; signature (RFC 8332 3; RFC 5656 3.1.2, mpint r and mpint s within).
+; A SECRET (agent . SIGNER) is an agent's key: SIGNER signs, as the agent
+; is asked to.
 (def ssh-identity-sign
   (fn (_ id data alg)
     (def key (first id))
     (def secret (List ref 1 id))
+    (if (if (pair? secret) (eq? (first secret) (lit agent)) #f) ((rest secret) data alg)
+      (%sign key secret data alg))))
+
+(def %sign
+  (fn (_ key secret data alg)
     (def out (ssh-out))
     (ssh-put-text out alg)
     (match

@@ -29,7 +29,8 @@
 (import ssh/keys ssh-key-file-sealed? ssh-key-wrong-passphrase ssh-identity-read-file ssh-pubkey-of-key-file)
 (import ssh/known ssh-known-name ssh-known-check ssh-known-types ssh-known-add!)
 (import ssh/keygen ssh-blob-fingerprint)
-(import ssh/pubkey ssh-pubkey-blob ssh-pubkey-label ssh-pubkey-algorithms)
+(import ssh/pubkey ssh-pubkey-blob ssh-pubkey-label ssh-pubkey-algorithms ssh-pubkey-base64)
+(import ssh/agent ssh-agent-connect ssh-agent-identities ssh-agent-identity)
 (import ssh/config ssh-config-read ssh-config-options ssh-config-first ssh-config-all ssh-config-faults
   ssh-config-tilde ssh-config-time ssh-config-patterns? ssh-config-ssh-keywords)
 
@@ -169,6 +170,16 @@
       (list (match ((not given) (if gateway () "localhost")) ((if (str=? given "*") #t (str=? given "")) ()) (#t given))
             lport (List ref (- n 2) parts) rport))))
 
+; IdentityAgent's socket: none for (), SSH_AUTH_SOCK or $NAME for the
+; variable's value, a path otherwise, its tokens and ~ expanded.
+(def %agent-socket
+  (fn (_ v path)
+    (def env (fn (_ name) ((fn (_ p) (if (if (null? p) #t (= (Str8 length p) 0)) () p)) (Sys getenv name))))
+    (match ((str=? (Str8 downcase v) "none") ())
+           ((str=? v "SSH_AUTH_SOCK") (env v))
+           ((if (> (Str8 length v) 1) (= (%byte-ref v 0) #\$) #f) (env (Str8 sub 1 (- (Str8 length v) 1) v)))
+           (#t (path v)))))
+
 ; The settings in force, from the lines in order, for host as named on
 ; the command line: an alist.  Raises a label 'value Err whose message is
 ; OpenSSH's for a value it would refuse.
@@ -201,6 +212,8 @@
           (pair (lit alias) (%one lines "hostkeyalias" ()))
           (pair (lit batch) (%yes? lines "batchmode" #f))
           (pair (lit password) (%yes? lines "passwordauthentication" #t))
+          (pair (lit agent) (%agent-socket (%one lines "identityagent" "SSH_AUTH_SOCK") path))
+          (pair (lit identities-only) (%yes? lines "identitiesonly" #f))
           (pair (lit pubkey) (not (str=? (%choice lines "pubkeyauthentication" (list "yes" "no" "unbound" "host-bound") "yes") "no")))
           (pair (lit prompts) (%count lines "numberofpasswordprompts" 3))
           (pair (lit limits) (list (%seconds lines "serveraliveinterval" 0) (%count lines "serveralivecountmax" 3) (%channel-timeout lines)))
@@ -341,22 +354,55 @@
 ; named but missing is warned of, the default ones passed over quietly.
 ; A key sealed under a passphrase is read for its public half alone, its
 ; ID (), and opened only when the server would take it.
+;
+; The agent's keys come first, as OpenSSH's pubkey_prepare orders them:
+; each in the agent's order, a file's key taking the agent's place with
+; the file's path, the agent's others passed over under IdentitiesOnly;
+; then the files whose keys the agent lacks.
 (def %identities
   (fn (_ s quiet tr)
     (if (not (%get s (lit pubkey))) ()
-      (List flat-map
-        (fn (_ i)
-          (match
-            ((not (File exists? (first i)))
-              (do (when (if (rest i) (not quiet) #f)
-                    (%say 2 (Str8 append "Warning: Identity file " (first i) " not accessible: No such file or directory.\n")))
-                  ()))
-            (#t (guard (e (do (%say 2 (Str8 append "Load key \"" (first i) "\": " (%message e) "\n")) ()))
-                  (def key (ssh-pubkey-of-key-file (first i)))
-                  (def id (if (ssh-key-file-sealed? (first i)) () (ssh-identity-read-file (first i) "")))
-                  (unless (null? tr) (tr (Str8 append "Will attempt key: " (first i) " " (%key-words key))))
-                  (list (list (first i) key id))))))
-        (%get s (lit identities))))))
+      (do (def files
+            (List flat-map
+              (fn (_ i)
+                (match
+                  ((not (File exists? (first i)))
+                    (do (when (if (rest i) (not quiet) #f)
+                          (%say 2 (Str8 append "Warning: Identity file " (first i) " not accessible: No such file or directory.\n")))
+                        ()))
+                  (#t (guard (e (do (%say 2 (Str8 append "Load key \"" (first i) "\": " (%message e) "\n")) ()))
+                        (def key (ssh-pubkey-of-key-file (first i)))
+                        (def id (if (ssh-key-file-sealed? (first i)) () (ssh-identity-read-file (first i) "")))
+                        (list (list (first i) key id))))))
+              (%get s (lit identities))))
+          (def same? (fn (_ a b) (str=? (ssh-pubkey-base64 a) (ssh-pubkey-base64 b))))
+          (def held (%agent-keys s tr))
+          (def from-agent
+            (List flat-map
+              (fn (_ k)
+                (def file (List find (fn (_ f) (same? (List ref 1 f) (first k))) files))
+                (match
+                  ((not (null? file)) (list (list (first file) (first k) (List ref 2 k) #t)))
+                  ((%get s (lit identities-only)) ())
+                  (#t (list (list (List ref 1 k) (first k) (List ref 2 k) #f)))))
+              held))
+          (def rest-files (List filter (fn (_ f) (not (List any? (fn (_ k) (same? (List ref 1 f) (first k))) held))) files))
+          (unless (null? tr)
+            (do (List for-each (fn (_ i) (tr (Str8 append "Will attempt key: " (first i) " " (%key-words (List ref 1 i)) (if (List ref 3 i) " explicit agent" " agent"))))
+                  from-agent)
+                (List for-each (fn (_ i) (tr (Str8 append "Will attempt key: " (first i) " " (%key-words (List ref 1 i))))) rest-files)))
+          (List append (List map (fn (_ i) (List take 3 i)) from-agent) rest-files)))))
+
+; The agent's keys, each (KEY COMMENT ID), ID an identity the agent signs
+; for; () when IdentityAgent names none or it does not answer.
+(def %agent-keys
+  (fn (_ s tr)
+    (def path (%get s (lit agent)))
+    (if (null? path) ()
+      (guard (e (do (unless (null? tr) (tr (Str8 append "get_agent_identities: " (%message e)))) ()))
+        (def fd (ssh-agent-connect path))
+        (List map (fn (_ k) (list (first k) (List ref 1 k) (ssh-agent-identity fd (first k) (List ref 1 k))))
+          (ssh-agent-identities fd))))))
 
 ; A key as -v names it: its label and fingerprint.
 (def %key-words (fn (_ key) (Str8 append (ssh-pubkey-label key) " " (ssh-blob-fingerprint (ssh-pubkey-blob key)))))

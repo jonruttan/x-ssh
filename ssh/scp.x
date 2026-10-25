@@ -32,7 +32,7 @@
 (import x/sys/file)
 (import x/sys/posix)
 (import x/sys/gc)
-(import ssh/sftp-client ssh-sftp-scp)
+(import ssh/sftp-client ssh-sftp-scp ssh-sftp-scp3)
 
 (def %byte-ref (prim-ref (lit str) (lit byte-ref)))
 (def %char->int (prim-ref (lit char) (lit ->int)))
@@ -327,8 +327,9 @@
       (list "--" host command))))
 
 ; The copy over SFTP, OpenSSH's default: the ssh program asked for the
-; sftp subsystem, the sources local and the target remote or the sources
-; remote, one host's, and the target local.
+; sftp subsystem.  To a remote target, the sources local or remote, a
+; remote one's file carried through this host from its server to the
+; target's; from remote sources, one host's, to a local target.
 (def %sftp-copy
   (fn (_ sources target program args preserve recursive)
     (def t (%remote target))
@@ -338,7 +339,8 @@
     (match
       ((not (null? t))
         (if (List any? (fn (_ s) (not (null? s))) ss)
-          (do (%say "scp: copies between two remote hosts are not served yet\n") 1)
+          (ssh-sftp-scp3 (argv t) (List map (fn (_ p) (def r (%remote p)) (if (null? r) (pair () p) (pair (argv r) (List ref 2 r)))) sources)
+                         (List ref 2 t) preserve recursive)
           (ssh-sftp-scp (argv t) sources (List ref 2 t) #t preserve recursive)))
       ((List any? null? ss) (do (%say "scp: a local copy is cp's\n") 1))
       ((List any? (fn (_ s) (not (if (str=? (List ref 1 s) (List ref 1 (first ss)))
@@ -348,6 +350,33 @@
                   ss)
         (do (%say "scp: remote sources on more than one host are not served yet\n") 1))
       (#t (ssh-sftp-scp (argv (first ss)) (List map (fn (_ s) (List ref 2 s)) ss) target #f preserve recursive)))))
+
+; PROGRAM run on the descriptors given as its standard input and output.
+(def %spawn-on
+  (fn (_ argv in out)
+    (def pid (Sys fork))
+    (when (= pid 0)
+      (Sys dup2 in 0) (Sys dup2 out 1)
+      (Sys close in) (Sys close out)
+      (Sys exec (first argv) (rest argv))
+      (Sys exit 127))
+    pid))
+
+; A remote source carried to a remote target in the classic protocol, as
+; OpenSSH's scp -O does through this host: the source's scp -f and the
+; target's scp -t, each on its ssh program, each one's output the other's
+; input; s and t are (USER HOST PATH).  Answers 0, or 1.
+(def %relay
+  (fn (_ program args s t from-flags to-flags)
+    (def a (%spawn (%program-argv program args (first s) (List ref 1 s)
+                     (Str8 append "scp" from-flags " -f " (%quote (List ref 2 s))))))
+    (def b (%spawn-on (%program-argv program (List append args (list "-oBatchMode=yes")) (first t) (List ref 1 t)
+                        (Str8 append "scp" to-flags " -t " (%quote (List ref 2 t))))
+                      (List ref 2 a) (List ref 1 a)))
+    (Sys close (List ref 1 a)) (Sys close (List ref 2 a))
+    (def from (Sys wait (first a)))
+    (def to (Sys wait b))
+    (if (if (= from 0) (= to 0) #f) 0 1)))
 
 ; The copy a client line asks for; answers the exit status.
 (def ssh-scp-client
@@ -359,15 +388,20 @@
     (match
       (sftp (%sftp-copy sources target program args preserve recursive))
       ((not (null? t))
-        (if (List any? (fn (_ s) (not (null? (%remote s)))) sources)
-          (do (%say "scp: copies between two remote hosts are not served yet\n") 1)
-          (do (def kid (%spawn (%program-argv program args (first t) (List ref 1 t)
-                                (Str8 append "scp" flags " -t " (%quote (List ref 2 t))))))
-              (def errs (guard (e 1)
-                          (if (%response (List ref 2 kid)) (%source (List ref 2 kid) (List ref 1 kid) sources preserve recursive) 1)))
-              (Sys close (List ref 1 kid)) (Sys close (List ref 2 kid))
-              (def status (Sys wait (first kid)))
-              (if (if (= errs 0) (= status 0) #f) 0 1))))
+        (do (def locals (List filter (fn (_ s) (null? (%remote s))) sources))
+            (def up
+              (if (null? locals) 0
+                (do (def kid (%spawn (%program-argv program args (first t) (List ref 1 t)
+                                      (Str8 append "scp" flags " -t " (%quote (List ref 2 t))))))
+                    (def errs (guard (e 1)
+                                (if (%response (List ref 2 kid)) (%source (List ref 2 kid) (List ref 1 kid) locals preserve recursive) 1)))
+                    (Sys close (List ref 1 kid)) (Sys close (List ref 2 kid))
+                    (def status (Sys wait (first kid)))
+                    (if (if (= errs 0) (= status 0) #f) 0 1))))
+            (def relayed
+              (List map (fn (_ s) (%relay program args (%remote s) t (Str8 append (if preserve " -p" "") (if recursive " -r" "")) flags))
+                (List filter (fn (_ s) (not (null? (%remote s)))) sources)))
+            (if (List any? (fn (_ r) (not (= r 0))) (pair up relayed)) 1 0)))
       ((not (= (List length sources) 1))
         (do (%say "scp: one remote source at a time, so far\n") 1))
       (#t

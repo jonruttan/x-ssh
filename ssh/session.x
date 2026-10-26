@@ -29,7 +29,8 @@
 (import ssh/bytes ssh-out ssh-put-byte ssh-put-bool ssh-put-uint32 ssh-put-text ssh-put-string ssh-out-run
   ssh-in ssh-get-byte ssh-get-bool ssh-get-uint32 ssh-get-string ssh-get-text ssh-in-buf ssh-copy)
 (import ssh/transport ssh-fd ssh-pending? ssh-send-packet! ssh-next-packet! ssh-msg-disconnect
-  ssh-msg-global-request ssh-msg-request-success ssh-msg-request-failure)
+  ssh-msg-global-request ssh-msg-request-success ssh-msg-request-failure
+  ssh-clock-sent ssh-clock-recv ssh-clock-data ssh-clock-mark! ssh-clocks-start! ssh-wait-ms ssh-clocks!)
 
 (def %byte-ref (prim-ref (lit str) (lit byte-ref)))
 (def %char->int (prim-ref (lit char) (lit ->int)))
@@ -52,7 +53,7 @@
   (fn (_ c out)
     (def r (ssh-out-run out))
     (ssh-send-packet! c (first r) (rest r))
-    (%oset! %clock %SENT (Sys now))))
+    (ssh-clock-mark! ssh-clock-sent)))
 
 (def %packet-of
   (fn (_ type)
@@ -65,59 +66,6 @@
 (def %make-str (prim-ref (lit str) (lit make)))
 (def %str->ptr (prim-ref (lit str) (lit ->ptr)))
 (def %pset1 (prim-ref (lit ptr) (lit set!)))
-
-; The clocks ServerAliveInterval and ChannelTimeout read, seconds since
-; the epoch: 1 the last packet sent, 2 the last received, 3 the last
-; carrying data either way, 4 the last keepalive asked.  A keepalive is
-; asked after the interval without sending or receiving; the connection
-; is given up after ServerAliveCountMax intervals without receiving
-; anything; the global ChannelTimeout without data either way closes
-; it.  One connection a process.
-(def %SENT 1) (def %RECV 2) (def %DATA 3) (def %ASKED 4)
-(def %clock (Vector make 4 0))
-
-(def %clocks-start! (fn (_) (def now (Sys now)) (%oset! %clock %SENT now) (%oset! %clock %RECV now) (%oset! %clock %DATA now) (%oset! %clock %ASKED now)))
-
-; A keepalive asked: OpenSSH's global request, wanting the answer that
-; counts as the other end alive.
-(def %keepalive!
-  (fn (_ c)
-    (def req (%packet-of ssh-msg-global-request))
-    (ssh-put-text req "keepalive@openssh.com")
-    (ssh-put-bool req #t)
-    (%send c req)
-    (%oset! %clock %ASKED (Sys now))))
-
-; How long a wait may last before a clock wants looking at, in
-; milliseconds, or -1 for no limit: limits is (INTERVAL COUNT IDLE), an
-; interval or idle time of 0 for never.
-(def %wait-ms
-  (fn (_ limits)
-    (def now (Sys now))
-    (def k (first limits)) (def n (List ref 1 limits)) (def i (List ref 2 limits))
-    (def dues
-      (List append
-        (if (> k 0) (list (- (+ (%oref %clock %SENT) k) now) (- (+ (%oref %clock %RECV) k) now)
-                          (- (+ (%oref %clock %RECV) (* k n)) now)) ())
-        (if (> i 0) (list (- (+ (%oref %clock %DATA) i) now)) ())))
-    (if (null? dues) -1
-      (do (def least (List fold (fn (_ a b) (if (< a b) a b)) (first dues) (rest dues)))
-          (if (< least 0) 0 (* 1000 least))))))
-
-; The clocks read: a keepalive asked when due, the connection given up
-; or closed when a limit has passed; the error's message names which.
-(def %clocks!
-  (fn (_ c limits)
-    (def now (Sys now))
-    (def k (first limits)) (def n (List ref 1 limits)) (def i (List ref 2 limits))
-    (when (> k 0)
-      (do (when (>= (- now (%oref %clock %RECV)) (* k n))
-            (Err raise 'io "keepalive" ()))
-          (when (if (>= (- now (%oref %clock %SENT)) k) #t
-                  (if (>= (- now (%oref %clock %RECV)) k) (>= (- now (%oref %clock %ASKED)) k) #f))
-            (%keepalive! c))))
-    (when (if (> i 0) (>= (- now (%oref %clock %DATA)) i) #f)
-      (Err raise 'io "idle" ()))))
 
 ; A channel's state, in a vector: 1 our channel number, 2 the server's,
 ; 3 how many bytes it will take from us (its window), 4 the most a packet
@@ -334,7 +282,7 @@
 ; SIGWINCH handler.
 (def %poll-ms
   (fn (_ run limits)
-    (def w (%wait-ms limits))
+    (def w (ssh-wait-ms limits))
     (if (null? (%rn run %TTY)) w (if (if (< w 0) #t (< 500 w)) 500 w))))
 
 ; A terminal's window as it is now, sent as window-change when it moved.
@@ -372,7 +320,7 @@
           (ssh-put-uint32 data (%ch ch %SERVER))
           (ssh-put-string data buf 0 got)
           (%send c data)
-          (%oset! %clock %DATA (Sys now))
+          (ssh-clock-mark! ssh-clock-data)
           (%ch! ch %WINDOW (- (%ch ch %WINDOW) got))
           (%moved! run got)))))
 
@@ -400,9 +348,9 @@
 (def %handle!
   (fn (_ c run)
     (def p (ssh-next-packet! c))
-    (%oset! %clock %RECV (Sys now))
+    (ssh-clock-mark! ssh-clock-recv)
     (def t (%byte (first p) 0))
-    (when (if (= t %msg-channel-data) #t (= t %msg-channel-extended-data)) (%oset! %clock %DATA (Sys now)))
+    (when (if (= t %msg-channel-data) #t (= t %msg-channel-extended-data)) (ssh-clock-mark! ssh-clock-data))
     (def in (ssh-in (first p) 1 (- (rest p) 1)))
     (def ch (if (if (>= t %msg-channel-open-confirmation) (<= t %msg-channel-failure) #f)
               (%find run (ssh-get-uint32 in))
@@ -533,7 +481,7 @@
 (def ssh-session-run!
   (fn (_ c command input on-out on-err forwards remotes netcat limits env tty agent)
     (def run (Vector make 12 ()))
-    (%clocks-start!)
+    (ssh-clocks-start!)
     (%rn! run %CHANNELS ()) (%rn! run %NEXT 0) (%rn! run %MOVED 0)
     (%rn! run %REMOTES remotes) (%rn! run %UNANSWERED ()) (%rn! run %ENV env)
     (%rn! run %TTY tty) (%rn! run %SIZE (if (null? tty) () ((List ref 1 tty)))) (%rn! run %ESC 1) (%rn! run %AGENT agent)
@@ -564,7 +512,7 @@
                      (fn (_ ch) (when (%ready? ready (%ch ch %INPUT)) (%pump! c run ch)))
                      inputs)
                    (when (%ready? ready sock) (%handle! c run))
-                   (%clocks! c limits)
+                   (ssh-clocks! c limits)
                    (%resized! c run)))
              (when (> (%rn run %MOVED) %collect-every)
                (do (Heap collect) (%rn! run %MOVED 0)))

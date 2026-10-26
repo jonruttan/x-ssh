@@ -26,6 +26,7 @@
   ssh-in ssh-in-left ssh-in-buf ssh-get-byte ssh-get-uint32 ssh-get-string ssh-get-text ssh-copy)
 (import ssh/sftp ssh-sftp-reader ssh-sftp-take! ssh-sftp-write-all ssh-sftp-put-u64 ssh-sftp-get-u64
   ssh-sftp-get-attrs ssh-sftp-mode-text)
+(import ssh/sys ssh-sys-spawn ssh-sys-after-op)
 
 (def %oref (prim-ref (lit obj) (lit ref)))
 (def %oset! (prim-ref (lit obj) (lit set!)))
@@ -846,7 +847,7 @@
             ()))
       ((str=? cmd "lmkdir")
         (do (def path (%one-arg cmd ops))
-            (guard (e (Err raise 'sftp (Str8 append "Couldn't create local directory \"" path "\": " (%after-op (e msg))) ()))
+            (guard (e (Err raise 'sftp (Str8 append "Couldn't create local directory \"" path "\": " (ssh-sys-after-op (e msg))) ()))
               (File mkdir path 511))
             ()))
       ((str=? cmd "lls")
@@ -984,19 +985,6 @@
                  (#t (self))))))))))
 
 
-; The child: the ssh program asking for the subsystem, or -D's command.
-(def %spawn
-  (fn (_ argv)
-    (def a (Sys pipe)) (def b (Sys pipe))
-    (def pid (Sys fork))
-    (when (= pid 0)
-      (Sys dup2 (first a) 0) (Sys dup2 (rest b) 1)
-      (List for-each (fn (_ fd) (Sys close fd)) (list (first a) (rest a) (first b) (rest b)))
-      (Sys exec (first argv) (rest argv))
-      (Sys exit 127))
-    (Sys close (first a)) (Sys close (rest b))
-    (list pid (rest a) (first b))))
-
 ; [user@]host[:path] or sftp://[user@]host[:port][/path]: (USER HOST PORT
 ; PATH).  A host in brackets, [::1], is an address with colons in it.
 (def ssh-sftp-destination
@@ -1045,7 +1033,7 @@
 ;   requests  -R's requests in flight
 (def ssh-sftp-client
   (fn (_ argv path batch opts buffer requests)
-    (def kid (%spawn argv))
+    (def kid (ssh-sys-spawn argv))
     (def c (%connection (List ref 2 kid) (List ref 1 kid) buffer requests (first kid)))
     (%set c 8 (if (null? batch) (List ref 2 opts) #t))
     (def status
@@ -1087,7 +1075,6 @@
 (def %scp-say (fn (_ t) (%err (Str8 append "scp: " t "\r\n"))))
 (def %local-why (fn (_ e) (guard (x ()) (Assoc get (lit local) (e data)))))
 (def %why (fn (_ e) (def l (%local-why e)) (if (null? l) (%message e) l)))
-(def %after-op (fn (_ m) (def cut (Str8 index-of ": " m)) (if (null? cut) m (Str8 sub (+ cut 2) (- (Str8 length m) cut 2) m))))
 
 ; One local path sent to remote: a file, or a directory under -r;
 ; answers how many failed.
@@ -1164,7 +1151,7 @@
 (def %scp-down-dir
   (fn (_ c remote local a preserve)
     (def made (if (not (null? (File type local))) #t
-                (guard (e (do (%scp-say (Str8 append "mkdir " local ": " (%after-op (%message e)))) #f))
+                (guard (e (do (%scp-say (Str8 append "mkdir " local ": " (ssh-sys-after-op (%message e)))) #f))
                   (File mkdir local (& (%attr a (lit perm)) 511)) #t)))
     (if (not made) 1
       (do (def errs (List fold
@@ -1236,7 +1223,7 @@
 ; (C . KID), KID the child's (PID TO FROM).
 (def %scp-open
   (fn (_ argv)
-    (def kid (%spawn argv))
+    (def kid (ssh-sys-spawn argv))
     (def c (%connection (List ref 2 kid) (List ref 1 kid) 32768 64 (first kid)))
     (%set c 8 #t)
     (%hello! c)

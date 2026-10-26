@@ -6,7 +6,9 @@
 ; @copyright 2026 Jon Ruttan
 ; @license MIT No Attribution (MIT-0)
 ;
-; What OpenSSH's sshd does, for the user it runs as: settle the
+; What OpenSSH's sshd does, for the user it runs as, or, run as root,
+; for any user the passwd file names, the connection theirs once they
+; are in: settle the
 ; configuration -- the command line's options, then sshd_config, the
 ; first value holding -- listen, take each connection in a process of its
 ; own, exchange keys under the host key, let the user in by an Ed25519,
@@ -15,9 +17,7 @@
 ; command an "exec" asks for in the user's shell, its standard input the
 ; channel's data and its output the channel's, its exit status sent back.
 ; Forwarding is served both ways.  One suite: curve25519-sha256,
-; ssh-ed25519, chacha20-poly1305@openssh.com.  Not served yet: other
-; users than the one the server runs as (that is a root server's
-; business, dropping privileges), terminals and shells.  The log goes to
+; ssh-ed25519, chacha20-poly1305@openssh.com.  The log goes to
 ; syslog in OpenSSH's words, or to standard error.
 
 (module ssh/server)
@@ -392,9 +392,10 @@
       ((str=? test stored) (do (%log (Str8 append "Accepted password for " user " from " from " ssh2")) #t))
       (#t (failed)))))
 
-; Requests answered until one succeeds, for the user this server runs as:
-; a key in an authorized_keys file whose signature over the session id
-; and the request checks, or the user's password.  A key request with no
+; Requests answered until one succeeds, for the user this server runs as,
+; or, run as root, for any user the passwd file names: a key in the
+; user's authorized_keys file whose signature over the session id and the
+; request checks, or the user's password.  A key request with no
 ; signature asks whether the key would do, and is answered PK_OK when it
 ; would.  MaxAuthTries failures disconnect.  Answers the user.
 (def %authenticate
@@ -407,8 +408,9 @@
     (ssh-put-text sa "ssh-userauth")
     (%send c sa)
     (def me (ssh-sys-me))
-    (def keys (%authorized (%key-files (%get s (lit authorized)) me (%home me))))
-    (def root-key? (if (str=? me "root") (List any? (fn (_ v) (str=? v (%get s (lit root)))) (list "yes" "prohibit-password")) #t))
+    (def anyone (= (Sys getuid) 0))
+    (def keys-of (fn (_ user) (%authorized (%key-files (%get s (lit authorized)) user (%home user)))))
+    (def root-key? (fn (_ user) (if (str=? user "root") (List any? (fn (_ v) (str=? v (%get s (lit root)))) (list "yes" "prohibit-password")) #t)))
     ((fn (self failures)
        (def fail
          (fn (_ user counted)
@@ -429,7 +431,7 @@
        (def method (ssh-get-text in))
        (match
          ((str=? method "none") (do (%failure c s) (self failures)))
-         ((not (str=? user me))
+         ((if anyone (null? (%entry "/etc/passwd" user)) (not (str=? user me)))
            (do (%log (if (null? (%entry "/etc/passwd" user)) (Str8 append "Invalid user " user " from " from)
                        (Str8 append "User " user " from " from " not allowed because this server serves only " me)))
                (fail user #t)))
@@ -446,10 +448,10 @@
                ; signs with and PubkeyAcceptedAlgorithms allows
                (def key (guard (e ()) (ssh-pubkey-of (ssh-in-buf in) (first blob) (rest blob))))
                (def known
-                 (if (if root-key? (not (null? key)) #f)
+                 (if (if (root-key? user) (not (null? key)) #f)
                    (if (List any? (fn (_ a) (str=? a alg)) (ssh-pubkey-algorithms key))
                      (if (List any? (fn (_ a) (str=? a alg)) (%get s (lit pubkey-algs)))
-                       (List any? (fn (_ k) (if (str=? (first k) (ssh-pubkey-type key)) (str=? (rest k) b64) #f)) keys)
+                       (List any? (fn (_ k) (if (str=? (first k) (ssh-pubkey-type key)) (str=? (rest k) b64) #f)) (keys-of user))
                        #f)
                      #f)
                    #f))
@@ -1028,6 +1030,26 @@
 ; number for it, and Sys has no door.
 (def %setsid! (fn (_) (%ptr-call (%dlsym (%dlopen () 1) "setsid"))))
 
+; The connection's process made the user's once a root server has let
+; them in, as sshd's session is: the groups initgroups(3) gives, the
+; group, then the user, through libc, and USER, LOGNAME, HOME and SHELL
+; the passwd entry's.  A server not run as root is the user already.
+(def %become!
+  (fn (_ user)
+    (when (= (Sys getuid) 0)
+      (def pw (%entry "/etc/passwd" user))
+      (def uid (%cvt (List ref 2 pw) (Type named INTEGER) 10))
+      (def gid (%cvt (List ref 3 pw) (Type named INTEGER) 10))
+      (def libc (%dlopen () 1))
+      (def check! (fn (_ r what) (when (< (Sys %sign-fold r) 0) (Err raise 'io (Str8 append what " failed for " user) ()))))
+      (check! (%ptr-call (%dlsym libc "initgroups") user gid) "initgroups")
+      (check! (%ptr-call (%dlsym libc "setgid") gid) "setgid")
+      (check! (%ptr-call (%dlsym libc "setuid") uid) "setuid")
+      (Sys setenv "USER" user)
+      (Sys setenv "LOGNAME" user)
+      (Sys setenv "HOME" (List ref 5 pw))
+      (Sys setenv "SHELL" (if (> (List length pw) 6) (List ref 6 pw) "")))))
+
 ; Into the background as daemon(3) has it: the parent exits 0, the child
 ; leads a session of its own and works in /.
 (def %background!
@@ -1078,6 +1100,7 @@
           (%log (guard (e (match ((str=? (%message e) "keepalive") (Str8 append "Timeout, client not responding from user " user " " from))
                                  ((str=? (%message e) "idle") (Str8 append done ": the channels were idle past ChannelTimeout"))
                                  (#t (Str8 append done ": " (%message e)))))
+                  (%become! user)
                   (%serve-session c fd s)
                   done))))
     (Socket close fd)))

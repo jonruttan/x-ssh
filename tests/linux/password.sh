@@ -5,8 +5,7 @@
 #
 # A user is made with a known password, its SHA-512 crypt in /etc/shadow
 # ("pw", x-lang's Crypt example), and the x-ssh sshd started as root, the
-# one user a server that does not drop privileges can log in, with
-# PermitRootLogin yes.  Through it:
+# with PermitRootLogin yes.  Through it:
 #
 #   dbclient   Dropbear's client, DROPBEAR_PASSWORD: output and status
 #   ssh        OpenSSH's client, the password by SSH_ASKPASS
@@ -21,6 +20,8 @@
 #              (expect), again after a wrong one, echoing neither; its
 #              ssh-keygen -y and -p ask theirs, and OpenSSH's ssh-keygen
 #              opens the key -p sealed
+#   users      another user let in by key and by password, the session
+#              theirs, not root's; a user not in the passwd file refused
 #   syslog     a server without -e logs to busybox's syslogd, as sshd in
 #              the auth facility
 #   root       under PermitRootLogin's default root's password is refused,
@@ -130,6 +131,30 @@ else
 	fail "passphrase: $(cat "$fx/passphrase.out")"
 fi
 rm -f /root/.ssh/authorized_keys
+
+# users: a root server lets in another user, by its key and by its
+# password, and the session is theirs -- uid, groups, environment, home
+# -- not root's; a user the passwd file does not name is refused
+adduser -D -s /bin/sh alice > /dev/null 2>&1
+addgroup alice wheel > /dev/null 2>&1
+sed -i "s|^alice:[^:]*:|alice:$hash:|" /etc/shadow
+mkdir -p /home/alice/.ssh && cp "$fx/userkey.pub" /home/alice/.ssh/authorized_keys
+probe='id -un; id -Gn; echo "$USER $LOGNAME $HOME $SHELL"; pwd; touch /root/owned 2>/dev/null || echo not-root'
+want=$(printf 'alice\nalice wheel\nalice alice /home/alice /bin/sh\n/home/alice\nnot-root')
+out=$(HOME="$fx/home" "$X" -l ssh -- ssh -F none -o StrictHostKeyChecking=accept-new -q -p "$port" -i "$fx/userkey" \
+	-l alice 127.0.0.1 "$probe" < /dev/null 2> "$fx/client.err")
+out2=$(DROPBEAR_PASSWORD=pw dbclient -y -y -p "$port" alice@127.0.0.1 "$probe" < /dev/null 2> "$fx/client.err")
+SSH_ASKPASS="$fx/askpass" SSH_ASKPASS_REQUIRE=force HOME="$fx/home" "$X" -l ssh -- ssh -F none -o StrictHostKeyChecking=accept-new \
+	-q -p "$port" -l nobody2 -o NumberOfPasswordPrompts=1 127.0.0.1 true < /dev/null > /dev/null 2>&1
+status=$?
+if [ "$out" = "$want" ] && [ "$out2" = "$want" ] && [ ! -e /root/owned ] && [ "$status" = 255 ] \
+	&& grep -q "Accepted publickey for alice from 127.0.0.1 port [0-9]* ssh2: ED25519" "$fx/server.log" \
+	&& grep -q "Accepted password for alice from 127.0.0.1 port [0-9]* ssh2" "$fx/server.log" \
+	&& grep -q "Invalid user nobody2 from 127.0.0.1 port" "$fx/server.log"; then
+	echo "ok: users -- a root server lets alice in by key and by password, the session hers, not root's; an unknown user is refused"
+else
+	fail "users: by key '$out', by password '$out2', unknown user status $status"
+fi
 
 # syslog: a server without -e logs to busybox's syslogd, as sshd, auth
 syslogd -O "$fx/messages"

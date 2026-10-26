@@ -65,7 +65,10 @@ nistp521), for host keys and user keys, at either end.
   SSH_ASKPASS_REQUIRE says.  A key under a passphrase is offered by its
   public half, and its passphrase asked the same way only once the server
   would take it; an empty answer, or BatchMode, passes the key over.
-- `sshd`: the server, for the user it runs as.  The configuration is
+- `sshd`: the server, for the user it runs as, or, run as root, for any
+  user in `/etc/passwd`: that user's authorized_keys, and the
+  connection, once in, the user's -- initgroups, setgid, setuid, and
+  USER, LOGNAME, HOME and SHELL from the entry.  The configuration is
   sshd_config(5)'s: `-o` options, then `/etc/ssh/sshd_config` (or `-f`'s
   file), with `Include`; `-h` adds a HostKey, `-p` a Port in place of the
   file's.  Served keywords: Port, ListenAddress, HostKey (Ed25519, RSA
@@ -149,8 +152,7 @@ nistp521), for host keys and user keys, at either end.
   with either.
 - `-V` on each, and `--help` from its option declaration.
 
-Not served yet: other ciphers, terminal modes from pty-req, other
-users than the one a server runs as.
+Not served yet: other ciphers, terminal modes from pty-req.
 
 The oracles in `tests/oracle/` are the live tests: `client.sh` drives
 the client against a built Dropbear, `server.sh` drives the server with
@@ -159,9 +161,9 @@ Dropbear's and OpenSSH's clients, `scp.sh` runs scp from either end, and
 Each takes a built Dropbear's directory.
 
 `tests/linux/run.sh` is the Linux leg: password logins, which want a
-shadow file and a known password, run as root in a container built from
-`tests/linux/Containerfile` at the declared release, with Dropbear's and
-OpenSSH's clients as the oracles.
+shadow file and a known password, and a root server's other users, run as
+root in a container built from `tests/linux/Containerfile` at the declared
+release, with Dropbear's and OpenSSH's clients as the oracles.
 
 ## Install and test
 

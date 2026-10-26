@@ -32,7 +32,10 @@
 (import ssh/pubkey ssh-pubkey-blob ssh-pubkey-label ssh-pubkey-algorithms ssh-pubkey-base64)
 (import ssh/agent ssh-agent-connect ssh-agent-identities ssh-agent-identity)
 (import ssh/config ssh-config-read ssh-config-options ssh-config-first ssh-config-all ssh-config-faults
-  ssh-config-tilde ssh-config-time ssh-config-patterns? ssh-config-ssh-keywords)
+  ssh-config-tilde ssh-config-time ssh-config-patterns? ssh-config-ssh-keywords
+  ssh-config-line ssh-config-bad ssh-config-arg ssh-config-one ssh-config-choice ssh-config-yes? ssh-config-int-or-nil
+  ssh-config-count ssh-config-seconds ssh-config-channel-timeout)
+(import ssh/sys ssh-sys-me)
 
 (def %byte-len (prim-ref (lit str) (lit byte-len)))
 (def %byte-ref (prim-ref (lit str) (lit byte-ref)))
@@ -67,16 +70,6 @@
     (guard (e2 "an internal error")
       (if (Err engine? e) (Str8 append (Err %str (Err code-of e)) ": " (Err %str (Err subject-of e))) (e msg)))))
 
-; The user this client runs as: USER, or the passwd entry of its uid.
-(def %me
-  (fn (_)
-    (def u (Sys getenv "USER"))
-    (if (if (null? u) #f (> (Str8 length u) 0)) u
-      ((fn (_ e) (if (null? e) "" (first e)))
-        (List find (fn (_ fs) (if (> (List length fs) 2) (str=? (List ref 2 fs) (%num (Sys getuid))) #f))
-          (List map (fn (_ l) (Str8 split ":" l))
-            (Str8 split "\n" (guard (e "") (File read-all "/etc/passwd")))))))))
-
 ; --- the settings ----------------------------------------------------------
 
 ; What ssh_config may say that this client does not do: refused unless
@@ -85,58 +78,6 @@
   (list (pair "proxycommand" "none") (pair "proxyjump" "none") (pair "dynamicforward" "")
         (pair "knownhostscommand" "none") (pair "tunnel" "no") (pair "forkafterauthentication" "no")
         (pair "permitremoteopen" "any")))
-
-(def %line (fn (_ lines kw) (List find (fn (_ l) (str=? (first l) kw)) lines)))
-(def %bad (fn (_ l what) (Err raise 'value (Str8 append (List ref 2 l) ": " what) ())))
-(def %arg (fn (_ l) (if (null? (first (rest l))) "" (first (first (rest l))))))
-
-; A keyword's first argument, or default.
-(def %one (fn (_ lines kw default) (def l (%line lines kw)) (if (null? l) default (%arg l))))
-
-; A keyword's value, one of choices, lowercased, or default.
-(def %choice
-  (fn (_ lines kw choices default)
-    (def l (%line lines kw))
-    (if (null? l) default
-      (do (def v (Str8 downcase (%arg l)))
-          (if (List any? (fn (_ c) (str=? c v)) choices) v
-            (%bad l (Str8 append "unsupported option \"" v "\".")))))))
-
-(def %yes? (fn (_ lines kw default) (str=? (%choice lines kw (list "yes" "no") (if default "yes" "no")) "yes")))
-
-; A decimal's value, or () when the text is not all digits.
-(def %int-or-nil
-  (fn (_ t)
-    (def n (Str8 length t))
-    (if (if (> n 0) ((fn (self i) (if (= i n) #t (if (if (>= (%byte-ref t i) #\0) (<= (%byte-ref t i) #\9) #f) (self (+ i 1)) #f))) 0) #f)
-      (%cvt t (Type named INTEGER) 10)
-      ())))
-
-(def %count
-  (fn (_ lines kw default)
-    (def l (%line lines kw))
-    (if (null? l) default ((fn (_ n) (if (null? n) (%bad l "invalid number.") n)) (%int-or-nil (%arg l))))))
-
-(def %seconds
-  (fn (_ lines kw default)
-    (def l (%line lines kw))
-    (if (null? l) default ((fn (_ n) (if (null? n) (%bad l "invalid time value.") n)) (ssh-config-time (%arg l))))))
-
-; ChannelTimeout's global time, in seconds, 0 for none: the one channel
-; timeout served is the one over every channel together.
-(def %channel-timeout
-  (fn (_ lines)
-    (def l (%line lines "channeltimeout"))
-    (if (if (null? l) #t (str=? (Str8 downcase (%arg l)) "none")) 0
-      (List fold
-        (fn (_ acc a)
-          (def eq (Str8 index-of "=" a))
-          (def t (if (null? eq) () (ssh-config-time (Str8 sub (+ eq 1) (- (Str8 length a) eq 1) a))))
-          (match
-            ((null? t) (%bad l (Str8 append "invalid channel timeout " a)))
-            ((str=? (Str8 sub 0 eq a) "global") t)
-            (#t (%bad l (Str8 append "the channel timeout " a " is not served; global= is")))))
-        0 (first (rest l))))))
 
 ; %-tokens expanded from an alist of (LETTER . TEXT), %% a percent.
 (def %expand
@@ -162,11 +103,11 @@
     (def spec (Str8 join ":" (first (rest l))))
     (def parts (Str8 split ":" spec))
     (def n (List length parts))
-    (def lport (if (if (= n 3) #t (= n 4)) (%int-or-nil (List ref (- n 3) parts)) ()))
-    (def rport (if (if (= n 3) #t (= n 4)) (%int-or-nil (List ref (- n 1) parts)) ()))
+    (def lport (if (if (= n 3) #t (= n 4)) (ssh-config-int-or-nil (List ref (- n 3) parts)) ()))
+    (def rport (if (if (= n 3) #t (= n 4)) (ssh-config-int-or-nil (List ref (- n 1) parts)) ()))
     (def given (if (= n 4) (first parts) #f))
     (if (if (null? lport) #t (null? rport))
-      (%bad l (Str8 append what " '" spec "'"))
+      (ssh-config-bad l (Str8 append what " '" spec "'"))
       (list (match ((not given) (if gateway () "localhost")) ((if (str=? given "*") #t (str=? given "")) ()) (#t given))
             lport (List ref (- n 2) parts) rport))))
 
@@ -186,53 +127,53 @@
 (def ssh-client-settings
   (fn (_ lines host local)
     (def home (Sys getenv "HOME"))
-    (def hostname (%expand (%one lines "hostname" host) (list (pair "h" host))))
+    (def hostname (%expand (ssh-config-one lines "hostname" host) (list (pair "h" host))))
     (def port
       ((fn (_ l) (if (null? l) 22
-                   ((fn (_ n) (if (if (null? n) #t (if (< n 1) #t (> n 65535))) (%bad l "Badly formatted port number.") n))
-                    (%int-or-nil (%arg l)))))
-       (%line lines "port")))
-    (def user (%one lines "user" local))
+                   ((fn (_ n) (if (if (null? n) #t (if (< n 1) #t (> n 65535))) (ssh-config-bad l "Badly formatted port number.") n))
+                    (ssh-config-int-or-nil (ssh-config-arg l)))))
+       (ssh-config-line lines "port")))
+    (def user (ssh-config-one lines "user" local))
     (def tokens (list (pair "h" hostname) (pair "p" (%num port)) (pair "r" user) (pair "u" local) (pair "d" home) (pair "n" host)))
     (def path (fn (_ p) (%expand (ssh-config-tilde p) tokens)))
     (def ids (List flat-map (fn (_ a) a) (ssh-config-all lines "identityfile")))
     (def files
       (fn (_ kw defaults)
-        (def l (if (null? (%line lines kw)) defaults (ssh-config-first lines kw)))
+        (def l (if (null? (ssh-config-line lines kw)) defaults (ssh-config-first lines kw)))
         (if (if (= (List length l) 1) (str=? (Str8 downcase (first l)) "none") #f) () (List map path l))))
-    (def gateway (%yes? lines "gatewayports" #f))
-    (def clear (%yes? lines "clearallforwardings" #f))
+    (def gateway (ssh-config-yes? lines "gatewayports" #f))
+    (def clear (ssh-config-yes? lines "clearallforwardings" #f))
     (def forwards (fn (_ kw what) (if clear () (List map (fn (_ l) (%forward l gateway what)) (List filter (fn (_ l) (str=? (first l) kw)) lines)))))
-    (def session (%choice lines "sessiontype" (list "default" "none" "subsystem") "default"))
+    (def session (ssh-config-choice lines "sessiontype" (list "default" "none" "subsystem") "default"))
     (list (pair (lit host) host) (pair (lit hostname) hostname) (pair (lit port) port) (pair (lit user) user)
           (pair (lit identities) (if (null? ids) (List map (fn (_ p) (pair (path p) #f)) (list "~/.ssh/id_rsa" "~/.ssh/id_ecdsa" "~/.ssh/id_ed25519")) (List map (fn (_ p) (pair (path p) #t)) ids)))
           (pair (lit known) (files "userknownhostsfile" (list "~/.ssh/known_hosts" "~/.ssh/known_hosts2")))
           (pair (lit global) (files "globalknownhostsfile" (list "/etc/ssh/ssh_known_hosts" "/etc/ssh/ssh_known_hosts2")))
-          (pair (lit strict) (%choice lines "stricthostkeychecking" (list "yes" "no" "off" "ask" "accept-new") "ask"))
-          (pair (lit alias) (%one lines "hostkeyalias" ()))
-          (pair (lit batch) (%yes? lines "batchmode" #f))
-          (pair (lit password) (%yes? lines "passwordauthentication" #t))
-          (pair (lit agent) (%agent-socket (%one lines "identityagent" "SSH_AUTH_SOCK") path))
-          (pair (lit identities-only) (%yes? lines "identitiesonly" #f))
+          (pair (lit strict) (ssh-config-choice lines "stricthostkeychecking" (list "yes" "no" "off" "ask" "accept-new") "ask"))
+          (pair (lit alias) (ssh-config-one lines "hostkeyalias" ()))
+          (pair (lit batch) (ssh-config-yes? lines "batchmode" #f))
+          (pair (lit password) (ssh-config-yes? lines "passwordauthentication" #t))
+          (pair (lit agent) (%agent-socket (ssh-config-one lines "identityagent" "SSH_AUTH_SOCK") path))
+          (pair (lit identities-only) (ssh-config-yes? lines "identitiesonly" #f))
           ; ForwardAgent yes forwards IdentityAgent's socket; a path or $NAME its own
           (pair (lit forward-agent)
-                ((fn (_ v) (match ((str=? (Str8 downcase v) "yes") (%agent-socket (%one lines "identityagent" "SSH_AUTH_SOCK") path))
+                ((fn (_ v) (match ((str=? (Str8 downcase v) "yes") (%agent-socket (ssh-config-one lines "identityagent" "SSH_AUTH_SOCK") path))
                                   ((str=? (Str8 downcase v) "no") ())
                                   (#t (%agent-socket v path))))
-                 (%one lines "forwardagent" "no")))
-          (pair (lit pubkey) (not (str=? (%choice lines "pubkeyauthentication" (list "yes" "no" "unbound" "host-bound") "yes") "no")))
-          (pair (lit prompts) (%count lines "numberofpasswordprompts" 3))
-          (pair (lit limits) (list (%seconds lines "serveraliveinterval" 0) (%count lines "serveralivecountmax" 3) (%channel-timeout lines)))
+                 (ssh-config-one lines "forwardagent" "no")))
+          (pair (lit pubkey) (not (str=? (ssh-config-choice lines "pubkeyauthentication" (list "yes" "no" "unbound" "host-bound") "yes") "no")))
+          (pair (lit prompts) (ssh-config-count lines "numberofpasswordprompts" 3))
+          (pair (lit limits) (list (ssh-config-seconds lines "serveraliveinterval" 0) (ssh-config-count lines "serveralivecountmax" 3) (ssh-config-channel-timeout lines)))
           (pair (lit gateway) gateway)
           (pair (lit forwards) (forwards "localforward" "Bad local forwarding specification"))
           (pair (lit remotes) (forwards "remoteforward" "Bad remote forwarding specification"))
           (pair (lit sendenv) (List flat-map (fn (_ a) a) (ssh-config-all lines "sendenv")))
           (pair (lit setenv) (List flat-map (fn (_ a) a) (ssh-config-all lines "setenv")))
-          (pair (lit level) (%choice lines "loglevel" (list "quiet" "fatal" "error" "info" "verbose" "debug" "debug1" "debug2" "debug3") "info"))
+          (pair (lit level) (ssh-config-choice lines "loglevel" (list "quiet" "fatal" "error" "info" "verbose" "debug" "debug1" "debug2" "debug3") "info"))
           (pair (lit session) session)
-          (pair (lit command) ((fn (_ c) (if (str=? (Str8 downcase c) "none") () c)) (%one lines "remotecommand" "none")))
-          (pair (lit stdin-null) (%yes? lines "stdinnull" #f))
-          (pair (lit tty) (%choice lines "requesttty" (list "no" "yes" "force" "auto") "auto")))))
+          (pair (lit command) ((fn (_ c) (if (str=? (Str8 downcase c) "none") () c)) (ssh-config-one lines "remotecommand" "none")))
+          (pair (lit stdin-null) (ssh-config-yes? lines "stdinnull" #f))
+          (pair (lit tty) (ssh-config-choice lines "requesttty" (list "no" "yes" "force" "auto") "auto")))))
 
 ; The settings as -G prints them, a keyword and its value a line.
 (def %print
@@ -576,7 +517,7 @@
 (def ssh-client-main
   (fn (_ plan)
     (def host (first plan))
-    (def local (%me))
+    (def local (ssh-sys-me))
     (guard (e (do (%say 2 (Str8 append (%message e) "\n")) 255))
       (def opts (ssh-config-options (List ref 2 plan)))
       (def user (if (null? (ssh-config-first opts "user")) local (first (ssh-config-first opts "user"))))
@@ -601,7 +542,7 @@
         (do (def s (ssh-client-settings lines host local))
             (def stdio (if (null? (List ref 4 plan)) ()
                          ((fn (_ w) (def i (Str8 index-of ":" w))
-                            (def p (if (null? i) () (%int-or-nil (Str8 sub (+ i 1) (- (Str8 length w) i 1) w))))
+                            (def p (if (null? i) () (ssh-config-int-or-nil (Str8 sub (+ i 1) (- (Str8 length w) i 1) w))))
                             (if (if (null? i) #t (null? p)) (Err raise 'value "stdio forward specification must be host:port" ())
                               (pair (Str8 sub 0 i w) p)))
                           (List ref 4 plan))))

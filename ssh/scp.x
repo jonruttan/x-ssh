@@ -33,6 +33,7 @@
 (import x/sys/posix)
 (import x/sys/gc)
 (import ssh/sftp-client ssh-sftp-scp ssh-sftp-scp3)
+(import ssh/sys ssh-sys-spawn)
 
 (def %byte-ref (prim-ref (lit str) (lit byte-ref)))
 (def %char->int (prim-ref (lit char) (lit ->int)))
@@ -305,20 +306,6 @@
 (def %quote
   (fn (_ s) (Str8 append "'" (Str8 join "'\\''" (Str8 split "'" s)) "'")))
 
-; PROGRAM run with its stdin and stdout on pipes: (PID TO FROM), TO the
-; end we write, FROM the end we read.
-(def %spawn
-  (fn (_ argv)
-    (def a (Sys pipe)) (def b (Sys pipe))
-    (def pid (Sys fork))
-    (when (= pid 0)
-      (Sys dup2 (first a) 0) (Sys dup2 (rest b) 1)
-      (List for-each (fn (_ fd) (Sys close fd)) (list (first a) (rest a) (first b) (rest b)))
-      (Sys exec (first argv) (rest argv))
-      (Sys exit 127))
-    (Sys close (first a)) (Sys close (rest b))
-    (list pid (rest a) (first b))))
-
 (def %program-argv
   (fn (_ program args user host command)
     (List append (list program)
@@ -368,7 +355,7 @@
 ; input; s and t are (USER HOST PATH).  Answers 0, or 1.
 (def %relay
   (fn (_ program args s t from-flags to-flags)
-    (def a (%spawn (%program-argv program args (first s) (List ref 1 s)
+    (def a (ssh-sys-spawn (%program-argv program args (first s) (List ref 1 s)
                      (Str8 append "scp" from-flags " -f " (%quote (List ref 2 s))))))
     (def b (%spawn-on (%program-argv program (List append args (list "-oBatchMode=yes")) (first t) (List ref 1 t)
                         (Str8 append "scp" to-flags " -t " (%quote (List ref 2 t))))
@@ -391,7 +378,7 @@
         (do (def locals (List filter (fn (_ s) (null? (%remote s))) sources))
             (def up
               (if (null? locals) 0
-                (do (def kid (%spawn (%program-argv program args (first t) (List ref 1 t)
+                (do (def kid (ssh-sys-spawn (%program-argv program args (first t) (List ref 1 t)
                                       (Str8 append "scp" flags " -t " (%quote (List ref 2 t))))))
                     (def errs (guard (e 1)
                                 (if (%response (List ref 2 kid)) (%source (List ref 2 kid) (List ref 1 kid) locals preserve recursive) 1)))
@@ -408,7 +395,7 @@
         (do (def s (%remote (first sources)))
             (if (null? s)
               (do (%say "scp: a local copy is cp's\n") 1)
-              (do (def kid (%spawn (%program-argv program args (first s) (List ref 1 s)
+              (do (def kid (ssh-sys-spawn (%program-argv program args (first s) (List ref 1 s)
                                     (Str8 append "scp" flags " -f " (%quote (List ref 2 s))))))
                   (def errs (guard (e 1) (%sink (List ref 2 kid) (List ref 1 kid) target recursive)))
                   (Sys close (List ref 1 kid)) (Sys close (List ref 2 kid))

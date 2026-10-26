@@ -33,7 +33,8 @@
 (import ssh/transport ssh-open ssh-fd ssh-session-id ssh-pending? ssh-engines! ssh-exchange-versions! ssh-kex-server! ssh-random
   ssh-send-packet! ssh-next-packet! ssh-expect! ssh-msg-service-request ssh-msg-service-accept
   ssh-msg-userauth-request ssh-msg-userauth-failure ssh-msg-userauth-success ssh-msg-disconnect
-  ssh-msg-global-request ssh-msg-request-success ssh-msg-request-failure)
+  ssh-msg-global-request ssh-msg-request-success ssh-msg-request-failure
+  ssh-clock-sent ssh-clock-recv ssh-clock-data ssh-clock-mark! ssh-clocks-start! ssh-wait-ms ssh-clocks!)
 (import ssh/keys ssh-identity-read-file ssh-key-wrong-passphrase)
 (import x/codec/ed25519)
 (import x/codec/crypt)
@@ -44,7 +45,10 @@
 (import x/sys/pty)
 (import ssh/sftp ssh-sftp-main ssh-sftp-options)
 (import ssh/config ssh-config-read ssh-config-options ssh-config-first ssh-config-all ssh-config-faults
-  ssh-config-time ssh-config-patterns? ssh-config-sshd-keywords)
+  ssh-config-time ssh-config-patterns? ssh-config-sshd-keywords
+  ssh-config-line ssh-config-bad ssh-config-arg ssh-config-one ssh-config-choice ssh-config-yes? ssh-config-int-or-nil
+  ssh-config-count ssh-config-seconds ssh-config-channel-timeout)
+(import ssh/sys ssh-sys-me)
 
 (def %oref (prim-ref (lit obj) (lit ref)))
 (def %oset! (prim-ref (lit obj) (lit set!)))
@@ -112,7 +116,7 @@
   (fn (_ c out)
     (def r (ssh-out-run out))
     (ssh-send-packet! c (first r) (rest r))
-    (%oset! %clock %SENT (Sys now))))
+    (ssh-clock-mark! ssh-clock-sent)))
 
 (def %packet-of
   (fn (_ type)
@@ -138,100 +142,52 @@
         (pair "authorizedprincipalscommand" "none") (pair "trustedusercakeys" "none") (pair "revokedkeys" "none")
         (pair "refuseconnection" "no") (pair "setenv" "none")))
 
-(def %line (fn (_ lines kw) (List find (fn (_ l) (str=? (first l) kw)) lines)))
-(def %bad (fn (_ l what) (Err raise 'value (Str8 append (List ref 2 l) ": " what) ())))
-(def %arg (fn (_ l) (if (null? (first (rest l))) "" (first (first (rest l))))))
-(def %one (fn (_ lines kw default) (def l (%line lines kw)) (if (null? l) default (%arg l))))
-
-(def %choice
-  (fn (_ lines kw choices default)
-    (def l (%line lines kw))
-    (if (null? l) default
-      (do (def v (Str8 downcase (%arg l)))
-          (if (List any? (fn (_ c) (str=? c v)) choices) v
-            (%bad l (Str8 append "unsupported option \"" v "\".")))))))
-
-(def %yes? (fn (_ lines kw default) (str=? (%choice lines kw (list "yes" "no") (if default "yes" "no")) "yes")))
-
-; A decimal's value, or () when the text is not all digits.
-(def %int-or-nil
-  (fn (_ t)
-    (def n (Str8 length t))
-    (if (if (> n 0) ((fn (self i) (if (= i n) #t (if (if (>= (%byte-ref t i) #\0) (<= (%byte-ref t i) #\9) #f) (self (+ i 1)) #f))) 0) #f)
-      (%cvt t (Type named INTEGER) 10)
-      ())))
-
 (def %port
   (fn (_ l text)
-    ((fn (_ n) (if (if (null? n) #t (if (< n 1) #t (> n 65535))) (%bad l "Badly formatted port number.") n)) (%int-or-nil text))))
-
-(def %count
-  (fn (_ lines kw default)
-    (def l (%line lines kw))
-    (if (null? l) default ((fn (_ n) (if (null? n) (%bad l "invalid number.") n)) (%int-or-nil (%arg l))))))
-
-(def %seconds
-  (fn (_ lines kw default)
-    (def l (%line lines kw))
-    (if (null? l) default ((fn (_ n) (if (null? n) (%bad l "invalid time value.") n)) (ssh-config-time (%arg l))))))
-
-; ChannelTimeout's global time, in seconds, 0 for none.
-(def %channel-timeout
-  (fn (_ lines)
-    (def l (%line lines "channeltimeout"))
-    (if (if (null? l) #t (str=? (Str8 downcase (%arg l)) "none")) 0
-      (List fold
-        (fn (_ acc a)
-          (def eq (Str8 index-of "=" a))
-          (def t (if (null? eq) () (ssh-config-time (Str8 sub (+ eq 1) (- (Str8 length a) eq 1) a))))
-          (match
-            ((null? t) (%bad l (Str8 append "invalid channel timeout " a)))
-            ((str=? (Str8 sub 0 eq a) "global") t)
-            (#t (%bad l (Str8 append "the channel timeout " a " is not served; global= is")))))
-        0 (first (rest l))))))
+    ((fn (_ n) (if (if (null? n) #t (if (< n 1) #t (> n 65535))) (ssh-config-bad l "Badly formatted port number.") n)) (ssh-config-int-or-nil text))))
 
 ; An algorithm list that would leave out the one served is refused: a
 ; plain list must name it, a `-` list must not; `+` and `^` lists only add.
 (def %algorithms
   (fn (_ lines kw ours)
-    (def l (%line lines kw))
+    (def l (ssh-config-line lines kw))
     (unless (null? l)
-      (do (def v (%arg l))
+      (do (def v (ssh-config-arg l))
           (def c (if (> (Str8 length v) 0) (Str8 sub 0 1 v) ""))
           (def names (Str8 split "," (if (List any? (fn (_ p) (str=? p c)) (list "+" "-" "^")) (Str8 sub 1 (- (Str8 length v) 1) v) v)))
           (def named (List any? (fn (_ n) (ssh-config-patterns? (list n) ours)) names))
           (when (if (str=? c "-") named (if (if (str=? c "+") #f (not (str=? c "^"))) (not named) #f))
-            (%bad l (Str8 append kw " leaves out " ours ", the one served")))))))
+            (ssh-config-bad l (Str8 append kw " leaves out " ours ", the one served")))))))
 
 ; An algorithm list as a filter of ours: a plain list keeps what it
 ; names, a `-` list drops what it names, `+` and `^` lists keep them all;
 ; one that would keep none is refused.
 (def %algorithm-list
   (fn (_ lines kw ours)
-    (def l (%line lines kw))
+    (def l (ssh-config-line lines kw))
     (if (null? l) ours
-      (do (def v (%arg l))
+      (do (def v (ssh-config-arg l))
           (def c (if (> (Str8 length v) 0) (Str8 sub 0 1 v) ""))
           (def names (Str8 split "," (if (List any? (fn (_ p) (str=? p c)) (list "+" "-" "^")) (Str8 sub 1 (- (Str8 length v) 1) v) v)))
           (def named? (fn (_ a) (List any? (fn (_ n) (ssh-config-patterns? (list n) a)) names)))
           (def kept (match ((str=? c "-") (List filter (fn (_ a) (not (named? a))) ours))
                            ((if (str=? c "+") #t (str=? c "^")) ours)
                            (#t (List filter named? ours))))
-          (when (null? kept) (%bad l (Str8 append kw " leaves out every algorithm served")))
+          (when (null? kept) (ssh-config-bad l (Str8 append kw " leaves out every algorithm served")))
           kept))))
 
 ; A ListenAddress as (ADDRESS . PORT), PORT () when it names none:
 ; host, host:port, [host]:port; 0.0.0.0 or :: is every address, ().
 (def %listen
   (fn (_ l)
-    (def a (%arg l))
+    (def a (ssh-config-arg l))
     (def n (Str8 length a))
     (def close (Str8 index-of "]" a))
     (def colons (List length (List filter (fn (_ i) (= (%byte-ref a i) #\:)) (List range 0 n))))
     (def split
       (match
         ((if (> n 0) (= (%byte-ref a 0) #\[) #f)
-          (if (null? close) (%bad l "invalid ListenAddress")
+          (if (null? close) (ssh-config-bad l "invalid ListenAddress")
             (pair (Str8 sub 1 (- close 1) a)
                   (if (< (+ close 1) n) (%port l (Str8 sub (+ close 2) (- n close 2) a)) ()))))
         ((= colons 1) (do (def i (Str8 index-of ":" a)) (pair (Str8 sub 0 i a) (%port l (Str8 sub (+ i 1) (- n i 1) a)))))
@@ -250,11 +206,11 @@
          (#t
            (do (def l (first ls))
                (def args (first (rest l)))
-               (when (< (List length args) 2) (%bad l "Missing subsystem command."))
+               (when (< (List length args) 2) (ssh-config-bad l "Missing subsystem command."))
                (when (List any? (fn (_ p) (str=? (first p) (first args))) acc)
-                 (%bad l (Str8 append "Subsystem '" (first args) "' already defined.")))
+                 (ssh-config-bad l (Str8 append "Subsystem '" (first args) "' already defined.")))
                (when (str=? (List ref 1 args) "internal-sftp")
-                 ((fn (_ o) (unless (pair? o) (%bad l o))) (ssh-sftp-options (rest (rest args)))))
+                 ((fn (_ o) (unless (pair? o) (ssh-config-bad l o))) (ssh-sftp-options (rest (rest args)))))
                (self (rest ls) (pair args acc))))))
      (List filter (fn (_ l) (str=? (first l) "subsystem")) lines) ())))
 
@@ -265,7 +221,7 @@
   (fn (_ lines)
     (def port-lines (List filter (fn (_ l) (str=? (first l) "port")) lines))
     (def from-command-line (List filter (fn (_ l) (%prefix? "command-line" (List ref 2 l))) port-lines))
-    (def ports (List map (fn (_ l) (%port l (%arg l))) (if (null? from-command-line) port-lines from-command-line)))
+    (def ports (List map (fn (_ l) (%port l (ssh-config-arg l))) (if (null? from-command-line) port-lines from-command-line)))
     (def ports* (if (null? ports) (list 22) ports))
     (def listens (List map %listen (List filter (fn (_ l) (str=? (first l) "listenaddress")) lines)))
     (def keys (List flat-map (fn (_ a) a) (ssh-config-all lines "hostkey")))
@@ -278,27 +234,27 @@
               (List flat-map (fn (_ a) (if (null? (rest a)) (List map (fn (_ p) (pair (first a) p)) ports*) (list a))) listens)))
           (pair (lit hostkeys) (if (null? keys) (list "/etc/ssh/ssh_host_rsa_key" "/etc/ssh/ssh_host_ecdsa_key" "/etc/ssh/ssh_host_ed25519_key") keys))
           (pair (lit hostkeys-given) (not (null? keys)))
-          (pair (lit pidfile) ((fn (_ p) (if (str=? (Str8 downcase p) "none") () p)) (%one lines "pidfile" "/var/run/sshd.pid")))
+          (pair (lit pidfile) ((fn (_ p) (if (str=? (Str8 downcase p) "none") () p)) (ssh-config-one lines "pidfile" "/var/run/sshd.pid")))
           (pair (lit authorized) (if (null? akf) (list ".ssh/authorized_keys" ".ssh/authorized_keys2")
                                    (if (if (= (List length akf) 1) (str=? (Str8 downcase (first akf)) "none") #f) () akf)))
-          (pair (lit password) (%yes? lines "passwordauthentication" #t))
-          (pair (lit pubkey) (%yes? lines "pubkeyauthentication" #t))
+          (pair (lit password) (ssh-config-yes? lines "passwordauthentication" #t))
+          (pair (lit pubkey) (ssh-config-yes? lines "pubkeyauthentication" #t))
           (pair (lit hostkey-algs) (%algorithm-list lines "hostkeyalgorithms"
                                      (list "ssh-ed25519" "ecdsa-sha2-nistp256" "ecdsa-sha2-nistp384" "ecdsa-sha2-nistp521" "rsa-sha2-512" "rsa-sha2-256")))
           (pair (lit pubkey-algs) (%algorithm-list lines "pubkeyacceptedalgorithms"
                                     (list "ssh-ed25519" "ecdsa-sha2-nistp256" "ecdsa-sha2-nistp384" "ecdsa-sha2-nistp521" "rsa-sha2-512" "rsa-sha2-256")))
-          (pair (lit empty) (%yes? lines "permitemptypasswords" #f))
+          (pair (lit empty) (ssh-config-yes? lines "permitemptypasswords" #f))
           (pair (lit root) ((fn (_ v) (if (str=? v "without-password") "prohibit-password" v))
-                             (%choice lines "permitrootlogin" (list "yes" "no" "prohibit-password" "without-password" "forced-commands-only") "prohibit-password")))
-          (pair (lit tcp) ((fn (_ v) (if (%yes? lines "disableforwarding" #f) "no" (if (str=? v "yes") "all" v)))
-                            (%choice lines "allowtcpforwarding" (list "yes" "all" "no" "local" "remote") "yes")))
-          (pair (lit gateway) (%choice lines "gatewayports" (list "no" "yes" "clientspecified") "no"))
-          (pair (lit agent) (if (%yes? lines "disableforwarding" #f) #f (%yes? lines "allowagentforwarding" #t)))
-          (pair (lit limits) (list (%seconds lines "clientaliveinterval" 0) (%count lines "clientalivecountmax" 3) (%channel-timeout lines)))
-          (pair (lit facility) (%choice lines "syslogfacility"
+                             (ssh-config-choice lines "permitrootlogin" (list "yes" "no" "prohibit-password" "without-password" "forced-commands-only") "prohibit-password")))
+          (pair (lit tcp) ((fn (_ v) (if (ssh-config-yes? lines "disableforwarding" #f) "no" (if (str=? v "yes") "all" v)))
+                            (ssh-config-choice lines "allowtcpforwarding" (list "yes" "all" "no" "local" "remote") "yes")))
+          (pair (lit gateway) (ssh-config-choice lines "gatewayports" (list "no" "yes" "clientspecified") "no"))
+          (pair (lit agent) (if (ssh-config-yes? lines "disableforwarding" #f) #f (ssh-config-yes? lines "allowagentforwarding" #t)))
+          (pair (lit limits) (list (ssh-config-seconds lines "clientaliveinterval" 0) (ssh-config-count lines "clientalivecountmax" 3) (ssh-config-channel-timeout lines)))
+          (pair (lit facility) (ssh-config-choice lines "syslogfacility"
                                  (list "daemon" "user" "auth" "authpriv" "local0" "local1" "local2" "local3" "local4" "local5" "local6" "local7") "auth"))
-          (pair (lit level) (%choice lines "loglevel" (list "quiet" "fatal" "error" "info" "verbose" "debug" "debug1" "debug2" "debug3") "info"))
-          (pair (lit tries) (%count lines "maxauthtries" 6))
+          (pair (lit level) (ssh-config-choice lines "loglevel" (list "quiet" "fatal" "error" "info" "verbose" "debug" "debug1" "debug2" "debug3") "info"))
+          (pair (lit tries) (ssh-config-count lines "maxauthtries" 6))
           (pair (lit accept) (List flat-map (fn (_ a) a) (ssh-config-all lines "acceptenv")))
           (pair (lit subsystems) (%subsystems lines)))))
 
@@ -383,16 +339,6 @@
       (List find (fn (_ fs) (if (null? fs) #f (str=? (first fs) name)))
         (List map (fn (_ l) (Str8 split ":" l)) (Str8 split "\n" text))))))
 
-; The user this server runs as: USER, or the passwd entry of its uid.
-(def %me
-  (fn (_)
-    (def u (Sys getenv "USER"))
-    (if (if (null? u) #f (> (Str8 length u) 0)) u
-      ((fn (_ e) (if (null? e) "" (first e)))
-        (List find (fn (_ fs) (if (> (List length fs) 2) (str=? (List ref 2 fs) (%num (Sys getuid))) #f))
-          (List map (fn (_ l) (Str8 split ":" l))
-            (Str8 split "\n" (guard (e "") (File read-all "/etc/passwd")))))))))
-
 ; A user's home directory: the passwd entry's, or HOME.
 (def %home
   (fn (_ user)
@@ -460,7 +406,7 @@
     (def sa (%packet-of ssh-msg-service-accept))
     (ssh-put-text sa "ssh-userauth")
     (%send c sa)
-    (def me (%me))
+    (def me (ssh-sys-me))
     (def keys (%authorized (%key-files (%get s (lit authorized)) me (%home me))))
     (def root-key? (if (str=? me "root") (List any? (fn (_ v) (str=? v (%get s (lit root)))) (list "yes" "prohibit-password")) #t))
     ((fn (self failures)
@@ -584,61 +530,6 @@
       (Sys exit (guard (x 1) (ssh-sftp-main (first o) (List ref 1 o) (first i) (rest out)))))
     (Sys close (first i)) (Sys close (rest out)) (Sys close (rest e))
     (if (< pid 0) () (list pid (rest i) (first out) (first e)))))
-
-; --- the clocks ------------------------------------------------------------
-;
-; The clocks ClientAliveInterval and ChannelTimeout read, seconds since
-; the epoch: 1 the last packet sent, 2 the last received, 3 the last
-; carrying data either way, 4 the last keepalive asked.  A keepalive is
-; asked after the interval without sending or receiving; the connection
-; is given up after ClientAliveCountMax intervals without receiving
-; anything; the global ChannelTimeout without data either way closes
-; it.  One connection a process.
-(def %SENT 1) (def %RECV 2) (def %DATA 3) (def %ASKED 4)
-(def %clock (Vector make 4 0))
-
-(def %clocks-start! (fn (_) (def now (Sys now)) (%oset! %clock %SENT now) (%oset! %clock %RECV now) (%oset! %clock %DATA now) (%oset! %clock %ASKED now)))
-
-; A keepalive asked: OpenSSH's global request, wanting the answer that
-; counts as the other end alive.
-(def %keepalive!
-  (fn (_ c)
-    (def req (%packet-of ssh-msg-global-request))
-    (ssh-put-text req "keepalive@openssh.com")
-    (ssh-put-bool req #t)
-    (%send c req)
-    (%oset! %clock %ASKED (Sys now))))
-
-; How long a wait may last before a clock wants looking at, in
-; milliseconds, or -1 for no limit: limits is (INTERVAL COUNT IDLE), an
-; interval or idle time of 0 for never.
-(def %wait-ms
-  (fn (_ limits)
-    (def now (Sys now))
-    (def k (first limits)) (def n (List ref 1 limits)) (def i (List ref 2 limits))
-    (def dues
-      (List append
-        (if (> k 0) (list (- (+ (%oref %clock %SENT) k) now) (- (+ (%oref %clock %RECV) k) now)
-                          (- (+ (%oref %clock %RECV) (* k n)) now)) ())
-        (if (> i 0) (list (- (+ (%oref %clock %DATA) i) now)) ())))
-    (if (null? dues) -1
-      (do (def least (List fold (fn (_ a b) (if (< a b) a b)) (first dues) (rest dues)))
-          (if (< least 0) 0 (* 1000 least))))))
-
-; The clocks read: a keepalive asked when due, the connection given up
-; or closed when a limit has passed; the error's message names which.
-(def %clocks!
-  (fn (_ c limits)
-    (def now (Sys now))
-    (def k (first limits)) (def n (List ref 1 limits)) (def i (List ref 2 limits))
-    (when (> k 0)
-      (do (when (>= (- now (%oref %clock %RECV)) (* k n))
-            (Err raise 'io "keepalive" ()))
-          (when (if (>= (- now (%oref %clock %SENT)) k) #t
-                  (if (>= (- now (%oref %clock %RECV)) k) (>= (- now (%oref %clock %ASKED)) k) #f))
-            (%keepalive! c))))
-    (when (if (> i 0) (>= (- now (%oref %clock %DATA)) i) #f)
-      (Err raise 'io "idle" ()))))
 
 ; --- the channels (RFC 4254) ---------------------------------------------------
 ;
@@ -882,7 +773,7 @@
           (when extended (ssh-put-uint32 d 1))
           (ssh-put-string d buf 0 got)
           (%send c d)
-          (%oset! %clock %DATA (Sys now))
+          (ssh-clock-mark! ssh-clock-data)
           (%ch! ch %WINDOW (- (%ch ch %WINDOW) got))
           (%moved! run got)))))
 
@@ -916,9 +807,9 @@
 (def %handle!
   (fn (_ c run sock)
     (def p (ssh-next-packet! c))
-    (%oset! %clock %RECV (Sys now))
+    (ssh-clock-mark! ssh-clock-recv)
     (def t (%byte (first p) 0))
-    (when (if (= t %msg-channel-data) #t (= t %msg-channel-extended-data)) (%oset! %clock %DATA (Sys now)))
+    (when (if (= t %msg-channel-data) #t (= t %msg-channel-extended-data)) (ssh-clock-mark! ssh-clock-data))
     (def in (ssh-in (first p) 1 (- (rest p) 1)))
     (def ch (if (if (>= t %msg-channel-open-confirmation) (<= t %msg-channel-failure) #f)
               (%find run (ssh-get-uint32 in))
@@ -950,7 +841,7 @@
             (def start!
               (fn (_ command)
                 (def pty (%ch ch %PTY))
-                (started! (%spawn command sock (%rn run %ENV) pty (%ch ch %TERM) (%home (%me))) pty)))
+                (started! (%spawn command sock (%rn run %ENV) pty (%ch ch %TERM) (%home (ssh-sys-me))) pty)))
             (match
               ; a subsystem (RFC 4254 6.5) by its Subsystem line: internal-sftp
               ; in a child of this server, any other command under the shell
@@ -963,7 +854,7 @@
                             (%reply c ch want-reply #f)))
                       ((str=? (List ref 1 row) "internal-sftp")
                         (do (%debug (Str8 append "subsystem request for " sub " by internal-sftp"))
-                            (started! (%spawn-sftp (rest (rest row)) sock (%rn run %ENV) (%home (%me))) ())))
+                            (started! (%spawn-sftp (rest (rest row)) sock (%rn run %ENV) (%home (ssh-sys-me))) ())))
                       (#t
                         (do (%debug (Str8 append "subsystem request for " sub " by " (List ref 1 row)))
                             (start! (Str8 join " " (rest row))))))))
@@ -1057,7 +948,7 @@
     (def run (Vector make 13 ()))
     (def tcp (%get s (lit tcp)))
     (def limits (%get s (lit limits)))
-    (%clocks-start!)
+    (ssh-clocks-start!)
     (%rn! run %CHANNELS ()) (%rn! run %NEXT 0) (%rn! run %MOVED 0)
     (%rn! run %FORWARDING (if (str=? tcp "all") #t (str=? tcp "local"))) (%rn! run %SESSION ())
     (%rn! run %REMOTE (if (str=? tcp "all") #t (str=? tcp "remote"))) (%rn! run %GATEWAY (%get s (lit gateway)))
@@ -1086,7 +977,7 @@
                                               (List map (fn (_ l) (pair (first l) (list (lit in)))) (%rn run %LISTENERS))
                                               (if (null? (%rn run %AGENT)) () (list (pair (first (%rn run %AGENT)) (list (lit in)))))
                                               (List map (fn (_ ch) (pair (%ch ch %FD) (list (lit in)))) open-forwards))
-                                 (%wait-ms limits)))
+                                 (ssh-wait-ms limits)))
                      (when (if (null? out) #f (%ready? ready out)) (%pump! c run session out %OUT #f))
                      (when (if (null? err) #f (%ready? ready err)) (%pump! c run session err %ERR #t))
                      (List for-each
@@ -1099,7 +990,7 @@
                      (when (if (null? (%rn run %AGENT)) #f (%ready? ready (first (%rn run %AGENT))))
                        ((fn (_ fd) (unless (null? fd) (%open-agent! c run fd))) (guard (e ()) (Socket accept (first (%rn run %AGENT))))))
                      (when (%ready? ready sock) (%handle! c run sock))
-                     (%clocks! c limits)))
+                     (ssh-clocks! c limits)))
                (when (if (null? child) #f
                        (if (%ch session %CLOSED) #f (if (%ch session %OUT) #f (not (%ch session %ERR)))))
                  (%debug (Str8 append "exit status " (%num (%finish! c session)))))

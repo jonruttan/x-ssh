@@ -51,6 +51,7 @@
 (import ssh/keys ssh-identity-read-file ssh-key-file-sealed? ssh-key-wrong-passphrase ssh-pubkey-of-key-file
   ssh-key-comment-of-file)
 (import ssh/ask ssh-ask-secret)
+(import ssh/sys ssh-sys-after-op)
 
 (def %byte-ref (prim-ref (lit str) (lit byte-ref)))
 (def %char->int (prim-ref (lit char) (lit ->int)))
@@ -312,8 +313,6 @@
 
 ; --- the client's end ----------------------------------------------------------
 
-(def %after-op (fn (_ m) (def cut (Str8 index-of ": " m)) (if (null? cut) m (Str8 sub (+ cut 2) (- (Str8 length m) cut 2) m))))
-
 (def %unset? (fn (_ v) (if (null? v) #t (= (Str8 length v) 0))))
 
 ; A connection to the agent at path, or at SSH_AUTH_SOCK's when path is
@@ -324,7 +323,7 @@
     (def p (if (null? path) (Sys getenv "SSH_AUTH_SOCK") path))
     (if (%unset? p)
       (Err raise 'agent "Could not open a connection to your authentication agent." (list (pair (lit none) #t)))
-      (guard (e (Err raise 'agent (Str8 append "Error connecting to agent: " (%after-op (guard (x "Connection refused") (e msg)))) ()))
+      (guard (e (Err raise 'agent (Str8 append "Error connecting to agent: " (ssh-sys-after-op (guard (x "Connection refused") (e msg)))) ()))
         (Socket unix-connect p)))))
 
 ; A request sent and its reply: (TYPE . IN), IN a reader over its fields.
@@ -499,7 +498,7 @@
           (def lfd
             (if (> (%byte-len path) 103)
               (do (%say 2 (Str8 append "unix_listener: path \"" path "\" too long for Unix domain socket\r\n")) ())
-              (guard (e (do (%say 2 (Str8 append "unix_listener: cannot bind to path " path ": " (%after-op (guard (x "failed") (e msg))) "\r\n")) ()))
+              (guard (e (do (%say 2 (Str8 append "unix_listener: cannot bind to path " path ": " (ssh-sys-after-op (guard (x "failed") (e msg))) "\r\n")) ()))
                 (Socket unix-listen path 128))))
           (if (null? lfd) 1
             (do (File chmod path 384)

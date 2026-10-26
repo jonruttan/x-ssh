@@ -112,6 +112,61 @@
       (Str8 append (Sys getenv "HOME") (Str8 sub 1 (- (Str8 length path) 1) path))
       path)))
 
+; Settled options read, as ssh and sshd both read them: lines are
+; ssh-config-read's (KEYWORD ARGS ORIGIN), ORIGIN what a refusal
+; names.
+(def ssh-config-line (fn (_ lines kw) (List find (fn (_ l) (str=? (first l) kw)) lines)))
+(def ssh-config-bad (fn (_ l what) (Err raise 'value (Str8 append (List ref 2 l) ": " what) ())))
+(def ssh-config-arg (fn (_ l) (if (null? (first (rest l))) "" (first (first (rest l))))))
+
+; A keyword's first argument, or default.
+(def ssh-config-one (fn (_ lines kw default) (def l (ssh-config-line lines kw)) (if (null? l) default (ssh-config-arg l))))
+
+; A keyword's value, one of choices, lowercased, or default.
+(def ssh-config-choice
+  (fn (_ lines kw choices default)
+    (def l (ssh-config-line lines kw))
+    (if (null? l) default
+      (do (def v (Str8 downcase (ssh-config-arg l)))
+          (if (List any? (fn (_ c) (str=? c v)) choices) v
+            (ssh-config-bad l (Str8 append "unsupported option \"" v "\".")))))))
+
+(def ssh-config-yes? (fn (_ lines kw default) (str=? (ssh-config-choice lines kw (list "yes" "no") (if default "yes" "no")) "yes")))
+
+; A decimal's value, or () when the text is not all digits.
+(def ssh-config-int-or-nil
+  (fn (_ t)
+    (def n (Str8 length t))
+    (if (if (> n 0) ((fn (self i) (if (= i n) #t (if (if (>= (%byte-ref t i) #\0) (<= (%byte-ref t i) #\9) #f) (self (+ i 1)) #f))) 0) #f)
+      (%cvt t (Type named INTEGER) 10)
+      ())))
+
+(def ssh-config-count
+  (fn (_ lines kw default)
+    (def l (ssh-config-line lines kw))
+    (if (null? l) default ((fn (_ n) (if (null? n) (ssh-config-bad l "invalid number.") n)) (ssh-config-int-or-nil (ssh-config-arg l))))))
+
+(def ssh-config-seconds
+  (fn (_ lines kw default)
+    (def l (ssh-config-line lines kw))
+    (if (null? l) default ((fn (_ n) (if (null? n) (ssh-config-bad l "invalid time value.") n)) (ssh-config-time (ssh-config-arg l))))))
+
+; ChannelTimeout's global time, in seconds, 0 for none: the one channel
+; timeout served is the one over every channel together.
+(def ssh-config-channel-timeout
+  (fn (_ lines)
+    (def l (ssh-config-line lines "channeltimeout"))
+    (if (if (null? l) #t (str=? (Str8 downcase (ssh-config-arg l)) "none")) 0
+      (List fold
+        (fn (_ acc a)
+          (def eq (Str8 index-of "=" a))
+          (def t (if (null? eq) () (ssh-config-time (Str8 sub (+ eq 1) (- (Str8 length a) eq 1) a))))
+          (match
+            ((null? t) (ssh-config-bad l (Str8 append "invalid channel timeout " a)))
+            ((str=? (Str8 sub 0 eq a) "global") t)
+            (#t (ssh-config-bad l (Str8 append "the channel timeout " a " is not served; global= is")))))
+        0 (first (rest l))))))
+
 ; The files a path names, its components' patterns matched against their
 ; directories' entries, in order; a path without one is itself, there or
 ; not.
@@ -279,4 +334,6 @@
 
 (provide ssh/config ssh-config-words ssh-config-wild? ssh-config-patterns? ssh-config-time ssh-config-tilde
   ssh-config-read ssh-config-options ssh-config-first ssh-config-all ssh-config-faults
-  ssh-config-sshd-keywords ssh-config-ssh-keywords)
+  ssh-config-sshd-keywords ssh-config-ssh-keywords
+  ssh-config-line ssh-config-bad ssh-config-arg ssh-config-one ssh-config-choice ssh-config-yes? ssh-config-int-or-nil
+  ssh-config-count ssh-config-seconds ssh-config-channel-timeout)

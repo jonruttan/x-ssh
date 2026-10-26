@@ -27,6 +27,7 @@
 (import x/type/vector)
 (import x/sys/socket)
 (import x/sys/file)
+(import x/sys/posix)
 (import x/codec/hex)
 (import x/codec/sha256)
 (import x/codec/chacha20)
@@ -328,6 +329,67 @@
       (Err raise 'value (Str8 append "ssh: expected " what ", got message "
                                      ((prim-ref (lit convert) (lit to)) (%byte (first p) 0) (Type named STRING) 10)) ()))
     p))
+
+; --- the keepalive clocks ----------------------------------------------------
+
+; The clocks ServerAliveInterval or ClientAliveInterval and ChannelTimeout
+; read, seconds since the epoch: 1 the last packet sent, 2 the last
+; received, 3 the last carrying data either way, 4 the last keepalive
+; asked.  A keepalive is asked after the interval without sending or
+; receiving; the connection is given up after ServerAliveCountMax or
+; ClientAliveCountMax intervals without receiving anything; the global
+; ChannelTimeout without data either way closes it.  One connection a
+; process.
+(def ssh-clock-sent 1) (def ssh-clock-recv 2) (def ssh-clock-data 3) (def %ASKED 4)
+(def %clock (Vector make 4 0))
+
+(def ssh-clock-mark! (fn (_ i) (%oset! %clock i (Sys now))))
+
+(def ssh-clocks-start! (fn (_) (def now (Sys now)) (%oset! %clock ssh-clock-sent now) (%oset! %clock ssh-clock-recv now) (%oset! %clock ssh-clock-data now) (%oset! %clock %ASKED now)))
+
+; A keepalive asked: OpenSSH's global request, wanting the answer that
+; counts as the other end alive.
+(def %keepalive!
+  (fn (_ c)
+    (def req (ssh-out))
+    (ssh-put-byte req ssh-msg-global-request)
+    (ssh-put-text req "keepalive@openssh.com")
+    (ssh-put-bool req #t)
+    (def r (ssh-out-run req))
+    (ssh-send-packet! c (first r) (rest r))
+    (%oset! %clock ssh-clock-sent (Sys now))
+    (%oset! %clock %ASKED (Sys now))))
+
+; How long a wait may last before a clock wants looking at, in
+; milliseconds, or -1 for no limit: limits is (INTERVAL COUNT IDLE), an
+; interval or idle time of 0 for never.
+(def ssh-wait-ms
+  (fn (_ limits)
+    (def now (Sys now))
+    (def k (first limits)) (def n (List ref 1 limits)) (def i (List ref 2 limits))
+    (def dues
+      (List append
+        (if (> k 0) (list (- (+ (%oref %clock ssh-clock-sent) k) now) (- (+ (%oref %clock ssh-clock-recv) k) now)
+                          (- (+ (%oref %clock ssh-clock-recv) (* k n)) now)) ())
+        (if (> i 0) (list (- (+ (%oref %clock ssh-clock-data) i) now)) ())))
+    (if (null? dues) -1
+      (do (def least (List fold (fn (_ a b) (if (< a b) a b)) (first dues) (rest dues)))
+          (if (< least 0) 0 (* 1000 least))))))
+
+; The clocks read: a keepalive asked when due, the connection given up
+; or closed when a limit has passed; the error's message names which.
+(def ssh-clocks!
+  (fn (_ c limits)
+    (def now (Sys now))
+    (def k (first limits)) (def n (List ref 1 limits)) (def i (List ref 2 limits))
+    (when (> k 0)
+      (do (when (>= (- now (%oref %clock ssh-clock-recv)) (* k n))
+            (Err raise 'io "keepalive" ()))
+          (when (if (>= (- now (%oref %clock ssh-clock-sent)) k) #t
+                  (if (>= (- now (%oref %clock ssh-clock-recv)) k) (>= (- now (%oref %clock %ASKED)) k) #f))
+            (%keepalive! c))))
+    (when (if (> i 0) (>= (- now (%oref %clock ssh-clock-data)) i) #f)
+      (Err raise 'io "idle" ()))))
 
 ; --- the key exchange (7), curve25519-sha256 (RFC 8731) --------------------
 
@@ -641,4 +703,5 @@
 (provide ssh/transport ssh-version-string ssh-open ssh-fd ssh-session-id ssh-host-key ssh-server-sig-algs ssh-hostkey-names ssh-pending? ssh-random ssh-engines!
   ssh-exchange-versions! ssh-send-packet! ssh-recv-packet! ssh-next-packet! ssh-expect! ssh-kex! ssh-kex-server! ssh-auth-service! ssh-auth-publickey-query! ssh-auth-publickey! ssh-auth-password!
   ssh-msg-disconnect ssh-msg-global-request ssh-msg-request-success ssh-msg-request-failure ssh-msg-service-request ssh-msg-service-accept
-  ssh-msg-userauth-request ssh-msg-userauth-failure ssh-msg-userauth-success ssh-trace)
+  ssh-msg-userauth-request ssh-msg-userauth-failure ssh-msg-userauth-success ssh-trace
+  ssh-clock-sent ssh-clock-recv ssh-clock-data ssh-clock-mark! ssh-clocks-start! ssh-wait-ms ssh-clocks!)

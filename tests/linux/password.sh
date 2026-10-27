@@ -13,6 +13,8 @@
 #   wrong      a wrong password is refused, status 255, and logged
 #   shell      x-ssh at a terminal (expect), by root's key: a shell on a
 #              pseudo-terminal, its window and a resize, its exit status, ~.
+#   modes      the local terminal's modes are the server's terminal's,
+#              from x-ssh's client and from OpenSSH's (expect)
 #   prompt     x-ssh's client asks at the terminal (expect): whether to
 #              trust the new host, then the password, again after a wrong
 #              one, echoing neither
@@ -111,6 +113,16 @@ if expect tests/oracle/shell.exp "$port" "$fx/userkey" root /tmp/shell-home > "$
 	echo "ok: shell -- x-ssh at a terminal: a shell, its window and a resize, its exit status, and ~."
 else
 	fail "shell: $(cat "$fx/shell.out")"
+fi
+
+# modes: the local terminal's modes, intr ^G and icrnl off, are the
+# server's terminal's, from x-ssh's client and from OpenSSH's
+mkdir -p /tmp/modes-home
+if HOME=/tmp/modes-home expect tests/linux/modes.exp "$port" "$fx/userkey" x > "$fx/modes.out" 2>&1 && grep -qx ok "$fx/modes.out" \
+	&& expect tests/linux/modes.exp "$port" "$fx/userkey" openssh > "$fx/modes2.out" 2>&1 && grep -qx ok "$fx/modes2.out"; then
+	echo "ok: modes -- the local terminal's modes are the server's terminal's, from x-ssh's client and OpenSSH's"
+else
+	fail "modes: $(cat "$fx/modes.out" "$fx/modes2.out" 2>/dev/null)"
 fi
 
 # prompt

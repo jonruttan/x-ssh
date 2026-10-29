@@ -28,6 +28,8 @@
 (import x/sys/posix)
 (import x/sys/gc)
 (import x/codec/base64)
+(import x/repl/term)
+(import ssh/tty ssh-tty-modes-decode)
 (import ssh/bytes ssh-out ssh-put-byte ssh-put-bool ssh-put-uint32 ssh-put-text ssh-put-string ssh-put-bytes ssh-put-names ssh-out-run
   ssh-in ssh-in-buf ssh-get-byte ssh-get-bool ssh-get-uint32 ssh-get-string ssh-get-bytes ssh-get-text ssh-copy)
 (import ssh/transport ssh-open ssh-fd ssh-session-id ssh-pending? ssh-engines! ssh-exchange-versions! ssh-kex-server! ssh-random
@@ -488,8 +490,9 @@
 ; three pipes, (PID IN OUT ERR), IN the end we write, OUT and ERR the
 ; ends we read; or, when the session asked for a terminal, on a new
 ; pseudo-terminal, its master both IN and OUT and ERR (), the shell
-; interactive since its input is a terminal, TERM and the window set as
-; the client gave them.  () when no terminal or no child can be had.
+; interactive since its input is a terminal, TERM, the window and the
+; modes set as the client gave them.  () when no terminal or no child
+; can be had.
 (def %spawn
   (fn (_ command sock env pty term home)
     (def pipes (if (null? pty) (list (Sys pipe) (Sys pipe) (Sys pipe)) ()))
@@ -502,7 +505,8 @@
             (List for-each (fn (_ fd) (Sys close fd))
               (list (first i) (rest i) (first o) (rest o) (first e) (rest e)))
             (Sys close sock))
-        (Sys setenv "TERM" (first term)))
+        (do (Sys setenv "TERM" (first term))
+            (Term modes! 0 (List ref 3 term))))
       (List for-each (fn (_ v) (Sys setenv (first v) (rest v))) env)
       (guard (e ()) (Sys chdir home))
       (def shell ((fn (_ s) (if (if (null? s) #t (= (Str8 length s) 0)) "/bin/sh" s)) (Sys getenv "SHELL")))
@@ -868,15 +872,19 @@
                 (do (%debug (if (null? (%ch ch %PTY)) "shell" (Str8 append "shell on a terminal, " (first (%ch ch %TERM)))))
                     (start! ())))
               ; a terminal for the session (RFC 4254 6.2): TERM, the window
-              ; in characters, then in pixels, and the modes, which are
-              ; the terminal's own defaults here; the pseudo-terminal is
-              ; opened as the shell or command starts on it
+              ; in characters, then in pixels, and the client's modes; the
+              ; pseudo-terminal is opened, and the modes set on it, as the
+              ; shell or command starts on it
               ((if fresh (if (str=? name "pty-req") (null? (%ch ch %PTY)) #f) #f)
                 (do (def term (ssh-get-text in))
                     (def cols (ssh-get-uint32 in))
                     (def rows (ssh-get-uint32 in))
+                    (def modes (guard (e ()) (do
+                                 (ssh-get-uint32 in) (ssh-get-uint32 in)
+                                 (def m (ssh-get-string in))
+                                 (ssh-tty-modes-decode (ssh-in-buf in) (first m) (rest m)))))
                     (%ch! ch %PTY #t)
-                    (%ch! ch %TERM (list term cols rows))
+                    (%ch! ch %TERM (list term cols rows modes))
                     (%debug (Str8 append "pty-req " term))
                     (%reply c ch want-reply #t)))
               ; a terminal's new window: the started command's, or the
@@ -886,7 +894,7 @@
                     (def rows (ssh-get-uint32 in))
                     (unless (null? (%ch ch %PTY))
                       (if (null? (%ch ch %CHILD))
-                        (%ch! ch %TERM (list (first (%ch ch %TERM)) cols rows))
+                        (%ch! ch %TERM (list (first (%ch ch %TERM)) cols rows (List ref 3 (%ch ch %TERM))))
                         (Pty window! (List ref 1 (%ch ch %CHILD)) cols rows)))
                     (%reply c ch want-reply (not (null? (%ch ch %PTY))))))
               ; a variable kept for the command when AcceptEnv's

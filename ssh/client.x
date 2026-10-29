@@ -480,6 +480,8 @@
                     (when (if (str=? want "yes") (if (not local-tty) (not quiet) #f) #f)
                       (%say 2 "Pseudo-terminal will not be allocated because stdin is not a terminal.\r\n"))
                     (def term ((fn (_ t) (if (null? t) "" t)) (Sys getenv "TERM")))
+                    ; the modes as they are before raw mode, for the server's terminal
+                    (def modes (if tty? (Term modes %stdin) ()))
                     (def saved (if (if tty? local-tty #f) (Term raw! %stdin) ()))
                     (def outcome
                       (guard (e (pair (lit failed) (%message e)))
@@ -493,7 +495,7 @@
                             (if (null? stdio) () (pair (%address (first stdio)) (rest stdio)))
                             (%get s (lit limits))
                             (%environment s)
-                            (if tty? (list term (fn (_) (Term window %stdin))) ())
+                            (if tty? (list term (fn (_) (Term window %stdin)) modes) ())
                             (%get s (lit forward-agent))))))
                     (unless (null? saved) (Term restore! %stdin saved))
                     (guard (e2 ()) (ssh-disconnect! c))

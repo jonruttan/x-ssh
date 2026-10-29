@@ -34,7 +34,8 @@ nistp521), for host keys and user keys, at either end.
   exit status, with the client's standard input carried to it.  A
   terminal is asked for as RequestTTY says -- by default for a shell
   when standard input is one, `-t` for a command too, `-T` never -- with
-  TERM and the window; the local terminal is raw for the session, a
+  TERM, the window and the local terminal's modes; the local terminal
+  is raw for the session, a
   resize is sent on, and `~.` at a line's start ends the connection.
   The configuration is
   ssh_config(5)'s: `-o` options, then `~/.ssh/config` (or `-F`'s file),
@@ -94,7 +95,7 @@ nistp521), for host keys and user keys, at either end.
   tests the configuration and `-T` prints it.  Each connection is served
   by a forked child, in the user's home directory; a command runs under
   the user's shell, and a session that asks for a terminal gets a
-  pseudo-terminal with its TERM and window, resized as the client's
+  pseudo-terminal with its TERM, window and modes, resized as the client's
   is, its shell interactive on it.  `git
   clone` over it works.
 - `ssh-keygen`: `-t ed25519|ecdsa|rsa [-b bits] [-f FILE] [-C comment]
@@ -152,7 +153,7 @@ nistp521), for host keys and user keys, at either end.
   with either.
 - `-V` on each, and `--help` from its option declaration.
 
-Not served yet: other ciphers, terminal modes from pty-req.
+Not served yet: other ciphers.
 
 The oracles in `tests/oracle/` are the live tests: `client.sh` drives
 the client against a built Dropbear, `server.sh` drives the server with
@@ -181,6 +182,7 @@ Set `X=/path/to/x` to use a particular x.
     ssh/bytes.x       the wire's encodings
     ssh/transport.x   the transport layer, from either end: kex, the cipher
     ssh/session.x     the connection protocol, the client's side
+    ssh/tty.x         a terminal's modes on the wire
     ssh/config.x      ssh_config and sshd_config, as OpenSSH reads them
     ssh/client.x      the client: settings, host keys, authentication, one command
     ssh/server.x      the server: settings, authentication, commands, forwards

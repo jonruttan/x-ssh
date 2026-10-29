@@ -1,0 +1,30 @@
+#!/usr/bin/expect -f
+# modes.exp PORT KEY CLIENT -- the local terminal's modes reach the
+# server's: intr set to ^G and icrnl turned off here, then stty -a there
+# under -tt, by CLIENT, x for x-ssh's client or openssh for OpenSSH's.
+set port [lindex $argv 0]
+set key [lindex $argv 1]
+set client [lindex $argv 2]
+set timeout 120
+log_user 0
+
+if {$client eq "x"} {
+	set ssh "$env(X) -l ssh -- ssh -F none"
+} else {
+	set ssh "ssh -F none -o UserKnownHostsFile=/dev/null"
+}
+spawn sh -c "stty intr ^G -icrnl; exec $ssh -o StrictHostKeyChecking=no -tt -p $port -i $key root@127.0.0.1 'stty -a; exit 3'"
+expect {
+	-re {intr = \^G} {}
+	timeout { puts "FAIL: intr is not ^G there"; exit 1 }
+	eof { puts "FAIL: intr is not ^G there (the program ended)"; exit 1 }
+}
+expect {
+	-re {-icrnl} {}
+	timeout { puts "FAIL: icrnl is not off there"; exit 1 }
+	eof { puts "FAIL: icrnl is not off there (the program ended)"; exit 1 }
+}
+expect eof
+set status [lindex [wait] 3]
+if {$status != 3} { puts "FAIL: status $status, not 3"; exit 1 }
+puts "ok"

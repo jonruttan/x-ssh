@@ -26,6 +26,7 @@
 (import x/sys/file)
 (import x/sys/socket)
 (import x/sys/gc)
+(import ssh/tty ssh-tty-modes-encode)
 (import ssh/bytes ssh-out ssh-put-byte ssh-put-bool ssh-put-uint32 ssh-put-text ssh-put-string ssh-out-run
   ssh-in ssh-get-byte ssh-get-bool ssh-get-uint32 ssh-get-string ssh-get-text ssh-in-buf ssh-copy)
 (import ssh/transport ssh-fd ssh-pending? ssh-send-packet! ssh-next-packet! ssh-msg-disconnect
@@ -85,7 +86,8 @@
 ; 5 the session channel or (), 6 the remote forwards as (ADDRESS PORT
 ; HOST PORT), 7 those whose request the server has yet to answer, in
 ; the order asked, 8 the environment sent, 9 the terminal asked for, as
-; (TERM WINDOW), WINDOW a function answering (COLUMNS . ROWS), or (), 10
+; (TERM WINDOW MODES), WINDOW a function answering (COLUMNS . ROWS) and
+; MODES the local terminal's as Term modes answers them, or (), 10
 ; the window last sent, 11 where the escape character stands: 1 at a
 ; line's start, 2 just after a tilde there, 0 elsewhere, 12 the agent's
 ; socket forwarded, or ().
@@ -387,10 +389,11 @@
                     (%rn run %ENV))
                   ; a terminal (RFC 4254 6.2), wanting no answer, as
                   ; OpenSSH's -t: TERM, the window in characters and
-                  ; pixels, and the modes, none but the end marker
+                  ; pixels, and the local terminal's modes
                   (unless (null? (%rn run %TTY))
                     (do (def p (%packet-of %msg-channel-request))
                         (def size (%rn run %SIZE))
+                        (def modes (ssh-tty-modes-encode (List ref 2 (%rn run %TTY))))
                         (ssh-put-uint32 p (%ch ch %SERVER))
                         (ssh-put-text p "pty-req")
                         (ssh-put-bool p #f)
@@ -399,8 +402,7 @@
                         (ssh-put-uint32 p (rest size))
                         (ssh-put-uint32 p 0)
                         (ssh-put-uint32 p 0)
-                        (ssh-put-uint32 p 1)
-                        (ssh-put-byte p 0)
+                        (ssh-put-string p (first modes) 0 (rest modes))
                         (%send c p)))
                   (def req (%packet-of %msg-channel-request))
                   ; a shell, a command, or a subsystem by its name (RFC

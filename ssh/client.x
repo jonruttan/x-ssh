@@ -367,19 +367,25 @@
 ; A sealed key opened, its passphrase asked for up to
 ; NumberOfPasswordPrompts times as OpenSSH's load_identity_file asks; ()
 ; when an answer is empty, there is none, or none opens it.  Batch mode
-; asks nothing.
+; asks nothing.  The next try is asked for outside the guard: its
+; clause is left with wrong, not run on to the end of the connection.
 (def %open-identity
   (fn (_ s path tr)
     (def prompt (Str8 append "Enter passphrase for key '" path "': "))
+    (def try
+      (fn (_ typed)
+        (guard (e (if (str=? (%message e) ssh-key-wrong-passphrase) (lit wrong)
+                    (do (%say 2 (Str8 append "Load key \"" path "\": " (%message e) "\n")) ())))
+          (ssh-identity-read-file path typed))))
     ((fn (self left)
        (if (if (= left 0) #t (%get s (lit batch))) ()
          (do (def typed (ssh-ask-secret prompt #f))
              (if (if (null? typed) #t (= (Str8 length typed) 0))
                (do (unless (null? tr) (tr "no passphrase given, try next key")) ())
-               (guard (e (if (str=? (%message e) ssh-key-wrong-passphrase)
-                           (do (unless (null? tr) (tr "bad passphrase given, try again...")) (self (- left 1)))
-                           (do (%say 2 (Str8 append "Load key \"" path "\": " (%message e) "\n")) ())))
-                 (ssh-identity-read-file path typed))))))
+               ((fn (_ id)
+                  (if (not (eq? id (lit wrong))) id
+                    (do (unless (null? tr) (tr "bad passphrase given, try again...")) (self (- left 1)))))
+                (try typed))))))
      (%get s (lit prompts)))))
 
 ; One identity offered: an open key signed with; a sealed one asked

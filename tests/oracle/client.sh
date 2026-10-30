@@ -25,7 +25,8 @@
 #   sealed   a key x-ssh seals under a passphrase opens in OpenSSH's
 #            ssh-keygen; x-ssh's -y, -l and -p say what OpenSSH's do of
 #            a key OpenSSH sealed; a sealed key authenticates the client,
-#            its passphrase by SSH_ASKPASS once the server would take it
+#            its passphrase by SSH_ASKPASS once the server would take it,
+#            and at a terminal under expect after a wrong one
 #   host keys  a Dropbear with an RSA host key, then an ECDSA one: each
 #            checked and recorded in known_hosts under its type
 #   key types  ssh-keygen -l -v on RSA and ECDSA keys, as OpenSSH's
@@ -226,6 +227,16 @@ if [ "$out" = "sealed key" ] && [ "$asked" = "Enter passphrase for key '$fx/xsea
 	echo "ok: sealed -- a sealed key authenticates the client, asked for once the server would take it, never in batch mode"
 else
 	fail "sealed: the client said '$out', asked '$asked', batch status $bstatus"
+fi
+# and at a terminal, under expect: a wrong passphrase, then the right one
+"$X" -l ssh -- ssh-keygen -q -t ed25519 -N 'sealed pw' -C sealed-tty -f "$fx/ttysealed" > /dev/null 2>> "$fx/client.err"
+cat "$fx/ttysealed.pub" >> "$fx/authorized_keys"
+if expect "$(dirname "$0")/../linux/passphrase.exp" "$port" "$fx/ttysealed" "$user" "$home" > "$fx/passphrase.out" 2>&1 \
+	&& grep -qx ok "$fx/passphrase.out" \
+	&& [ "$(ssh-keygen -y -P 'new pw' -f "$fx/ttysealed" 2>/dev/null)" = "$(cat "$fx/ttysealed.pub")" ]; then
+	echo "ok: sealed -- at a terminal the client asks a sealed key's passphrase, again after a wrong one, echoing neither; ssh-keygen -y and -p ask theirs"
+else
+	fail "sealed: at a terminal, $(cat "$fx/passphrase.out")"
 fi
 
 # host key types: a Dropbear with an RSA host key alone, then one with an

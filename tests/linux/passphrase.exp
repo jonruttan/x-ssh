@@ -1,11 +1,17 @@
 #!/usr/bin/expect -f
-# passphrase.exp PORT KEY -- a key sealed under "sealed pw" at the
-# terminal: x-ssh's client asks its passphrase, again after a wrong one,
-# echoing neither, and runs the command; x-ssh's ssh-keygen -y asks it
-# and prints the public line; -p asks the old one and the new one twice
-# and seals the key under "new pw".
+# passphrase.exp PORT KEY [USER HOME] -- a key sealed under "sealed pw"
+# at the terminal: x-ssh's client asks its passphrase, again after a
+# wrong one, echoing neither, and runs the command; x-ssh's ssh-keygen
+# -y asks it and prints the public line; -p asks the old one and the new
+# one twice and seals the key under "new pw".  USER and HOME are the
+# Linux container's, root and /tmp/prompt-home, unless given, as
+# tests/oracle/client.sh gives its own.  The wrong answer first is the
+# case an engine that swept a caught guard's handler died in: the
+# client's retry ran on in the handler's clause.
 set port [lindex $argv 0]
 set key [lindex $argv 1]
+set user [expr {[llength $argv] > 2 ? [lindex $argv 2] : "root"}]
+set home [expr {[llength $argv] > 3 ? [lindex $argv 3] : "/tmp/prompt-home"}]
 set timeout 120
 log_user 0
 
@@ -22,7 +28,7 @@ proc status {want} {
 	if {$got != $want} { puts "FAIL: status $got, not $want"; exit 1 }
 }
 
-spawn env HOME=/tmp/prompt-home $env(X) -l ssh -- ssh -F none -o StrictHostKeyChecking=accept-new -p $port -i $key -l root 127.0.0.1 "echo sealed-ok; exit 6"
+spawn env HOME=$home $env(X) -l ssh -- ssh -F none -o StrictHostKeyChecking=accept-new -p $port -i $key -l $user 127.0.0.1 "echo sealed-ok; exit 6"
 await "Enter passphrase for key '$key': " "no passphrase prompt"
 send "sealed px\r"
 await "Enter passphrase for key '$key': " "no second prompt after a wrong passphrase"
@@ -30,6 +36,7 @@ send "sealed pw\r"
 expect {
 	-re {sealed-ok} {}
 	timeout { puts "FAIL: no output after the right passphrase"; exit 1 }
+	eof { puts "FAIL: the client ended before its output, status [lindex [wait] 3]"; exit 1 }
 }
 if {[string first "sealed p" $expect_out(buffer)] >= 0} {
 	puts "FAIL: a passphrase was echoed: $expect_out(buffer)"

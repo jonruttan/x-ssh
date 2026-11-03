@@ -508,6 +508,7 @@
         (do (Sys setenv "TERM" (first term))
             (Term modes! 0 (List ref 3 term))))
       (List for-each (fn (_ v) (Sys setenv (first v) (rest v))) env)
+      ((fn (_ p) (unless (null? p) (Sys signal p (Sys sig-dfl)))) (%signal-number "PIPE"))
       (guard (e ()) (Sys chdir home))
       (def shell ((fn (_ s) (if (if (null? s) #t (= (Str8 length s) 0)) "/bin/sh" s)) (Sys getenv "SHELL")))
       (Sys exec shell (if (null? command) () (list "-c" command)))
@@ -548,10 +549,12 @@
 ; channel, 11 whether we have, 12 whether the client has sent EOF, 13 a
 ; session's terminal as (MASTER . SLAVE-PATH) or (), 14 its TERM and window
 ; as (TERM COLUMNS ROWS), 15 the bytes taken from the client not yet given
-; back.
+; back, 16 the bytes from the client not yet written to a command on
+; pipes, as ((BUF . LEN) ...), 17 that pipe: #t open, eof once those are
+; written, #f closed.
 (def %PEER 1) (def %OURS 2) (def %WINDOW 3) (def %MAX 4) (def %KIND 5) (def %CHILD 6)
 (def %OUT 7) (def %ERR 8) (def %FD 9) (def %PEER-CLOSED 10) (def %CLOSED 11) (def %PEER-EOF 12)
-(def %PTY 13) (def %TERM 14) (def %OWED 15)
+(def %PTY 13) (def %TERM 14) (def %OWED 15) (def %IN-Q 16) (def %IN 17)
 (def %ch (fn (_ ch i) (%oref ch i)))
 (def %ch! (fn (_ ch i v) (%oset! ch i v)))
 
@@ -576,7 +579,7 @@
 ; A channel added to the table, numbered next.
 (def %channel!
   (fn (_ run kind peer window max)
-    (def ch (Vector make 15 ()))
+    (def ch (Vector make 17 ()))
     (%ch! ch %PEER peer) (%ch! ch %OURS (%rn run %NEXT))
     (%rn! run %NEXT (+ (%rn run %NEXT) 1))
     (%ch! ch %WINDOW window) (%ch! ch %MAX max) (%ch! ch %KIND kind) (%ch! ch %OWED 0)
@@ -783,6 +786,48 @@
           (%ch! ch %WINDOW (- (%ch ch %WINDOW) got))
           (%moved! run got)))))
 
+; n bytes of the client's taken off its window: the window given back
+; once half of it is used, as OpenSSH gives it, so typed keys cost no
+; adjust each.
+(def %given!
+  (fn (_ c ch n)
+    (def owed (+ (%ch ch %OWED) n))
+    (if (< owed (>> %window 1))
+      (%ch! ch %OWED owed)
+      (do (def adj (%packet-of %msg-channel-window-adjust))
+          (ssh-put-uint32 adj (%ch ch %PEER))
+          (ssh-put-uint32 adj owed)
+          (%send c adj)
+          (%ch! ch %OWED 0)))))
+
+; A command's input written from the queue as far as its pipe takes it,
+; each byte given back to the window once written, so a command that
+; stops reading stops the client rather than the connection.  polled:
+; whether poll said the pipe had room, when a failed write means the
+; command's input is gone and what is queued for it is dropped.  The pipe
+; closes once the client's EOF has come and the queue is empty.
+(def %feed!
+  (fn (_ c ch polled)
+    (def fd (List ref 1 (%ch ch %CHILD)))
+    ((fn (self first?)
+       (def q (%ch ch %IN-Q))
+       (unless (null? q)
+         (do (def n (File write fd (first (first q)) (rest (first q))))
+             (match
+               ((> n 0)
+                 (do (def left (- (rest (first q)) n))
+                     (%ch! ch %IN-Q (if (= left 0) (rest q) (pair (pair (ssh-copy (first (first q)) n left) left) (rest q))))
+                     (%given! c ch n)
+                     (self #f)))
+               ((if polled first? #f)
+                 (do (%given! c ch (List fold (fn (_ acc b) (+ acc (rest b))) 0 q))
+                     (%ch! ch %IN-Q ())
+                     (%ch! ch %IN (lit eof))))
+               (#t ())))))
+     #t)
+    (when (if (null? (%ch ch %IN-Q)) (eq? (%ch ch %IN) (lit eof)) #f)
+      (do (Sys close fd) (%ch! ch %IN #f)))))
+
 ; Our CLOSE of a channel, once.
 (def %close!
   (fn (_ c ch)
@@ -842,7 +887,11 @@
                 (%ch! ch %CHILD kid)
                 (if (null? kid)
                   (%debug "refused: no pseudo-terminal")
-                  (do (%ch! ch %OUT #t) (%ch! ch %ERR (null? pty))))
+                  (do (%ch! ch %OUT #t) (%ch! ch %ERR (null? pty))
+                      ; a command on pipes is written as its input pipe
+                      ; has room, never waited on
+                      (when (null? (%ch ch %PTY))
+                        (do (Sys nonblock! (List ref 1 kid)) (%ch! ch %IN #t)))))
                 (%reply c ch want-reply (not (null? kid)))))
             (def start!
               (fn (_ command)
@@ -914,26 +963,26 @@
       ((= t %msg-channel-data)
         (do (def r (ssh-get-string in))
             (def bytes (ssh-copy (ssh-in-buf in) (first r) (rest r)))
-            (if (eq? (%ch ch %KIND) (lit session))
-              (unless (null? (%ch ch %CHILD)) (File write (List ref 1 (%ch ch %CHILD)) bytes (rest r)))
-              (guard (e ()) (Socket send-run (%ch ch %FD) bytes (rest r))))
-            ; the window given back once half of it is used, as OpenSSH
-            ; gives it: typed keys cost no adjust each
-            (def owed (+ (%ch ch %OWED) (rest r)))
-            (if (< owed (>> %window 1))
-              (%ch! ch %OWED owed)
-              (do (def adj (%packet-of %msg-channel-window-adjust))
-                  (ssh-put-uint32 adj (%ch ch %PEER))
-                  (ssh-put-uint32 adj owed)
-                  (%send c adj)
-                  (%ch! ch %OWED 0)))
+            (match
+              ((not (eq? (%ch ch %KIND) (lit session)))
+                (do (guard (e ()) (Socket send-run (%ch ch %FD) bytes (rest r)))
+                    (%given! c ch (rest r))))
+              ((null? (%ch ch %CHILD)) (%given! c ch (rest r)))
+              ((null? (%ch ch %PTY))
+                (if (eq? (%ch ch %IN) #t)
+                  (do (%ch! ch %IN-Q (List append (%ch ch %IN-Q) (list (pair bytes (rest r)))))
+                      (%feed! c ch #f))
+                  (%given! c ch (rest r))))
+              (#t (do (File write (List ref 1 (%ch ch %CHILD)) bytes (rest r))
+                      (%given! c ch (rest r)))))
             (%moved! run (rest r))))
       ((= t %msg-channel-eof)
         ; a session's input ends with its pipe closed; a terminal's is
         ; left open, as OpenSSH leaves it: closing the master would end the
         ; session under the shell
         (if (eq? (%ch ch %KIND) (lit session))
-          (unless (if (null? (%ch ch %CHILD)) #t (not (null? (%ch ch %PTY)))) (Sys close (List ref 1 (%ch ch %CHILD))))
+          (when (eq? (%ch ch %IN) #t)
+            (do (%ch! ch %IN (lit eof)) (%feed! c ch #f)))
           (do (guard (e ()) (Socket shutdown (%ch ch %FD) (lit write)))
               (%ch! ch %PEER-EOF #t)
               (unless (%ch ch %OUT) (%close! c ch)))))
@@ -958,6 +1007,8 @@
     (def run (Vector make 13 ()))
     (def tcp (%get s (lit tcp)))
     (def limits (%get s (lit limits)))
+    ; a write to a command gone fails rather than ending the connection
+    ((fn (_ p) (unless (null? p) (Sys signal p (Sys sig-ign)))) (%signal-number "PIPE"))
     (ssh-clocks-start!)
     (%rn! run %CHANNELS ()) (%rn! run %NEXT 0) (%rn! run %MOVED 0)
     (%rn! run %FORWARDING (if (str=? tcp "all") #t (str=? tcp "local"))) (%rn! run %SESSION ())
@@ -975,6 +1026,7 @@
                (def room (if (null? session) #f (> (%ch session %WINDOW) 0)))
                (def out (if (if room (%ch session %OUT) #f) (List ref 2 child) ()))
                (def err (if (if room (%ch session %ERR) #f) (List ref 3 child) ()))
+               (def input (if (null? session) () (if (null? (%ch session %IN-Q)) () (List ref 1 child))))
                (def open-forwards
                  (List filter (fn (_ ch) (if (null? (%ch ch %PEER)) #f (if (%ch ch %CLOSED) #f (if (%ch ch %OUT) (> (%ch ch %WINDOW) 0) #f))))
                    (%forwards run)))
@@ -984,12 +1036,14 @@
                        (Sys poll (List append (list (pair sock (list (lit in))))
                                               (if (null? out) () (list (pair out (list (lit in)))))
                                               (if (null? err) () (list (pair err (list (lit in)))))
+                                              (if (null? input) () (list (pair input (list (lit out)))))
                                               (List map (fn (_ l) (pair (first l) (list (lit in)))) (%rn run %LISTENERS))
                                               (if (null? (%rn run %AGENT)) () (list (pair (first (%rn run %AGENT)) (list (lit in)))))
                                               (List map (fn (_ ch) (pair (%ch ch %FD) (list (lit in)))) open-forwards))
                                  (ssh-wait-ms limits)))
                      (when (if (null? out) #f (%ready? ready out)) (%pump! c run session out %OUT #f))
                      (when (if (null? err) #f (%ready? ready err)) (%pump! c run session err %ERR #t))
+                     (when (if (null? input) #f (%ready? ready input)) (%feed! c session #t))
                      (List for-each
                        (fn (_ l) (when (%ready? ready (first l))
                                    (%open-forwarded! c run (Socket accept (first l)) (List ref 1 l) (List ref 2 l))))

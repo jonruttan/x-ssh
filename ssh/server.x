@@ -16,9 +16,9 @@
 ; shadow file, as PermitRootLogin and the rest allow, and run the
 ; command an "exec" asks for in the user's shell, its standard input the
 ; channel's data and its output the channel's, its exit status sent back.
-; Forwarding is served both ways.  One suite: curve25519-sha256,
-; ssh-ed25519, chacha20-poly1305@openssh.com.  The log goes to
-; syslog in OpenSSH's words, or to standard error.
+; Forwarding is served both ways.  The key exchange is curve25519-sha256,
+; the ciphers and MACs ssh/transport's, as Ciphers and MACs allow.  The
+; log goes to syslog in OpenSSH's words, or to standard error.
 
 (module ssh/server)
 
@@ -33,6 +33,7 @@
 (import ssh/bytes ssh-out ssh-put-byte ssh-put-bool ssh-put-uint32 ssh-put-text ssh-put-string ssh-put-bytes ssh-put-names ssh-out-run
   ssh-in ssh-in-buf ssh-get-byte ssh-get-bool ssh-get-uint32 ssh-get-string ssh-get-bytes ssh-get-text ssh-copy)
 (import ssh/transport ssh-open ssh-fd ssh-session-id ssh-pending? ssh-engines! ssh-exchange-versions! ssh-kex-server! ssh-random
+  ssh-cipher-names ssh-mac-names ssh-algorithms!
   ssh-send-packet! ssh-next-packet! ssh-expect! ssh-msg-service-request ssh-msg-service-accept
   ssh-msg-userauth-request ssh-msg-userauth-failure ssh-msg-userauth-success ssh-msg-disconnect
   ssh-msg-global-request ssh-msg-request-success ssh-msg-request-failure
@@ -49,7 +50,7 @@
 (import ssh/config ssh-config-read ssh-config-options ssh-config-first ssh-config-all ssh-config-faults
   ssh-config-time ssh-config-patterns? ssh-config-sshd-keywords
   ssh-config-line ssh-config-bad ssh-config-arg ssh-config-one ssh-config-choice ssh-config-yes? ssh-config-int-or-nil
-  ssh-config-count ssh-config-seconds ssh-config-channel-timeout)
+  ssh-config-count ssh-config-seconds ssh-config-channel-timeout ssh-config-algorithms)
 (import ssh/sys ssh-sys-me)
 
 (def %oref (prim-ref (lit obj) (lit ref)))
@@ -161,23 +162,6 @@
           (when (if (str=? c "-") named (if (if (str=? c "+") #f (not (str=? c "^"))) (not named) #f))
             (ssh-config-bad l (Str8 append kw " leaves out " ours ", the one served")))))))
 
-; An algorithm list as a filter of ours: a plain list keeps what it
-; names, a `-` list drops what it names, `+` and `^` lists keep them all;
-; one that would keep none is refused.
-(def %algorithm-list
-  (fn (_ lines kw ours)
-    (def l (ssh-config-line lines kw))
-    (if (null? l) ours
-      (do (def v (ssh-config-arg l))
-          (def c (if (> (Str8 length v) 0) (Str8 sub 0 1 v) ""))
-          (def names (Str8 split "," (if (List any? (fn (_ p) (str=? p c)) (list "+" "-" "^")) (Str8 sub 1 (- (Str8 length v) 1) v) v)))
-          (def named? (fn (_ a) (List any? (fn (_ n) (ssh-config-patterns? (list n) a)) names)))
-          (def kept (match ((str=? c "-") (List filter (fn (_ a) (not (named? a))) ours))
-                           ((if (str=? c "+") #t (str=? c "^")) ours)
-                           (#t (List filter named? ours))))
-          (when (null? kept) (ssh-config-bad l (Str8 append kw " leaves out every algorithm served")))
-          kept))))
-
 ; A ListenAddress as (ADDRESS . PORT), PORT () when it names none:
 ; host, host:port, [host]:port; 0.0.0.0 or :: is every address, ().
 (def %listen
@@ -228,7 +212,6 @@
     (def listens (List map %listen (List filter (fn (_ l) (str=? (first l) "listenaddress")) lines)))
     (def keys (List flat-map (fn (_ a) a) (ssh-config-all lines "hostkey")))
     (def akf (ssh-config-first lines "authorizedkeysfile"))
-    (%algorithms lines "ciphers" "chacha20-poly1305@openssh.com")
     (%algorithms lines "kexalgorithms" "curve25519-sha256")
     (list (pair (lit ports) ports*)
           (pair (lit listen)
@@ -241,9 +224,11 @@
                                    (if (if (= (List length akf) 1) (str=? (Str8 downcase (first akf)) "none") #f) () akf)))
           (pair (lit password) (ssh-config-yes? lines "passwordauthentication" #t))
           (pair (lit pubkey) (ssh-config-yes? lines "pubkeyauthentication" #t))
-          (pair (lit hostkey-algs) (%algorithm-list lines "hostkeyalgorithms"
+          (pair (lit ciphers) (ssh-config-algorithms lines "ciphers" ssh-cipher-names))
+          (pair (lit macs) (ssh-config-algorithms lines "macs" ssh-mac-names))
+          (pair (lit hostkey-algs) (ssh-config-algorithms lines "hostkeyalgorithms"
                                      (list "ssh-ed25519" "ecdsa-sha2-nistp256" "ecdsa-sha2-nistp384" "ecdsa-sha2-nistp521" "rsa-sha2-512" "rsa-sha2-256")))
-          (pair (lit pubkey-algs) (%algorithm-list lines "pubkeyacceptedalgorithms"
+          (pair (lit pubkey-algs) (ssh-config-algorithms lines "pubkeyacceptedalgorithms"
                                     (list "ssh-ed25519" "ecdsa-sha2-nistp256" "ecdsa-sha2-nistp384" "ecdsa-sha2-nistp521" "rsa-sha2-512" "rsa-sha2-256")))
           (pair (lit empty) (ssh-config-yes? lines "permitemptypasswords" #f))
           (pair (lit root) ((fn (_ v) (if (str=? v "without-password") "prohibit-password" v))
@@ -276,6 +261,8 @@
                 (Str8 append "passwordauthentication " (yn (%get s (lit password))))
                 (Str8 append "pubkeyauthentication " (yn (%get s (lit pubkey))))
                 (Str8 append "pubkeyacceptedalgorithms " (Str8 join "," (%get s (lit pubkey-algs))))
+                (Str8 append "ciphers " (Str8 join "," (%get s (lit ciphers))))
+                (Str8 append "macs " (Str8 join "," (%get s (lit macs))))
                 (Str8 append "hostkeyalgorithms " (Str8 join "," (%get s (lit hostkey-algs))))
                 (Str8 append "permitemptypasswords " (yn (%get s (lit empty))))
                 (Str8 append "permitrootlogin " (%get s (lit root)))
@@ -1154,6 +1141,7 @@
     (def user
       (guard (e ())
         (ssh-exchange-versions! c)
+        (ssh-algorithms! c (%get s (lit ciphers)) (%get s (lit macs)))
         (ssh-kex-server! c keys (%get s (lit hostkey-algs)))
         (%authenticate c s from)))
     (if (null? user)

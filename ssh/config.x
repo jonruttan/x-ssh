@@ -332,8 +332,25 @@
         "challengeresponseauthentication" "protocol" "cipher" "rsaauthentication" "useroaming"
         "pubkeyacceptedkeytypes" "hostbasedkeytypes"))
 
+; An algorithm list as a filter of ours: a plain list keeps what it
+; names, a `-` list drops what it names, `+` and `^` lists keep them all;
+; one that would keep none is refused.
+(def ssh-config-algorithms
+  (fn (_ lines kw ours)
+    (def l (ssh-config-line lines kw))
+    (if (null? l) ours
+      (do (def v (ssh-config-arg l))
+          (def c (if (> (Str8 length v) 0) (Str8 sub 0 1 v) ""))
+          (def names (Str8 split "," (if (List any? (fn (_ p) (str=? p c)) (list "+" "-" "^")) (Str8 sub 1 (- (Str8 length v) 1) v) v)))
+          (def named? (fn (_ a) (List any? (fn (_ n) (ssh-config-patterns? (list n) a)) names)))
+          (def kept (match ((str=? c "-") (List filter (fn (_ a) (not (named? a))) ours))
+                           ((if (str=? c "+") #t (str=? c "^")) ours)
+                           (#t (List filter named? ours))))
+          (when (null? kept) (ssh-config-bad l (Str8 append kw " leaves out every algorithm served")))
+          kept))))
+
 (provide ssh/config ssh-config-words ssh-config-wild? ssh-config-patterns? ssh-config-time ssh-config-tilde
   ssh-config-read ssh-config-options ssh-config-first ssh-config-all ssh-config-faults
   ssh-config-sshd-keywords ssh-config-ssh-keywords
   ssh-config-line ssh-config-bad ssh-config-arg ssh-config-one ssh-config-choice ssh-config-yes? ssh-config-int-or-nil
-  ssh-config-count ssh-config-seconds ssh-config-channel-timeout)
+  ssh-config-count ssh-config-seconds ssh-config-channel-timeout ssh-config-algorithms)

@@ -22,6 +22,8 @@
 #             by OpenSSH's client held to its algorithm, P-256's by x-ssh's
 #   refused   a key not in authorized_keys is refused
 #   input     200000 random bytes through `cksum` on the server's side
+#   ciphers   each cipher and MAC served carries 200000 bytes through `cat`
+#             and back: OpenSSH's client, x-ssh's, and Dropbear's AES-CTR
 #   sftp      OpenSSH's sftp and scp (SFTP) through Subsystem internal-sftp;
 #             sftp-server -R as a Subsystem command refuses a put; an
 #             unconfigured subsystem is refused, as the log says
@@ -204,6 +206,35 @@ if [ "$got" = "$want" ]; then
 	echo "ok: input -- 200000 bytes reach the command whole ($want)"
 else
 	fail "input: the server side's cksum '$got', the client side's '$want'"
+fi
+
+# ciphers: each cipher and MAC served, 200000 bytes through `cat` and back,
+# by OpenSSH's client, x-ssh's and Dropbear's (its AES-CTR with HMAC-SHA2-256)
+suites="chacha20-poly1305@openssh.com aes128-gcm@openssh.com aes256-gcm@openssh.com"
+for c in aes128-ctr aes192-ctr aes256-ctr; do
+	for m in hmac-sha2-256-etm@openssh.com hmac-sha2-512-etm@openssh.com hmac-sha2-256 hmac-sha2-512; do
+		suites="$suites $c/$m"
+	done
+done
+bad=""
+for s in $suites; do
+	c=${s%%/*}
+	case $s in */*) m="-m ${s#*/}" ;; *) m="" ;; esac
+	# shellcheck disable=SC2086
+	o=$($ossh -i "$fx/osshkey" -c "$c" $m "$user@127.0.0.1" cat < "$fx/input" 2> "$fx/client.err" | cksum)
+	# shellcheck disable=SC2086
+	x=$(xssh -c "$c" $m 127.0.0.1 cat < "$fx/input" 2>> "$fx/client.err" | cksum)
+	[ "$o" = "$want" ] || bad="$bad openssh:$s"
+	[ "$x" = "$want" ] || bad="$bad x-ssh:$s"
+done
+for s in aes128-ctr/hmac-sha2-256 aes256-ctr/hmac-sha2-256; do
+	d=$("$db/dbclient" -y -y -p "$port" -i "$fx/dbkey" -c "${s%%/*}" -m "${s#*/}" "$user@127.0.0.1" cat < "$fx/input" 2>> "$fx/client.err" | cksum)
+	[ "$d" = "$want" ] || bad="$bad dropbear:$s"
+done
+if [ -z "$bad" ]; then
+	echo "ok: ciphers -- every cipher and MAC carries 200000 bytes both ways, for OpenSSH's client, x-ssh's and Dropbear's"
+else
+	fail "ciphers:$bad"
 fi
 
 # sftp: Subsystem sftp internal-sftp served to OpenSSH's sftp (a file put

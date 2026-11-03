@@ -31,6 +31,8 @@ authorizedkeysfile .ssh/authorized_keys .ssh/authorized_keys2
 passwordauthentication yes
 pubkeyauthentication yes
 pubkeyacceptedalgorithms ssh-ed25519,ecdsa-sha2-nistp256,ecdsa-sha2-nistp384,ecdsa-sha2-nistp521,rsa-sha2-512,rsa-sha2-256
+ciphers chacha20-poly1305@openssh.com,aes128-ctr,aes192-ctr,aes256-ctr,aes128-gcm@openssh.com,aes256-gcm@openssh.com
+macs hmac-sha2-256-etm@openssh.com,hmac-sha2-512-etm@openssh.com,hmac-sha2-256,hmac-sha2-512
 hostkeyalgorithms ssh-ed25519,ecdsa-sha2-nistp256,ecdsa-sha2-nistp384,ecdsa-sha2-nistp521,rsa-sha2-512,rsa-sha2-256
 permitemptypasswords no
 permitrootlogin prohibit-password
@@ -64,10 +66,10 @@ maxauthtries 6
 (import ssh/server ssh-server-settings)
 (import ssh/config ssh-config-options)
 (write (List map (fn (_ o) (guard (e (e msg)) (ssh-server-settings (ssh-config-options (list o)))))
-  (list "Port ssh" "PermitRootLogin maybe" "Ciphers aes128-ctr" "ChannelTimeout session=5")))
+  (list "Port ssh" "PermitRootLogin maybe" "Ciphers 3des-cbc" "ChannelTimeout session=5")))
 ```
 ---
-    ("command-line: line 1: Badly formatted port number." "command-line: line 1: unsupported option \"maybe\"." "command-line: line 1: ciphers leaves out chacha20-poly1305@openssh.com, the one served" "command-line: line 1: the channel timeout session=5 is not served; global= is")
+    ("command-line: line 1: Badly formatted port number." "command-line: line 1: unsupported option \"maybe\"." "command-line: line 1: ciphers leaves out every algorithm served" "command-line: line 1: the channel timeout session=5 is not served; global= is")
 
 ### Subsystem lines: a name and its command, printed as -T prints them
 

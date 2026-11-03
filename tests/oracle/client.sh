@@ -18,6 +18,8 @@
 #            refused, each status 255 before authentication
 #   input    200000 random bytes on the client's standard input, past
 #            Dropbear's 24 KB window, through `cksum` on the far side
+#   ciphers  AES-CTR with HMAC-SHA2-256 (Dropbear builds without -512 by
+#            default), 200000 bytes through `cat` and back
 #   keys     a key x-ssh's ssh-keygen makes is read by OpenSSH's with the
 #            fingerprint and randomart x-ssh printed and the public line
 #            it wrote; x-ssh's -l and -y say what OpenSSH's do of a key
@@ -136,6 +138,19 @@ if [ "$got" = "$want" ]; then
 	echo "ok: input -- 200000 bytes of standard input arrive whole ($want)"
 else
 	fail "input: the far side's cksum '$got', the near side's '$want'"
+fi
+
+# ciphers: Dropbear's AES-CTR with each HMAC it serves, 200000 bytes
+# through `cat` and back
+bad=""
+for s in aes128-ctr/hmac-sha2-256 aes256-ctr/hmac-sha2-256; do
+	got=$(xssh -c "${s%%/*}" -m "${s#*/}" 127.0.0.1 cat < "$fx/input" 2>> "$fx/client.err" | cksum)
+	[ "$got" = "$want" ] || bad="$bad $s"
+done
+if [ -z "$bad" ]; then
+	echo "ok: ciphers -- AES-CTR with HMAC-SHA2-256 carries 200000 bytes both ways"
+else
+	fail "ciphers:$bad"
 fi
 
 # keys: a key x-ssh makes is one OpenSSH reads, with the fingerprint and

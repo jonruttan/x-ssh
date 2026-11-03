@@ -24,8 +24,11 @@ it is tested against.
 
 ## Served
 
-Every end speaks curve25519-sha256 and chacha20-poly1305@openssh.com,
-with publickey and password authentication and one session a
+Every end speaks curve25519-sha256 and OpenSSH's ciphers, in its order:
+chacha20-poly1305@openssh.com, aes128-ctr, aes192-ctr, aes256-ctr,
+aes128-gcm@openssh.com and aes256-gcm@openssh.com, the CTR ciphers with
+hmac-sha2-256 or hmac-sha2-512, their -etm@openssh.com forms first.
+Authentication is by publickey and password, with one session a
 connection: a command, or a shell on a terminal.  Keys and signatures:
 ssh-ed25519, RSA (rsa-sha2-256 and -512) and ECDSA (nistp256, nistp384,
 nistp521), for host keys and user keys, at either end.
@@ -45,7 +48,8 @@ nistp521), for host keys and user keys, at either end.
   RemoteForward, `-g` GatewayPorts, `-N` SessionType none, `-s` SessionType
   subsystem (the command its name), `-n` StdinNull, `-A` and `-a`
   ForwardAgent,
-  `-q` and `-v` LogLevel; `-W host:port` carries standard input and
+  `-q` and `-v` LogLevel, `-c` Ciphers, `-m` MACs; `-W host:port`
+  carries standard input and
   output through the server, as a ProxyCommand wants; `-G` prints the
   settings in force.  Served keywords: Hostname, Port, User,
   IdentityFile (`~/.ssh/id_rsa`, `id_ecdsa` and `id_ed25519` by default;
@@ -59,7 +63,8 @@ nistp521), for host keys and user keys, at either end.
   PubkeyAuthentication, NumberOfPasswordPrompts, LocalForward,
   RemoteForward, GatewayPorts, ClearAllForwardings, ServerAliveInterval,
   ServerAliveCountMax, ChannelTimeout (`global=`), SendEnv, SetEnv,
-  RemoteCommand, SessionType, StdinNull, LogLevel, IgnoreUnknown.  A new
+  RemoteCommand, SessionType, StdinNull, LogLevel, Ciphers, MACs,
+  IgnoreUnknown.  A new
   host is asked about at the terminal under StrictHostKeyChecking ask,
   as OpenSSH asks; a changed key is always refused.  A password is asked
   at the terminal with echo off, or of SSH_ASKPASS as
@@ -76,6 +81,7 @@ nistp521), for host keys and user keys, at either end.
   or ECDSA, one of each type, OpenSSH's or Dropbear's file; one under a
   passphrase is refused, as OpenSSH's sshd refuses it), PidFile,
   AuthorizedKeysFile, PubkeyAcceptedAlgorithms, HostKeyAlgorithms,
+  Ciphers, MACs,
   PasswordAuthentication (checked against
   `/etc/shadow` with crypt(3)'s
   DES, `$1$`, `$5$` or `$6$`), PubkeyAuthentication,
@@ -153,8 +159,6 @@ nistp521), for host keys and user keys, at either end.
   with either.
 - `-V` on each, and `--help` from its option declaration.
 
-Not served yet: other ciphers.
-
 The oracles in `tests/oracle/` are the live tests: `client.sh` drives
 the client against a built Dropbear, `server.sh` drives the server with
 Dropbear's and OpenSSH's clients, `scp.sh` runs scp from either end, and
@@ -180,7 +184,7 @@ Set `X=/path/to/x` to use a particular x.
     run.x             the entry
     ssh/base.x        the parts, assembled
     ssh/bytes.x       the wire's encodings
-    ssh/transport.x   the transport layer, from either end: kex, the cipher
+    ssh/transport.x   the transport layer, from either end: kex, the ciphers
     ssh/session.x     the connection protocol, the client's side
     ssh/tty.x         a terminal's modes on the wire
     ssh/config.x      ssh_config and sshd_config, as OpenSSH reads them

@@ -24,7 +24,8 @@
 (import ssh/ask ssh-ask-tty ssh-ask-secret)
 (import ssh/bytes ssh-copy)
 (import ssh/transport ssh-open ssh-host-key ssh-engines! ssh-exchange-versions! ssh-kex!
-  ssh-auth-service! ssh-auth-publickey-query! ssh-auth-publickey! ssh-auth-password! ssh-hostkey-names ssh-server-sig-algs)
+  ssh-auth-service! ssh-auth-publickey-query! ssh-auth-publickey! ssh-auth-password! ssh-hostkey-names ssh-server-sig-algs
+  ssh-cipher-names ssh-mac-names ssh-algorithms!)
 (import ssh/session ssh-session-run! ssh-disconnect!)
 (import ssh/keys ssh-key-file-sealed? ssh-key-wrong-passphrase ssh-identity-read-file ssh-pubkey-of-key-file)
 (import ssh/known ssh-known-name ssh-known-check ssh-known-types ssh-known-add!)
@@ -34,7 +35,7 @@
 (import ssh/config ssh-config-read ssh-config-options ssh-config-first ssh-config-all ssh-config-faults
   ssh-config-tilde ssh-config-time ssh-config-patterns? ssh-config-ssh-keywords
   ssh-config-line ssh-config-bad ssh-config-arg ssh-config-one ssh-config-choice ssh-config-yes? ssh-config-int-or-nil
-  ssh-config-count ssh-config-seconds ssh-config-channel-timeout)
+  ssh-config-count ssh-config-seconds ssh-config-channel-timeout ssh-config-algorithms)
 (import ssh/sys ssh-sys-me)
 
 (def %byte-len (prim-ref (lit str) (lit byte-len)))
@@ -173,7 +174,9 @@
           (pair (lit session) session)
           (pair (lit command) ((fn (_ c) (if (str=? (Str8 downcase c) "none") () c)) (ssh-config-one lines "remotecommand" "none")))
           (pair (lit stdin-null) (ssh-config-yes? lines "stdinnull" #f))
-          (pair (lit tty) (ssh-config-choice lines "requesttty" (list "no" "yes" "force" "auto") "auto")))))
+          (pair (lit tty) (ssh-config-choice lines "requesttty" (list "no" "yes" "force" "auto") "auto"))
+          (pair (lit ciphers) (ssh-config-algorithms lines "ciphers" ssh-cipher-names))
+          (pair (lit macs) (ssh-config-algorithms lines "macs" ssh-mac-names)))))
 
 ; The settings as -G prints them, a keyword and its value a line.
 (def %print
@@ -198,6 +201,8 @@
                 (Str8 append "serveraliveinterval " (%num (first limits)))
                 (Str8 append "serveralivecountmax " (%num (List ref 1 limits)))
                 (Str8 append "channeltimeout " (if (= (List ref 2 limits) 0) "none" (Str8 append "global=" (%num (List ref 2 limits)))))
+                (Str8 append "ciphers " (Str8 join "," (%get s (lit ciphers))))
+                (Str8 append "macs " (Str8 join "," (%get s (lit macs))))
                 (Str8 append "gatewayports " (yn (%get s (lit gateway)))))
           (List map (fn (_ f) (Str8 append "localforward " (fwd f))) (%get s (lit forwards)))
           (List map (fn (_ f) (Str8 append "remoteforward " (fwd f))) (%get s (lit remotes)))
@@ -463,6 +468,7 @@
         (def c (ssh-open fd tr))
         (ssh-engines! c)
         (ssh-exchange-versions! c)
+        (ssh-algorithms! c (%get s (lit ciphers)) (%get s (lit macs)))
         (ssh-kex! c (%hostkey-order s))
         (if (not (%host-key-ok c s addr quiet tr))
           (do (Socket close fd) 255)

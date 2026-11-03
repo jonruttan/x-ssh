@@ -8,12 +8,14 @@
 ;
 ; RFC 4253: the version exchange, the binary packet protocol, the key
 ; exchange and the keys it derives; RFC 4252 for the authentication that
-; follows.  One cipher suite, the one OpenSSH prefers and the
-; codecs x-lang has: curve25519-sha256, ssh-ed25519, and
+; follows.  The key exchange is curve25519-sha256.  The ciphers are
 ; chacha20-poly1305@openssh.com, whose framing is OpenSSH's
 ; PROTOCOL.chacha20poly1305 -- two keys from the 64 derived, the length
 ; under the second, the payload under the first from block one, the
-; Poly1305 key from block zero, the packet's sequence number the nonce.
+; Poly1305 key from block zero, the packet's sequence number the nonce;
+; aes128-gcm@openssh.com and aes256-gcm@openssh.com (RFC 5647, the length
+; the additional data); and aes128-, aes192- and aes256-ctr (RFC 4344)
+; with hmac-sha2-256 or -512 (RFC 6668), or their -etm@openssh.com forms.
 ;
 ; Both ends are here: the client's key exchange and authentication, and
 ; the server's key exchange, the rest of the server being ssh/server.x.
@@ -32,6 +34,10 @@
 (import x/codec/sha256)
 (import x/codec/chacha20)
 (import x/codec/poly1305)
+(import x/codec/aes)
+(import x/codec/ghash)
+(import x/codec/hmac)
+(import x/codec/sha512)
 (import x/codec/x25519)
 (import x/codec/ed25519)
 (import ssh/bytes ssh-out ssh-put-byte ssh-put-bool ssh-put-uint32 ssh-put-bytes ssh-put-string ssh-put-text ssh-put-mpint ssh-put-names ssh-out-run
@@ -69,22 +75,24 @@
 ; --- the connection record ------------------------------------------------
 ;
 ; slots: 1 fd | 2 pending bytes (BUF . LEN) | 3 send seq | 4 recv seq
-;        5 send key as (K_1 . K_2) or () | 6 receive key or () | 7 session id
+;        5 send keys, a record (below), or () | 6 receive keys or () | 7 session id
 ;        8 peer's version | 9 server's host key | 10 the trace fn or ()
 ;        11 the pending packet's length as (SEQ KEY LEN), once unveiled, or ()
 ;        12 the server's server-sig-algs (RFC 8308), or () until it says
+;        13 the ciphers and MACs offered, as (CIPHERS . MACS)
 
 (def %slot (fn (_ c i) (%oref c i)))
 (def %slot! (fn (_ c i v) (%oset! c i v)))
 
 (def ssh-open
   (fn (_ fd trace)
-    (def c (Vector make 12 ()))
+    (def c (Vector make 13 ()))
     (%slot! c 1 fd)
     (%slot! c 2 (pair (%make-str 0) 0))
     (%slot! c 3 0)
     (%slot! c 4 0)
     (%slot! c 10 trace)
+    (%slot! c 13 (pair ssh-cipher-names ssh-mac-names))
     c))
 
 (def ssh-fd (fn (_ c) (%slot c 1)))
@@ -104,16 +112,16 @@
 (def ssh-pending?
   (fn (_ c)
     (def run (%slot c 2))
-    (if (< (rest run) 4) #f
-      (do (def key (%slot c 6))
-          (def seq (%slot c 4))
+    (def key (%slot c 6))
+    (if (< (rest run) (%head-size key)) #f
+      (do (def seq (%slot c 4))
           (def known (%slot c 11))
           (def len (if (if (null? known) #f (if (= (first known) seq) (eq? (List ref 1 known) key) #f))
                      (List ref 2 known)
                      (do (def n (%packet-length key seq (first run)))
                          (%slot! c 11 (list seq key n))
                          n)))
-          (>= (rest run) (+ 4 len (if (null? key) 0 16)))))))
+          (>= (rest run) (+ 4 len (%trailer key)))))))
 
 (def ssh-trace
   (fn (_ c text) (unless (null? (%slot c 10)) ((%slot c 10) text))))
@@ -204,7 +212,40 @@
          (self (+ i 1))))
      0)))
 
-; --- the binary packet protocol (6), with chacha20-poly1305 --------------
+; --- the binary packet protocol (6) -------------------------------------
+;
+; A direction's keys are a record, made when NEWKEYS puts them in place:
+;   1 the cipher: chacha, gcm or ctr
+;   2 its key: chacha's as (K_1 . K_2), AES's the derived bytes
+;   3 AES's key size in bytes
+;   4 AES's IV, a string that moves on as packets go: ctr's 16-byte
+;     counter block, gcm's 12-byte nonce, its last 8 bytes the count
+;   5 the MAC, for ctr: (HASH KEY SIZE ETM?), HASH sha256 or sha512
+; Under chacha20-poly1305 and AES-GCM the length is outside the padding's
+; alignment and the tag is the cipher's own.  Under AES-CTR the length is
+; enciphered with the rest and aligned with it, and the MAC is
+; HMAC(seq || packet); under an -etm MAC (OpenSSH's PROTOCOL) the length
+; stays clear and outside the alignment, and the MAC is over seq, the
+; length and the ciphertext, checked before a byte is deciphered.
+
+(def %k-cipher (fn (_ k) (%oref k 1)))
+(def %k-key (fn (_ k) (%oref k 2)))
+(def %k-size (fn (_ k) (%oref k 3)))
+(def %k-iv (fn (_ k) (%oref k 4)))
+(def %k-mac (fn (_ k) (%oref k 5)))
+
+(def %etm? (fn (_ k) (if (null? k) #f (if (null? (%k-mac k)) #f (List ref 3 (%k-mac k))))))
+
+; Whether the length field is enciphered with the packet (CTR without
+; -etm): then the first block, not the first four bytes, tells it.
+(def %length-hidden? (fn (_ k) (if (null? k) #f (if (eq? (%k-cipher k) 'ctr) (not (%etm? k)) #f))))
+
+; The bytes after the packet: the tag or the MAC.
+(def %trailer
+  (fn (_ k)
+    (match ((null? k) 0)
+           ((eq? (%k-cipher k) 'ctr) (List ref 2 (%k-mac k)))
+           (#t 16))))
 
 ; The nonce for a sequence number: the eight-byte counter, then the
 ; number as eight big-endian bytes, which is how the cipher's IV reads.
@@ -226,68 +267,151 @@
 (def %poly-key
   (fn (_ k2 iv0) (ssh-copy (ChaCha20 block k2 iv0) 0 32)))
 
-; A packet's length field unveiled: the clear bytes under no key, else
-; K_1's keystream over them.
+; n added to the big-endian number in s's bytes from..to-1, in place,
+; the carry out of byte from dropped: ctr's counter moved on n blocks,
+; gcm's invocation count by one.
+(def %bump!
+  (fn (_ s from to n)
+    (def p (%str->ptr s))
+    ((fn (self i carry)
+       (unless (if (< i from) #t (= carry 0))
+         (do (def v (+ (%byte s i) carry))
+             (%pset1 p i (& v 255) 1)
+             (self (- i 1) (>> v 8)))))
+     (- to 1) n)))
+
+; A sequence number as four big-endian bytes, as the MAC reads it.
+(def %seq-bytes
+  (fn (_ seq)
+    (def s (%make-str 4))
+    (def p (%str->ptr s))
+    (%pset1 p 0 (>> seq 24) 1) (%pset1 p 1 (>> seq 16) 1) (%pset1 p 2 (>> seq 8) 1) (%pset1 p 3 seq 1)
+    s))
+
+; The MAC over seq and a region, as a fresh string.
+(def %mac
+  (fn (_ k seq s start len)
+    (def m (%k-mac k))
+    (def in (ssh-join (list (list (%seq-bytes seq) 0 4) (list s start len))))
+    (Hmac mac (first m) (list (List ref 1 m) 0 (List ref 2 m)) (list (first in) 0 (rest in)))))
+
+; n bytes of x and y alike, every byte looked at, so how far a forgery
+; matched is not timed.
+(def %tags-match?
+  (fn (_ x xs y ys n)
+    (= ((fn (self i acc) (if (= i n) acc (self (+ i 1) (| acc (- (| (%byte x (+ xs i)) (%byte y (+ ys i))) (& (%byte x (+ xs i)) (%byte y (+ ys i))))))))
+        0 0)
+       0)))
+
+; A packet's length field unveiled from the bytes that start it, nothing
+; consumed: the clear bytes under no key, GCM or an -etm MAC; K_1's
+; keystream over them under chacha; the first block deciphered under
+; CTR, its counter left where it is.
 (def %packet-length
   (fn (_ key seq head)
-    (def lenb (if (null? key) head (ChaCha20 xor (first key) (%iv 0 seq) head 0 4)))
+    (def lenb
+      (match ((null? key) head)
+             ((eq? (%k-cipher key) 'chacha) (ChaCha20 xor (first (%k-key key)) (%iv 0 seq) head 0 4))
+             ((%length-hidden? key) (Aes ctr (%k-key key) (%k-size key) (%k-iv key) head 0 16))
+             (#t head)))
     (| (<< (%byte lenb 0) 24) (| (<< (%byte lenb 1) 16) (| (<< (%byte lenb 2) 8) (%byte lenb 3))))))
 
-; A payload sent as one packet: padded to a multiple of eight (the
-; length field aside, as the AEAD framing has it), at least four bytes
-; of it, then in the clear or under the keys.
+; How many bytes must be in before the length can be unveiled.
+(def %head-size (fn (_ key) (if (%length-hidden? key) 16 4)))
+
+; A payload sent as one packet: padded to the cipher's block, eight
+; under none and chacha, sixteen under AES, with at least four bytes of
+; padding, the length field counted toward the alignment only where it
+; is enciphered with the rest; then in the clear or under the keys.
 (def ssh-send-packet!
   (fn (_ c payload n)
     (def key (%slot c 5))
     (def seq (%slot c 3))
-    ; in the clear the length field counts toward the alignment (6.1);
-    ; under the AEAD it is associated data, outside it
-    (def pad ((fn (_ p) (if (< p 4) (+ p 8) p)) (- 8 (& (+ n (if (null? key) 5 1)) 7))))
+    (def block (if (null? key) 8 (if (eq? (%k-cipher key) 'chacha) 8 16)))
+    (def counted (+ n 1 (if (if (null? key) #t (%length-hidden? key)) 4 0)))
+    (def pad ((fn (_ p) (if (< p 4) (+ p block) p)) (- block (& counted (- block 1)))))
     (def len (+ 1 n pad))
     (def body (ssh-out))
+    (ssh-put-uint32 body len)
     (ssh-put-byte body pad)
     (ssh-put-bytes body payload 0 n)
     (ssh-put-bytes body (ssh-random pad) 0 pad)
-    (def b (ssh-out-run body))
-    (def head (ssh-out))
-    (ssh-put-uint32 head len)
-    (def h (ssh-out-run head))
-    (if (null? key)
-      (do (def whole (ssh-join (list (list (first h) 0 4) (list (first b) 0 len))))
-          (%send! c (first whole) (rest whole)))
-      (do (def iv0 (%iv 0 seq))
-          (def enc-len (ChaCha20 xor (first key) iv0 (first h) 0 4))
-          (def enc (ChaCha20 xor (rest key) (%iv 1 seq) (first b) 0 len))
-          (def framed (ssh-join (list (list enc-len 0 4) (list enc 0 len))))
-          (def tag (Poly1305 mac (%poly-key (rest key) iv0) (first framed) 0 (rest framed)))
-          (def whole (ssh-join (list (list (first framed) 0 (rest framed)) (list tag 0 16))))
-          (%send! c (first whole) (rest whole))))
+    ; the packet, its length field first: 4 + len bytes
+    (def b (first (ssh-out-run body)))
+    (def total (+ 4 len))
+    (def wire
+      (match
+        ((null? key) (list (list b 0 total)))
+        ((eq? (%k-cipher key) 'chacha)
+          (do (def iv0 (%iv 0 seq))
+              (def enc-len (ChaCha20 xor (first (%k-key key)) iv0 b 0 4))
+              (def enc (ChaCha20 xor (rest (%k-key key)) (%iv 1 seq) b 4 len))
+              (def framed (ssh-join (list (list enc-len 0 4) (list enc 0 len))))
+              (def tag (Poly1305 mac (%poly-key (rest (%k-key key)) iv0) (first framed) 0 (rest framed)))
+              (list (list (first framed) 0 total) (list tag 0 16))))
+        ((eq? (%k-cipher key) 'gcm)
+          (do (def sealed (Aes gcm-seal (%k-key key) (%k-size key) (%k-iv key) b 0 4 4 len))
+              (%bump! (%k-iv key) 4 12 1)
+              (list (list b 0 4) (list (first sealed) 0 len) (list (rest sealed) 0 16))))
+        ((%etm? key)
+          (do (def enc (Aes ctr (%k-key key) (%k-size key) (%k-iv key) b 4 len))
+              (%bump! (%k-iv key) 0 16 (>> len 4))
+              (def framed (ssh-join (list (list b 0 4) (list enc 0 len))))
+              (def mac (%mac key seq (first framed) 0 total))
+              (list (list (first framed) 0 total) (list mac 0 (%trailer key)))))
+        (#t
+          (do (def mac (%mac key seq b 0 total))
+              (def enc (Aes ctr (%k-key key) (%k-size key) (%k-iv key) b 0 total))
+              (%bump! (%k-iv key) 0 16 (>> total 4))
+              (list (list enc 0 total) (list mac 0 (%trailer key)))))))
+    (def whole (ssh-join wire))
+    (%send! c (first whole) (rest whole))
     (%slot! c 3 (+ seq 1))))
 
 ; A packet received: its payload as (BUF . LEN).  Under the keys, the
-; length is unveiled first, then the tag checked over the whole before
-; a byte of the payload is trusted.
+; length is unveiled first, then the tag or MAC checked before a byte of
+; the payload is trusted -- under CTR without -etm, which MACs the
+; plaintext, before any is handed on.
 (def ssh-recv-packet!
   (fn (_ c)
     (def key (%slot c 6))
     (def seq (%slot c 4))
-    (def head (%take! c 4))
+    (%pending! c (%head-size key))
     (def known (%slot c 11))
     (def len (if (if (null? known) #f (if (= (first known) seq) (eq? (List ref 1 known) key) #f))
                (List ref 2 known)
-               (%packet-length key seq head)))
+               (%packet-length key seq (first (%slot c 2)))))
     (%slot! c 11 ())
     (when (if (> len 262144) #t (< len 5)) (Err raise 'value "ssh: a packet of an impossible length" ()))
+    (unless (if (null? key) #t (if (eq? (%k-cipher key) 'chacha) #t (= (& (if (%length-hidden? key) (+ len 4) len) 15) 0)))
+      (Err raise 'value "ssh: a packet not a whole number of cipher blocks" ()))
+    (def total (+ 4 len))
+    (def t (%trailer key))
+    (def w (%take! c (+ total t)))
+    (def forged (fn (_) (Err raise 'value "ssh: a packet failed its authentication tag" ())))
+    ; the packet from its padding-length byte on
     (def body
-      (if (null? key)
-        (%take! c len)
-        (do (def enc (%take! c len))
-            (def tag (%take! c 16))
-            (def framed (ssh-join (list (list head 0 4) (list enc 0 len))))
-            (def want (Poly1305 mac (%poly-key (rest key) (%iv 0 seq)) (first framed) 0 (rest framed)))
-            (unless (ssh-same-bytes? want 0 tag 0 16)
-              (Err raise 'value "ssh: a packet failed its authentication tag" ()))
-            (ChaCha20 xor (rest key) (%iv 1 seq) enc 0 len))))
+      (match
+        ((null? key) (ssh-copy w 4 len))
+        ((eq? (%k-cipher key) 'chacha)
+          (do (def want (Poly1305 mac (%poly-key (rest (%k-key key)) (%iv 0 seq)) w 0 total))
+              (unless (%tags-match? want 0 w total 16) (forged))
+              (ChaCha20 xor (rest (%k-key key)) (%iv 1 seq) w 4 len)))
+        ((eq? (%k-cipher key) 'gcm)
+          (do (def plain (Aes gcm-open (%k-key key) (%k-size key) (%k-iv key) w 0 4 4 len (ssh-copy w total 16)))
+              (when (null? plain) (forged))
+              (%bump! (%k-iv key) 4 12 1)
+              plain))
+        ((%etm? key)
+          (do (unless (%tags-match? (%mac key seq w 0 total) 0 w total t) (forged))
+              (def plain (Aes ctr (%k-key key) (%k-size key) (%k-iv key) w 4 len))
+              (%bump! (%k-iv key) 0 16 (>> len 4))
+              plain))
+        (#t
+          (do (def plain (Aes ctr (%k-key key) (%k-size key) (%k-iv key) w 0 total))
+              (%bump! (%k-iv key) 0 16 (>> total 4))
+              (unless (%tags-match? (%mac key seq plain 0 total) 0 w total t) (forged))
+              (ssh-copy plain 4 len)))))
     (%slot! c 4 (+ seq 1))
     (def pad (%byte body 0))
     (pair (ssh-copy body 1 (- len 1 pad)) (- len 1 pad))))
@@ -397,19 +521,49 @@
 ; The host key algorithms this end checks, as a client offers them unless
 ; known_hosts says which it already knows the host by.
 (def ssh-hostkey-names (list "ssh-ed25519" "ecdsa-sha2-nistp256" "ecdsa-sha2-nistp384" "ecdsa-sha2-nistp521" "rsa-sha2-512" "rsa-sha2-256"))
-(def %cipher-names (list "chacha20-poly1305@openssh.com"))
-(def %mac-names (list "hmac-sha2-256"))
+; The ciphers and MACs served, in OpenSSH's order of preference.  A MAC
+; is agreed only for a cipher without its own tag.
+(def ssh-cipher-names
+  (list "chacha20-poly1305@openssh.com" "aes128-ctr" "aes192-ctr" "aes256-ctr"
+        "aes128-gcm@openssh.com" "aes256-gcm@openssh.com"))
+(def ssh-mac-names
+  (list "hmac-sha2-256-etm@openssh.com" "hmac-sha2-512-etm@openssh.com" "hmac-sha2-256" "hmac-sha2-512"))
 (def %comp-names (list "none"))
 
+; The value a name has in an alist keyed by names, or ().
+(def %named (fn (_ name al) ((fn (_ e) (if (null? e) () (rest e))) (List find (fn (_ e) (str=? (first e) name)) al))))
+
+; A cipher's name as (CIPHER . KEY-SIZE).
+(def %cipher-of
+  (fn (_ name)
+    (%named name
+      (list (pair "chacha20-poly1305@openssh.com" (pair 'chacha 64))
+            (pair "aes128-ctr" (pair 'ctr 16)) (pair "aes192-ctr" (pair 'ctr 24)) (pair "aes256-ctr" (pair 'ctr 32))
+            (pair "aes128-gcm@openssh.com" (pair 'gcm 16)) (pair "aes256-gcm@openssh.com" (pair 'gcm 32))))))
+
+; A MAC's name as (HASH SIZE ETM?).
+(def %mac-of
+  (fn (_ name)
+    (%named name
+      (list (pair "hmac-sha2-256-etm@openssh.com" (list 'sha256 32 #t)) (pair "hmac-sha2-512-etm@openssh.com" (list 'sha512 64 #t))
+            (pair "hmac-sha2-256" (list 'sha256 32 #f)) (pair "hmac-sha2-512" (list 'sha512 64 #f))))))
+
+(def %aead? (fn (_ name) (not (eq? (first (%cipher-of name)) 'ctr))))
+
+; The ciphers and MACs this end offers, from its configuration: subsets
+; of ssh-cipher-names and ssh-mac-names, in the order preferred.
+(def ssh-algorithms!
+  (fn (_ c ciphers macs) (%slot! c 13 (pair ciphers macs))))
+
 (def %kexinit
-  (fn (_ hostkeys extra)
+  (fn (_ c hostkeys extra)
     (def out (ssh-out))
     (ssh-put-byte out ssh-msg-kexinit)
     (ssh-put-bytes out (ssh-random 16) 0 16)
     (ssh-put-names out (List append %kex-names extra))
     (ssh-put-names out hostkeys)
-    (ssh-put-names out %cipher-names) (ssh-put-names out %cipher-names)
-    (ssh-put-names out %mac-names) (ssh-put-names out %mac-names)
+    (ssh-put-names out (first (%slot c 13))) (ssh-put-names out (first (%slot c 13)))
+    (ssh-put-names out (rest (%slot c 13))) (ssh-put-names out (rest (%slot c 13)))
     (ssh-put-names out %comp-names) (ssh-put-names out %comp-names)
     (ssh-put-text out "") (ssh-put-text out "")
     (ssh-put-bool out #f)
@@ -422,11 +576,13 @@
   (fn (_ client server)
     (List find (fn (_ n) (List any? (fn (_ m) (str=? m n)) server)) client)))
 
-; The peer's KEXINIT read: each list must share a name with ours.  The
-; client's list leads, whichever side reads it.  Answers (WRONG-GUESS
-; CHOSEN EXT): whether a guessed packet that must be discarded follows,
-; the kex, host key and two cipher names agreed, then whether the
-; client asked for extension negotiation (RFC 8308).
+; The peer's KEXINIT read: each list must share a name with ours, the MAC
+; lists only for a cipher without its own tag.  The client's list leads,
+; whichever side reads it.  Answers (WRONG-GUESS CHOSEN EXT): whether a
+; guessed packet that must be discarded follows; the kex, host key, the
+; two ciphers and the two MACs agreed (a MAC () under an AEAD cipher),
+; client-to-server first; then whether the client asked for extension
+; negotiation (RFC 8308).
 (def %read-kexinit
   (fn (_ c p server? hostkeys)
     (def in (ssh-in (first p) 17 (- (rest p) 17)))
@@ -436,12 +592,19 @@
     (def m1 (ssh-get-names in)) (def m2 (ssh-get-names in))
     (def z1 (ssh-get-names in)) (def z2 (ssh-get-names in))
     (def pick (fn (_ ours theirs) (if server? (%agree theirs ours) (%agree ours theirs))))
-    (def chosen (list (pick %kex-names kex) (pick hostkeys hk)
-                      (pick %cipher-names c2s) (pick %cipher-names s2c)))
+    (def ciphers (first (%slot c 13)))
+    (def macs (rest (%slot c 13)))
+    (def chosen (list (pick %kex-names kex) (pick hostkeys hk) (pick ciphers c2s) (pick ciphers s2c)))
     (when (List any? null? chosen)
       (Err raise 'value "ssh: the peer offers none of our algorithms" ()))
-    (ssh-trace c (Str8 append "kex " (first chosen) " hostkey " (first (rest chosen))
-                          " cipher " (first (rest (rest chosen)))))
+    (def mac-for (fn (_ cipher theirs) (if (%aead? cipher) () (pick macs theirs))))
+    (def mc (mac-for (List ref 2 chosen) m1))
+    (def ms (mac-for (List ref 3 chosen) m2))
+    (when (if (if (null? mc) (not (%aead? (List ref 2 chosen))) #f) #t (if (null? ms) (not (%aead? (List ref 3 chosen))) #f))
+      (Err raise 'value "ssh: the peer offers none of our MACs" ()))
+    (def mac-text (fn (_ m) (if (null? m) "" (Str8 append " " m))))
+    (ssh-trace c (Str8 append "kex " (first chosen) " hostkey " (List ref 1 chosen)
+                          " cipher " (List ref 2 chosen) (mac-text mc) " / " (List ref 3 chosen) (mac-text ms)))
     ; the languages, then whether a guessed key exchange packet follows
     ; (7.1): a guess is wrong when the client's first kex or host key
     ; algorithm is not the one agreed, and then the packet is discarded
@@ -449,9 +612,9 @@
     (def follows (ssh-get-bool in))
     (def wrong-guess
       (if follows
-        (if (str=? (first kex) (first chosen)) (not (str=? (first hk) (first (rest chosen)))) #t)
+        (if (str=? (first kex) (first chosen)) (not (str=? (first hk) (List ref 1 chosen))) #t)
         #f))
-    (list wrong-guess chosen (List any? (fn (_ n) (str=? n "ext-info-c")) kex))))
+    (list wrong-guess (List append chosen (list mc ms)) (List any? (fn (_ n) (str=? n "ext-info-c")) kex))))
 
 ; SHA-256 of what an OUT holds, as 32 bytes.
 (def %sha256-out
@@ -476,6 +639,32 @@
     (def k2 (%sha256-out b))
     (first (ssh-join (list (list k1 0 32) (list k2 0 32))))))
 
+; One direction's keys as the packet layer's record: the cipher and MAC
+; agreed for it, and letter the IV's (7.2): A (65) client to server, B
+; the other way, the cipher's key two letters on and the MAC's four.
+; The engines the cipher and MAC want are asked for here, once a
+; process, so no packet runs pure-x for want of one.
+(def %keys
+  (fn (_ c kmp h cipher mac letter)
+    (def sid (%slot c 7))
+    (def spec (%cipher-of cipher))
+    (def kind (first spec))
+    (def k (Vector make 5 ()))
+    (%oset! k 1 kind)
+    (def enc (%derive kmp h (+ letter 2) sid))
+    (if (eq? kind 'chacha)
+      (%oset! k 2 (%split-key enc))
+      (do (%oset! k 2 enc)
+          (%oset! k 3 (rest spec))
+          (%oset! k 4 (ssh-copy (%derive kmp h letter sid) 0 (if (eq? kind 'gcm) 12 16)))
+          (Aes jit!)
+          (when (eq? kind 'gcm) (Ghash jit!))))
+    (unless (null? mac)
+      (do (def m (%mac-of mac))
+          (%oset! k 5 (list (first m) (%derive kmp h (+ letter 4) sid) (List ref 1 m) (List ref 2 m)))
+          (if (eq? (first m) 'sha256) (Sha256 jit!) (Sha512 jit!))))
+    k))
+
 ; The whole exchange: KEXINIT both ways, our ephemeral key out, the
 ; server's back with its host key and signature over the exchange hash,
 ; the hash checked, NEWKEYS both ways, and the keys in place after.
@@ -483,10 +672,10 @@
 (def ssh-kex!
   (fn (_ c hostkeys)
     ; ext-info-c asks the server for its server-sig-algs (RFC 8308 2.1)
-    (def ic (%kexinit hostkeys (list "ext-info-c")))
+    (def ic (%kexinit c hostkeys (list "ext-info-c")))
     (ssh-send-packet! c (first ic) (rest ic))
     (def is (ssh-expect! c ssh-msg-kexinit "KEXINIT"))
-    (%read-kexinit c is #f hostkeys)
+    (def chosen (List ref 1 (%read-kexinit c is #f hostkeys)))
     (def k (ssh-random 32))
     (def qc (X25519 base k))
     (def init (ssh-out))
@@ -531,8 +720,8 @@
     (def kout (ssh-out))
     (ssh-put-mpint kout shared 0 32)
     (def kmp (ssh-out-run kout))
-    (%slot! c 5 (%split-key (%derive kmp h 67 (%slot c 7))))
-    (%slot! c 6 (%split-key (%derive kmp h 68 (%slot c 7))))
+    (%slot! c 5 (%keys c kmp h (List ref 2 chosen) (List ref 4 chosen) 65))
+    (%slot! c 6 (%keys c kmp h (List ref 3 chosen) (List ref 5 chosen) 66))
     (ssh-trace c "keys in place")
     c))
 
@@ -547,7 +736,7 @@
   (fn (_ c ids allowed)
     (def offered (List filter (fn (_ a) (List any? (fn (_ x) (str=? x a)) allowed))
                    (List flat-map (fn (_ id) (ssh-pubkey-algorithms (ssh-identity-pubkey id))) ids)))
-    (def is (%kexinit offered ()))
+    (def is (%kexinit c offered ()))
     (ssh-send-packet! c (first is) (rest is))
     (def ic (ssh-expect! c ssh-msg-kexinit "KEXINIT"))
     (def agreed (%read-kexinit c ic #t offered))
@@ -594,8 +783,8 @@
     (def kout (ssh-out))
     (ssh-put-mpint kout shared 0 32)
     (def kmp (ssh-out-run kout))
-    (%slot! c 5 (%split-key (%derive kmp h 68 (%slot c 7))))
-    (%slot! c 6 (%split-key (%derive kmp h 67 (%slot c 7))))
+    (%slot! c 5 (%keys c kmp h (List ref 3 (List ref 1 agreed)) (List ref 5 (List ref 1 agreed)) 66))
+    (%slot! c 6 (%keys c kmp h (List ref 2 (List ref 1 agreed)) (List ref 4 (List ref 1 agreed)) 65))
     (ssh-trace c "keys in place")
     ; a client that asked for extensions is told the signature algorithms
     ; its key may sign with (RFC 8308 3.1): OpenSSH's signs with an RSA key
@@ -701,6 +890,7 @@
     (%auth-answer c)))
 
 (provide ssh/transport ssh-version-string ssh-open ssh-fd ssh-session-id ssh-host-key ssh-server-sig-algs ssh-hostkey-names ssh-pending? ssh-random ssh-engines!
+  ssh-cipher-names ssh-mac-names ssh-algorithms!
   ssh-exchange-versions! ssh-send-packet! ssh-recv-packet! ssh-next-packet! ssh-expect! ssh-kex! ssh-kex-server! ssh-auth-service! ssh-auth-publickey-query! ssh-auth-publickey! ssh-auth-password!
   ssh-msg-disconnect ssh-msg-global-request ssh-msg-request-success ssh-msg-request-failure ssh-msg-service-request ssh-msg-service-accept
   ssh-msg-userauth-request ssh-msg-userauth-failure ssh-msg-userauth-success ssh-trace

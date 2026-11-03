@@ -1,5 +1,6 @@
 # The binary packet protocol
 # @weight 4
+# @timeout-scale 4
 
 RFC 4253 6 under each cipher and MAC served: a connection's send keys
 and the other end's receive keys made as the key exchange makes them,

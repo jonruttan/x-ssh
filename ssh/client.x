@@ -38,14 +38,11 @@
   ssh-config-count ssh-config-seconds ssh-config-channel-timeout ssh-config-algorithms)
 (import ssh/sys ssh-sys-me)
 
-(def %byte-len (prim-ref (lit str) (lit byte-len)))
-(def %byte-ref (prim-ref (lit str) (lit byte-ref)))
-(def %make-str (prim-ref (lit str) (lit make)))
-(def %char->int (prim-ref (lit char) (lit ->int)))
+(import x/core/doors str-byte-len str-byte-ref str-make char->int)
 (def %cvt (prim-ref (lit convert) (lit to)))
 (def %num (fn (_ n) (%cvt n (Type named STRING) 10)))
 
-(def %say (fn (_ fd text) (File write fd text (%byte-len text))))
+(def %say (fn (_ fd text) (File write fd text (str-byte-len text))))
 
 ; The caller's standard input.  The platform keeps it on fd 3, fd 0
 ; carrying x's own program text; with none, fd 3 is not open, a read of
@@ -87,7 +84,7 @@
     ((fn (self i acc)
        (match
          ((>= i n) (Str8 join "" (List reverse acc)))
-         ((if (= (%byte-ref s i) #\%) (< (+ i 1) n) #f)
+         ((if (= (str-byte-ref s i) #\%) (< (+ i 1) n) #f)
            (do (def k (Str8 sub (+ i 1) 1 s))
                (def v (if (str=? k "%") "%" (rest (List find (fn (_ p) (str=? (first p) k)) tokens))))
                (self (+ i 2) (pair (if (null? v) (Str8 append "%" k) v) acc))))
@@ -119,7 +116,7 @@
     (def env (fn (_ name) ((fn (_ p) (if (if (null? p) #t (= (Str8 length p) 0)) () p)) (Sys getenv name))))
     (match ((str=? (Str8 downcase v) "none") ())
            ((str=? v "SSH_AUTH_SOCK") (env v))
-           ((if (> (Str8 length v) 1) (= (%byte-ref v 0) #\$) #f) (env (Str8 sub 1 (- (Str8 length v) 1) v)))
+           ((if (> (Str8 length v) 1) (= (str-byte-ref v 0) #\$) #f) (env (Str8 sub 1 (- (Str8 length v) 1) v)))
            (#t (path v)))))
 
 ; The settings in force, from the lines in order, for host as named on

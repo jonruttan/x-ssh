@@ -53,15 +53,10 @@
   ssh-config-count ssh-config-seconds ssh-config-channel-timeout ssh-config-algorithms)
 (import ssh/sys ssh-sys-me)
 
-(def %oref (prim-ref (lit obj) (lit ref)))
-(def %oset! (prim-ref (lit obj) (lit set!)))
-(def %byte-ref (prim-ref (lit str) (lit byte-ref)))
-(def %char->int (prim-ref (lit char) (lit ->int)))
-(def %byte-len (prim-ref (lit str) (lit byte-len)))
-(def %make-str (prim-ref (lit str) (lit make)))
+(import x/core/doors obj-ref obj-set! str-byte-ref char->int str-byte-len str-make ffi-dlopen ffi-dlsym ptr-call)
 (def %cvt (prim-ref (lit convert) (lit to)))
 
-(def %byte (fn (_ s i) (%char->int (%byte-ref s i))))
+(def %byte (fn (_ s i) (char->int (str-byte-ref s i))))
 (def %num (fn (_ n) (%cvt n (Type named STRING) 10)))
 (def %get (fn (_ s k) (rest (List find (fn (_ p) (eq? (first p) k)) s))))
 
@@ -87,7 +82,7 @@
 ; connection's process: 1 syslog, or #f for the descriptor in 2; 3 the
 ; facility; 4 the rank of the most verbose level written.
 (def %log-to (Vector make 4 ()))
-(%oset! %log-to 1 #f) (%oset! %log-to 2 2) (%oset! %log-to 3 (lit auth)) (%oset! %log-to 4 3)
+(obj-set! %log-to 1 #f) (obj-set! %log-to 2 2) (obj-set! %log-to 3 (lit auth)) (obj-set! %log-to 4 3)
 
 ; A line logged at a level, when the log level takes it: to syslog under
 ; the ident sshd in the facility, or, under -e, -E or where no daemon
@@ -95,11 +90,11 @@
 (def %log-at
   (fn (_ level text)
     (def rank (%rank level))
-    (when (<= rank (%oref %log-to 4))
+    (when (<= rank (obj-ref %log-to 4))
       (do (def severity (first (rest (List ref rank %levels))))
-          (unless (if (%oref %log-to 1) (Syslog send "sshd" (%oref %log-to 3) severity text) #f)
+          (unless (if (obj-ref %log-to 1) (Syslog send "sshd" (obj-ref %log-to 3) severity text) #f)
             (do (def line (Str8 append (if (>= rank 5) (Str8 append level ": ") "") text "\n"))
-                (File write (%oref %log-to 2) line (%byte-len line))))))))
+                (File write (obj-ref %log-to 2) line (str-byte-len line))))))))
 
 (def %log (fn (_ text) (%log-at "info" text)))
 (def %debug (fn (_ text) (%log-at "debug1" text)))
@@ -169,10 +164,10 @@
     (def a (ssh-config-arg l))
     (def n (Str8 length a))
     (def close (Str8 index-of "]" a))
-    (def colons (List length (List filter (fn (_ i) (= (%byte-ref a i) #\:)) (List range 0 n))))
+    (def colons (List length (List filter (fn (_ i) (= (str-byte-ref a i) #\:)) (List range 0 n))))
     (def split
       (match
-        ((if (> n 0) (= (%byte-ref a 0) #\[) #f)
+        ((if (> n 0) (= (str-byte-ref a 0) #\[) #f)
           (if (null? close) (ssh-config-bad l "invalid ListenAddress")
             (pair (Str8 sub 1 (- close 1) a)
                   (if (< (+ close 1) n) (%port l (Str8 sub (+ close 2) (- n close 2) a)) ()))))
@@ -287,7 +282,7 @@
       (fn (_ n)
         (def e (Str8 join "%" (List map (fn (_ part) (Str8 join user (Str8 split "%u" (Str8 join home (Str8 split "%h" part)))))
                                 (Str8 split "%%" n))))
-        (if (if (> (Str8 length e) 0) (= (%byte-ref e 0) #\/) #f) e (Str8 append home "/" e)))
+        (if (if (> (Str8 length e) 0) (= (str-byte-ref e 0) #\/) #f) e (Str8 append home "/" e)))
       names)))
 
 ; The keys of the files, options or not, of every type served, as (TYPE
@@ -542,8 +537,8 @@
 (def %PEER 1) (def %OURS 2) (def %WINDOW 3) (def %MAX 4) (def %KIND 5) (def %CHILD 6)
 (def %OUT 7) (def %ERR 8) (def %FD 9) (def %PEER-CLOSED 10) (def %CLOSED 11) (def %PEER-EOF 12)
 (def %PTY 13) (def %TERM 14) (def %OWED 15) (def %IN-Q 16) (def %IN 17)
-(def %ch (fn (_ ch i) (%oref ch i)))
-(def %ch! (fn (_ ch i v) (%oset! ch i v)))
+(def %ch (fn (_ ch i) (obj-ref ch i)))
+(def %ch! (fn (_ ch i v) (obj-set! ch i v)))
 
 ; The connection's state: 1 the channels, 2 the next channel number, 3
 ; the bytes moved since the last collect, 4 whether a client's forwards
@@ -557,8 +552,8 @@
 (def %CHANNELS 1) (def %NEXT 2) (def %MOVED 3) (def %FORWARDING 4) (def %SESSION 5)
 (def %REMOTE 6) (def %GATEWAY 7) (def %LISTENERS 8) (def %ACCEPT 9) (def %ENV 10) (def %SUBSYSTEMS 11)
 (def %AGENT-OK 12) (def %AGENT 13)
-(def %rn (fn (_ run i) (%oref run i)))
-(def %rn! (fn (_ run i v) (%oset! run i v)))
+(def %rn (fn (_ run i) (obj-ref run i)))
+(def %rn! (fn (_ run i v) (obj-set! run i v)))
 (def %min (fn (_ a b) (if (< a b) a b)))
 
 (def %moved! (fn (_ run n) (%rn! run %MOVED (+ (%rn run %MOVED) n))))
@@ -754,7 +749,7 @@
 (def %pump!
   (fn (_ c run ch fd slot extended)
     (def n (%min %chunk (%min (%ch ch %WINDOW) (- (%ch ch %MAX) 64))))
-    (def buf (%make-str n))
+    (def buf (str-make n))
     (def got (File read fd buf n))
     (if (< got 1)
       (if (eq? (%ch ch %KIND) (lit session))
@@ -1071,13 +1066,10 @@
           (List append acc (list id))))
       () (%get s (lit hostkeys)))))
 
-(def %dlopen (prim-ref (lit ffi) (lit dlopen)))
-(def %dlsym (prim-ref (lit ffi) (lit dlsym)))
-(def %ptr-call (prim-ref (lit ptr) (lit call)))
 
 ; setsid(2) through libc: the platform's Darwin syscall table has no
 ; number for it, and Sys has no door.
-(def %setsid! (fn (_) (%ptr-call (%dlsym (%dlopen () 1) "setsid"))))
+(def %setsid! (fn (_) (ptr-call (ffi-dlsym (ffi-dlopen () 1) "setsid"))))
 
 ; The connection's process made the user's once a root server has let
 ; them in, as sshd's session is: the groups initgroups(3) gives, the
@@ -1089,11 +1081,11 @@
       (def pw (%entry "/etc/passwd" user))
       (def uid (%cvt (List ref 2 pw) (Type named INTEGER) 10))
       (def gid (%cvt (List ref 3 pw) (Type named INTEGER) 10))
-      (def libc (%dlopen () 1))
+      (def libc (ffi-dlopen () 1))
       (def check! (fn (_ r what) (when (< (Sys %sign-fold r) 0) (Err raise 'io (Str8 append what " failed for " user) ()))))
-      (check! (%ptr-call (%dlsym libc "initgroups") user gid) "initgroups")
-      (check! (%ptr-call (%dlsym libc "setgid") gid) "setgid")
-      (check! (%ptr-call (%dlsym libc "setuid") uid) "setuid")
+      (check! (ptr-call (ffi-dlsym libc "initgroups") user gid) "initgroups")
+      (check! (ptr-call (ffi-dlsym libc "setgid") gid) "setgid")
+      (check! (ptr-call (ffi-dlsym libc "setuid") uid) "setuid")
       (Sys setenv "USER" user)
       (Sys setenv "LOGNAME" user)
       (Sys setenv "HOME" (List ref 5 pw))
@@ -1123,7 +1115,7 @@
     (if (< fd 0)
       (%log-at "error" (Str8 append "Couldn't create pid file \"" path "\""))
       (do (def line (Str8 append (%num (Sys getpid)) "\n"))
-          (File write fd line (%byte-len line))
+          (File write fd line (str-byte-len line))
           (File close fd)))))
 
 (def %signal-number
@@ -1181,7 +1173,7 @@
     (def mode (List ref 2 plan))
     (def foreground (first mode)) (def debug (List ref 1 mode)) (def stderr (List ref 2 mode))
     (def logfile (List ref 3 mode))
-    (def say (fn (_ t) (File write 2 (Str8 append t "\n") (+ (%byte-len t) 1))))
+    (def say (fn (_ t) (File write 2 (Str8 append t "\n") (+ (str-byte-len t) 1))))
     (def path (first plan))
     (def text (guard (e ()) (File read-all path)))
     (def lines
@@ -1198,19 +1190,19 @@
             255))
       ((null? s) 255)
       (#t
-        (do (%oset! %log-to 3 (Str8 ->sym (%get s (lit facility))))
-            (%oset! %log-to 4 (%rank (%get s (lit level))))
+        (do (obj-set! %log-to 3 (Str8 ->sym (%get s (lit facility))))
+            (obj-set! %log-to 4 (%rank (%get s (lit level))))
             (unless (null? logfile)
-              ((fn (_ fd) (if (< fd 0) (say (Str8 append "Couldn't open logfile " logfile)) (%oset! %log-to 2 fd)))
+              ((fn (_ fd) (if (< fd 0) (say (Str8 append "Couldn't open logfile " logfile)) (obj-set! %log-to 2 fd)))
                (File open logfile (list (lit wronly) (lit creat) (lit append)) 420)))
             ; the host keys are loaded before the log moves to syslog, as
             ; OpenSSH's sshd loads them: what does not load is said on
             ; standard error, or -E's file
-            (%oset! %log-to 1 #f)
+            (obj-set! %log-to 1 #f)
             (def key (%host-keys s))
-            (%oset! %log-to 1 (not (if stderr #t (not (null? logfile)))))
+            (obj-set! %log-to 1 (not (if stderr #t (not (null? logfile)))))
             (match
-              ((List ref 5 mode) (do (File write 1 (%print s) (%byte-len (%print s))) 0))
+              ((List ref 5 mode) (do (File write 1 (%print s) (str-byte-len (%print s))) 0))
               ((null? key) (do (say "sshd: no hostkeys available -- exiting.") 1))
               ((List ref 4 mode) 0)
               (#t (%listen-and-serve s key foreground debug))))))))

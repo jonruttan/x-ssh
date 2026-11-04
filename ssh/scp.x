@@ -35,18 +35,13 @@
 (import ssh/sftp-client ssh-sftp-scp ssh-sftp-scp3)
 (import ssh/sys ssh-sys-spawn)
 
-(def %byte-ref (prim-ref (lit str) (lit byte-ref)))
-(def %char->int (prim-ref (lit char) (lit ->int)))
-(def %byte-len (prim-ref (lit str) (lit byte-len)))
-(def %make-str (prim-ref (lit str) (lit make)))
-(def %str->ptr (prim-ref (lit str) (lit ->ptr)))
-(def %pset1 (prim-ref (lit ptr) (lit set!)))
+(import x/core/doors str-byte-ref char->int str-byte-len str-make str->ptr ptr-set!)
 (def %cvt (prim-ref (lit convert) (lit to)))
 
 (def %num (fn (_ n radix) (%cvt n (Type named STRING) radix)))
 (def %int (fn (_ t radix) (%cvt t (Type named INTEGER) radix)))
 
-(def %say (fn (_ text) (File write 2 text (%byte-len text))))
+(def %say (fn (_ text) (File write 2 text (str-byte-len text))))
 
 (def %chunk 16384)
 
@@ -62,24 +57,24 @@
 ; Bytes start.. of s as a fresh string of n.
 (def %tail
   (fn (_ s start n)
-    (def out (%make-str n))
-    (def p (%str->ptr out))
-    ((fn (self i) (unless (= i n) (do (%pset1 p i (%char->int (%byte-ref s (+ start i))) 1) (self (+ i 1))))) 0)
+    (def out (str-make n))
+    (def p (str->ptr out))
+    ((fn (self i) (unless (= i n) (do (ptr-set! p i (char->int (str-byte-ref s (+ start i))) 1) (self (+ i 1))))) 0)
     out))
 
-(def %send-text (fn (_ fd t) (%write-all fd t 0 (%byte-len t))))
+(def %send-text (fn (_ fd t) (%write-all fd t 0 (str-byte-len t))))
 
 (def %send-byte
   (fn (_ fd b)
-    (def s (%make-str 1))
-    (%pset1 (%str->ptr s) 0 b 1)
+    (def s (str-make 1))
+    (ptr-set! (str->ptr s) 0 b 1)
     (%write-all fd s 0 1)))
 
 ; One byte, or () at end of input.
 (def %read-byte
   (fn (_ fd)
-    (def s (%make-str 1))
-    (if (< (File read fd s 1) 1) () (%char->int (%byte-ref s 0)))))
+    (def s (str-make 1))
+    (if (< (File read fd s 1) 1) () (char->int (str-byte-ref s 0)))))
 
 ; A line without its newline, or () at end of input.
 (def %read-line
@@ -93,9 +88,9 @@
 
 (def %bytes->str
   (fn (_ bs)
-    (def s (%make-str (List length bs)))
-    (def p (%str->ptr s))
-    ((fn (self i xs) (unless (null? xs) (do (%pset1 p i (first xs) 1) (self (+ i 1) (rest xs))))) 0 bs)
+    (def s (str-make (List length bs)))
+    (def p (str->ptr s))
+    ((fn (self i xs) (unless (null? xs) (do (ptr-set! p i (first xs) 1) (self (+ i 1) (rest xs))))) 0 bs)
     s))
 
 ; The far end's answer: #t for zero, or its message said and #f; a fatal
@@ -132,7 +127,7 @@
   (fn (self from to n)
     (if (= n 0) #t
       (do (def k (if (< n %chunk) n %chunk))
-          (def buf (%make-str k))
+          (def buf (str-make k))
           (def got (File read from buf k))
           (if (< got 1) #f
             (do (%write-all to buf 0 got)
@@ -218,10 +213,10 @@
            (do (def m (%read-line in ()))
                (%say (Str8 append (if (null? m) "" m) "\n"))
                (if (= b 2) (+ errs 1) (self (+ errs 1) ()))))
-         ((= b (%char->int #\T)) (do (def t (%times (%read-line in ()))) (%send-byte out 0) (self errs t)))
-         ((= b (%char->int #\E)) (do (%read-line in ()) (%send-byte out 0) errs))
-         ((= b (%char->int #\C)) (self (+ errs (%file-in in out (%read-line in ()) target into-dir times)) ()))
-         ((= b (%char->int #\D))
+         ((= b (char->int #\T)) (do (def t (%times (%read-line in ()))) (%send-byte out 0) (self errs t)))
+         ((= b (char->int #\E)) (do (%read-line in ()) (%send-byte out 0) errs))
+         ((= b (char->int #\C)) (self (+ errs (%file-in in out (%read-line in ()) target into-dir times)) ()))
+         ((= b (char->int #\D))
            (if recursive
              (self (+ errs (%dir-in in out (%read-line in ()) target into-dir times)) ())
              (%fatal-to out "received directory without -r")))
@@ -290,13 +285,13 @@
 (def %remote
   (fn (_ arg)
     (def colon ((fn (self i) (if (= i (Str8 length arg)) ()
-                              (match ((= (%char->int (%byte-ref arg i)) 58) i)
-                                     ((= (%char->int (%byte-ref arg i)) 47) ())
+                              (match ((= (char->int (str-byte-ref arg i)) 58) i)
+                                     ((= (char->int (str-byte-ref arg i)) 47) ())
                                      (#t (self (+ i 1)))))) 0))
     (if (if (null? colon) #t (= colon 0)) ()
       (do (def hostpart (Str8 sub 0 colon arg))
           (def path (Str8 sub (+ colon 1) (- (Str8 length arg) colon 1) arg))
-          (def at ((fn (self i) (if (< i 0) () (if (= (%char->int (%byte-ref hostpart i)) 64) i (self (- i 1)))))
+          (def at ((fn (self i) (if (< i 0) () (if (= (char->int (str-byte-ref hostpart i)) 64) i (self (- i 1)))))
                    (- (Str8 length hostpart) 1)))
           (list (if (null? at) () (Str8 sub 0 at hostpart))
                 (if (null? at) hostpart (Str8 sub (+ at 1) (- (Str8 length hostpart) at 1) hostpart))

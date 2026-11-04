@@ -33,10 +33,8 @@
   ssh-msg-global-request ssh-msg-request-success ssh-msg-request-failure
   ssh-clock-sent ssh-clock-recv ssh-clock-data ssh-clock-mark! ssh-clocks-start! ssh-wait-ms ssh-clocks!)
 
-(def %byte-ref (prim-ref (lit str) (lit byte-ref)))
-(def %char->int (prim-ref (lit char) (lit ->int)))
-(def %byte-len (prim-ref (lit str) (lit byte-len)))
-(def %byte (fn (_ s i) (%char->int (%byte-ref s i))))
+(import x/core/doors str-byte-ref char->int str-byte-len obj-ref obj-set! str-make str->ptr ptr-set!)
+(def %byte (fn (_ s i) (char->int (str-byte-ref s i))))
 (def %num (fn (_ n) ((prim-ref (lit convert) (lit to)) n (Type named STRING) 10)))
 
 (def %msg-channel-open 90) (def %msg-channel-open-confirmation 91)
@@ -48,7 +46,7 @@
 (def %window 2097152)
 (def %max-packet 32768)
 
-(def %say (fn (_ text) (File write 2 text (%byte-len text))))
+(def %say (fn (_ text) (File write 2 text (str-byte-len text))))
 
 (def %send
   (fn (_ c out)
@@ -62,11 +60,6 @@
     (ssh-put-byte out type)
     out))
 
-(def %oref (prim-ref (lit obj) (lit ref)))
-(def %oset! (prim-ref (lit obj) (lit set!)))
-(def %make-str (prim-ref (lit str) (lit make)))
-(def %str->ptr (prim-ref (lit str) (lit ->ptr)))
-(def %pset1 (prim-ref (lit ptr) (lit set!)))
 
 ; A channel's state, in a vector: 1 our channel number, 2 the server's,
 ; 3 how many bytes it will take from us (its window), 4 the most a packet
@@ -78,8 +71,8 @@
 (def %OURS 1) (def %SERVER 2) (def %WINDOW 3) (def %MAX 4) (def %INPUT 5) (def %STATUS 6)
 (def %CLOSED 7) (def %OUT 8) (def %ERR 9) (def %KIND 10) (def %FD 11) (def %COMMAND 12)
 (def %OWED 13)
-(def %ch (fn (_ ch i) (%oref ch i)))
-(def %ch! (fn (_ ch i v) (%oset! ch i v)))
+(def %ch (fn (_ ch i) (obj-ref ch i)))
+(def %ch! (fn (_ ch i v) (obj-set! ch i v)))
 
 ; The run's state: 1 the channels, 2 the next channel number, 3 the
 ; bytes moved since the last collect, 4 the listeners as (FD HOST PORT),
@@ -93,8 +86,8 @@
 ; socket forwarded, or ().
 (def %CHANNELS 1) (def %NEXT 2) (def %MOVED 3) (def %LISTENERS 4) (def %SESSION 5)
 (def %REMOTES 6) (def %UNANSWERED 7) (def %ENV 8) (def %TTY 9) (def %SIZE 10) (def %ESC 11) (def %AGENT 12)
-(def %rn (fn (_ run i) (%oref run i)))
-(def %rn! (fn (_ run i v) (%oset! run i v)))
+(def %rn (fn (_ run i) (obj-ref run i)))
+(def %rn! (fn (_ run i v) (obj-set! run i v)))
 
 ; The most a read of an input takes at once.
 (def %chunk 16384)
@@ -260,8 +253,8 @@
 ; Answers (BUF . N), or raises "escape" for ~.
 (def %escape
   (fn (_ run buf got)
-    (def out (%make-str (+ (* got 2) 1)))
-    (def p (%str->ptr out))
+    (def out (str-make (+ (* got 2) 1)))
+    (def p (str->ptr out))
     (def byte (fn (_ i) ((prim-ref (lit char) (lit ->int)) ((prim-ref (lit str) (lit byte-ref)) buf i))))
     (def n
       ((fn (self i n state)
@@ -272,10 +265,10 @@
                  ((= state 2)
                    (match
                      ((= b 46) (Err raise 'io "escape" ()))
-                     ((= b 126) (do (%pset1 p n 126 1) (self (+ i 1) (+ n 1) 0)))
-                     (#t (do (%pset1 p n 126 1) (%pset1 p (+ n 1) b 1) (self (+ i 1) (+ n 2) (if line? 1 0))))))
+                     ((= b 126) (do (ptr-set! p n 126 1) (self (+ i 1) (+ n 1) 0)))
+                     (#t (do (ptr-set! p n 126 1) (ptr-set! p (+ n 1) b 1) (self (+ i 1) (+ n 2) (if line? 1 0))))))
                  ((if (= state 1) (= b 126) #f) (self (+ i 1) n 2))
-                 (#t (do (%pset1 p n b 1) (self (+ i 1) (+ n 1) (if line? 1 0))))))))
+                 (#t (do (ptr-set! p n b 1) (self (+ i 1) (+ n 1) (if line? 1 0))))))))
        0 0 (%rn run %ESC)))
     (pair out n)))
 
@@ -309,7 +302,7 @@
   (fn (_ c run ch)
     (def n (%min %chunk (%min (%ch ch %WINDOW) (- (%ch ch %MAX) 64))))
     ; a held tilde comes out with the next byte, so a terminal reads one short
-    (def raw (%make-str n))
+    (def raw (str-make n))
     (def read (File read (%ch ch %INPUT) raw (if (null? (%rn run %TTY)) n (- n 1))))
     (def typed (if (if (< read 1) #f (if (null? (%rn run %TTY)) #f (eq? (%ch ch %KIND) (lit session))))
                  (%escape run raw read)

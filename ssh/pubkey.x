@@ -35,9 +35,8 @@
 (import x/codec/ecdsa)
 (import ssh/bytes ssh-in ssh-get-text ssh-get-string ssh-get-bytes ssh-copy ssh-out ssh-put-text ssh-put-string ssh-put-mpint ssh-out-run)
 
-(def %byte-ref (prim-ref (lit str) (lit byte-ref)))
-(def %char->int (prim-ref (lit char) (lit ->int)))
-(def %byte (fn (_ s i) (%char->int (%byte-ref s i))))
+(import x/core/doors str-byte-ref char->int)
+(def %byte (fn (_ s i) (char->int (str-byte-ref s i))))
 
 (def %region (fn (_ buf r) (list buf (first r) (rest r))))
 

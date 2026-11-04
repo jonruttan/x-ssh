@@ -23,9 +23,7 @@
 (import x/codec/base64)
 (import ssh/pubkey ssh-pubkey-type ssh-pubkey-base64)
 
-(def %byte-ref (prim-ref (lit str) (lit byte-ref)))
-(def %char->int (prim-ref (lit char) (lit ->int)))
-(def %byte-len (prim-ref (lit str) (lit byte-len)))
+(import x/core/doors str-byte-ref char->int str-byte-len)
 
 ; A host's name in the file, by its port.
 (def ssh-known-name
@@ -94,13 +92,13 @@
 ; The key recorded for the name in path, its directory made if missing.
 (def ssh-known-add!
   (fn (_ path name key)
-    (def slash ((fn (self i) (if (< i 0) () (if (= (%byte-ref path i) #\/) i (self (- i 1))))) (- (Str8 length path) 1)))
+    (def slash ((fn (self i) (if (< i 0) () (if (= (str-byte-ref path i) #\/) i (self (- i 1))))) (- (Str8 length path) 1)))
     (def dir (if (if (null? slash) #t (= slash 0)) () (Str8 sub 0 slash path)))
     (unless (if (null? dir) #t (File exists? dir)) (File mkdir dir 448))
     (def line (Str8 append name " " (ssh-pubkey-type key) " " (ssh-pubkey-base64 key) "\n"))
     (def fd (File open path (list (lit wronly) (lit creat) (lit append)) 420))
     (when (< fd 0) (Err raise 'io (Str8 append "cannot write " path) ()))
-    (File write fd line (%byte-len line))
+    (File write fd line (str-byte-len line))
     (File close fd)))
 
 ; The lines naming name taken out of path, its old text kept as

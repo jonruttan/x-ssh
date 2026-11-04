@@ -25,8 +25,7 @@
 
 (import x/sys/file)
 
-(def %byte-ref (prim-ref (lit str) (lit byte-ref)))
-(def %char->int (prim-ref (lit char) (lit ->int)))
+(import x/core/doors str-byte-ref char->int)
 (def %cvt (prim-ref (lit convert) (lit to)))
 (def %num (fn (_ n) (%cvt n (Type named STRING) 10)))
 
@@ -37,7 +36,7 @@
 (def ssh-config-words
   (fn (_ line)
     (def n (Str8 length line))
-    (def at (fn (_ i) (%byte-ref line i)))
+    (def at (fn (_ i) (str-byte-ref line i)))
     (def skip (fn (self i) (if (if (< i n) (%space? (at i)) #f) (self (+ i 1)) i)))
     (def word-end (fn (self i) (if (if (< i n) (not (%space? (at i))) #f) (self (+ i 1)) i)))
     (def args
@@ -67,9 +66,9 @@
     ((fn (self i j)
        (match
          ((= i pn) (= j sn))
-         ((= (%byte-ref p i) #\*) (if (self (+ i 1) j) #t (if (< j sn) (self i (+ j 1)) #f)))
+         ((= (str-byte-ref p i) #\*) (if (self (+ i 1) j) #t (if (< j sn) (self i (+ j 1)) #f)))
          ((= j sn) #f)
-         ((if (= (%byte-ref p i) #\?) #t (= (%byte-ref p i) (%byte-ref s j))) (self (+ i 1) (+ j 1)))
+         ((if (= (str-byte-ref p i) #\?) #t (= (str-byte-ref p i) (str-byte-ref s j))) (self (+ i 1) (+ j 1)))
          (#t #f)))
      0 0)))
 
@@ -78,7 +77,7 @@
 (def ssh-config-patterns?
   (fn (_ patterns name)
     (def s (Str8 downcase name))
-    (def neg? (fn (_ p) (if (> (Str8 length p) 0) (= (%byte-ref p 0) #\!) #f)))
+    (def neg? (fn (_ p) (if (> (Str8 length p) 0) (= (str-byte-ref p 0) #\!) #f)))
     (def hit? (fn (_ p) (ssh-config-wild? (Str8 downcase p) s)))
     (if (List any? (fn (_ p) (if (neg? p) (hit? (Str8 sub 1 (- (Str8 length p) 1) p)) #f)) patterns) #f
       (List any? (fn (_ p) (if (neg? p) #f (hit? p))) patterns))))
@@ -97,10 +96,10 @@
     (if (= n 0) ()
       ((fn (self i acc total digits)
          (if (= i n) (if digits (+ total acc) (if (= i 0) () total))
-           (do (def c (%byte-ref t i))
+           (do (def c (str-byte-ref t i))
                (match
                  ((if (>= c #\0) (<= c #\9) #f)
-                   (self (+ i 1) (+ (* acc 10) (- (%char->int c) 48)) total #t))
+                   (self (+ i 1) (+ (* acc 10) (- (char->int c) 48)) total #t))
                  ((if digits (not (null? (unit c))) #f) (self (+ i 1) 0 (+ total (* acc (unit c))) #f))
                  (#t ())))))
        0 0 0 #f))))
@@ -108,7 +107,7 @@
 ; A path's leading ~ as the home directory.
 (def ssh-config-tilde
   (fn (_ path)
-    (if (if (> (Str8 length path) 0) (= (%byte-ref path 0) #\~) #f)
+    (if (if (> (Str8 length path) 0) (= (str-byte-ref path 0) #\~) #f)
       (Str8 append (Sys getenv "HOME") (Str8 sub 1 (- (Str8 length path) 1) path))
       path)))
 
@@ -137,7 +136,7 @@
 (def ssh-config-int-or-nil
   (fn (_ t)
     (def n (Str8 length t))
-    (if (if (> n 0) ((fn (self i) (if (= i n) #t (if (if (>= (%byte-ref t i) #\0) (<= (%byte-ref t i) #\9) #f) (self (+ i 1)) #f))) 0) #f)
+    (if (if (> n 0) ((fn (self i) (if (= i n) #t (if (if (>= (str-byte-ref t i) #\0) (<= (str-byte-ref t i) #\9) #f) (self (+ i 1)) #f))) 0) #f)
       (%cvt t (Type named INTEGER) 10)
       ())))
 
@@ -200,7 +199,7 @@
     ((fn (self as)
        (if (null? as) #t
          (do (def c (Str8 downcase (first as)))
-             (def neg (if (> (Str8 length c) 0) (= (%byte-ref c 0) #\!) #f))
+             (def neg (if (> (Str8 length c) 0) (= (str-byte-ref c 0) #\!) #f))
              (def name (if neg (Str8 sub 1 (- (Str8 length c) 1) c) c))
              (match
                ((str=? name "all") (if neg #f (self (rest as))))
@@ -240,8 +239,8 @@
                                       (def t (guard (e ()) (File read-all file)))
                                       (if (null? t) acc
                                         (List append (List reverse (ssh-config-read t file host user local dir)) acc)))
-                           acc (%glob (ssh-config-tilde (if (= (%byte-ref path 0) #\/) path
-                                                          (if (= (%byte-ref path 0) #\~) path (Str8 append dir "/" path)))))))
+                           acc (%glob (ssh-config-tilde (if (= (str-byte-ref path 0) #\/) path
+                                                          (if (= (str-byte-ref path 0) #\~) path (Str8 append dir "/" path)))))))
                        acc (rest ws)))))
                (#t (self (rest lines) (+ no 1) active
                      (if active (pair (list kw (rest ws) origin) acc) acc)))))))

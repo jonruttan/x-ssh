@@ -22,52 +22,43 @@
 
 (import x/type/vector)
 
-(def %oref (prim-ref (lit obj) (lit ref)))
-(def %oset! (prim-ref (lit obj) (lit set!)))
-(def %byte-ref (prim-ref (lit str) (lit byte-ref)))
-(def %char->int (prim-ref (lit char) (lit ->int)))
-(def %make-str (prim-ref (lit str) (lit make)))
-(def %str->ptr (prim-ref (lit str) (lit ->ptr)))
-(def %pset1 (prim-ref (lit ptr) (lit set!)))
-(def %ptr->int (prim-ref (lit ptr) (lit ->int)))
-(def %int->ptr (prim-ref (lit int) (lit ->ptr)))
-(def %mem-copy (prim-ref (lit mem) (lit copy)))
+(import x/core/doors obj-ref obj-set! str-byte-ref char->int str-make str->ptr ptr-set! ptr->int int->ptr mem-copy)
 
 ; A region's bytes moved by one copy: p's bytes at off, n of them.
-(def %at (fn (_ p off) (%int->ptr (+ (%ptr->int p) off))))
+(def %at (fn (_ p off) (int->ptr (+ (ptr->int p) off))))
 (def %move
   (fn (_ to to-off from from-off n)
-    (when (> n 0) (%mem-copy (%at (%str->ptr to) to-off) (%at (%str->ptr from) from-off) n))))
+    (when (> n 0) (mem-copy (%at (str->ptr to) to-off) (%at (str->ptr from) from-off) n))))
 
-(def %byte (fn (_ s i) (%char->int (%byte-ref s i))))
+(def %byte (fn (_ s i) (char->int (str-byte-ref s i))))
 
 ; --- writing ------------------------------------------------------------
 
 (def ssh-out
   (fn (_)
     (def v (Vector make 3 0))
-    (%oset! v 1 (%make-str 256))
-    (%oset! v 2 0)
-    (%oset! v 3 256)
+    (obj-set! v 1 (str-make 256))
+    (obj-set! v 2 0)
+    (obj-set! v 3 256)
     v))
 
 ; Room for n more bytes: the buffer doubled until they fit.
 (def %room!
   (fn (self out n)
-    (when (> (+ (%oref out 2) n) (%oref out 3))
-      (do (def cap (* (%oref out 3) 2))
-          (def buf (%make-str cap))
-          (def old (%oref out 1))
-          (%move buf 0 old 0 (%oref out 2))
-          (%oset! out 1 buf)
-          (%oset! out 3 cap)
+    (when (> (+ (obj-ref out 2) n) (obj-ref out 3))
+      (do (def cap (* (obj-ref out 3) 2))
+          (def buf (str-make cap))
+          (def old (obj-ref out 1))
+          (%move buf 0 old 0 (obj-ref out 2))
+          (obj-set! out 1 buf)
+          (obj-set! out 3 cap)
           (self out n)))))
 
 (def ssh-put-byte
   (fn (_ out b)
     (%room! out 1)
-    (%pset1 (%str->ptr (%oref out 1)) (%oref out 2) (& b 255) 1)
-    (%oset! out 2 (+ (%oref out 2) 1))))
+    (ptr-set! (str->ptr (obj-ref out 1)) (obj-ref out 2) (& b 255) 1)
+    (obj-set! out 2 (+ (obj-ref out 2) 1))))
 
 (def ssh-put-uint32
   (fn (_ out n)
@@ -80,9 +71,9 @@
 (def ssh-put-bytes
   (fn (_ out s start len)
     (%room! out len)
-    (def at (%oref out 2))
-    (%move (%oref out 1) at s start len)
-    (%oset! out 2 (+ at len))))
+    (def at (obj-ref out 2))
+    (%move (obj-ref out 1) at s start len)
+    (obj-set! out 2 (+ at len))))
 
 ; A string: its count, then its bytes.
 (def ssh-put-string
@@ -113,30 +104,30 @@
 
 ; What was written: (BUF . LEN), the buffer and how many of its bytes.
 (def ssh-out-run
-  (fn (_ out) (pair (%oref out 1) (%oref out 2))))
+  (fn (_ out) (pair (obj-ref out 1) (obj-ref out 2))))
 
 ; --- reading ------------------------------------------------------------
 
 (def ssh-in
   (fn (_ s start len)
     (def v (Vector make 3 0))
-    (%oset! v 1 s)
-    (%oset! v 2 start)
-    (%oset! v 3 (+ start len))
+    (obj-set! v 1 s)
+    (obj-set! v 2 start)
+    (obj-set! v 3 (+ start len))
     v))
 
 (def %need
   (fn (_ in n)
-    (when (> (+ (%oref in 2) n) (%oref in 3))
+    (when (> (+ (obj-ref in 2) n) (obj-ref in 3))
       (Err raise 'value "ssh: a packet ends before its field does" ()))))
 
-(def ssh-in-left (fn (_ in) (- (%oref in 3) (%oref in 2))))
+(def ssh-in-left (fn (_ in) (- (obj-ref in 3) (obj-ref in 2))))
 
 (def ssh-get-byte
   (fn (_ in)
     (%need in 1)
-    (def b (%byte (%oref in 1) (%oref in 2)))
-    (%oset! in 2 (+ (%oref in 2) 1))
+    (def b (%byte (obj-ref in 1) (obj-ref in 2)))
+    (obj-set! in 2 (+ (obj-ref in 2) 1))
     b))
 
 (def ssh-get-bool (fn (_ in) (not (= (ssh-get-byte in) 0))))
@@ -152,21 +143,21 @@
   (fn (_ in)
     (def n (ssh-get-uint32 in))
     (%need in n)
-    (def start (%oref in 2))
-    (%oset! in 2 (+ start n))
+    (def start (obj-ref in 2))
+    (obj-set! in 2 (+ start n))
     (pair start n)))
 
 ; A string copied out as its own bytes.
 (def ssh-get-bytes
   (fn (_ in)
     (def r (ssh-get-string in))
-    (ssh-copy (%oref in 1) (first r) (rest r))))
+    (ssh-copy (obj-ref in 1) (first r) (rest r))))
 
 ; A string as text: the same copy, for a name or a message.
 (def ssh-get-text (fn (_ in) (ssh-get-bytes in)))
 
 ; The reader's buffer, for a region's bytes.
-(def ssh-in-buf (fn (_ in) (%oref in 1)))
+(def ssh-in-buf (fn (_ in) (obj-ref in 1)))
 
 ; A name-list's names.
 (def ssh-get-names
@@ -179,7 +170,7 @@
 ; A fresh string of the bytes start..start+len of s.
 (def ssh-copy
   (fn (_ s start len)
-    (def out (%make-str len))
+    (def out (str-make len))
     (%move out 0 s start len)
     out))
 

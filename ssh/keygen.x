@@ -40,22 +40,15 @@
 (import ssh/pubkey ssh-pubkey-of ssh-pubkey-of-line ssh-pubkey-blob ssh-pubkey-type ssh-pubkey-label ssh-pubkey-bits ssh-ecdsa-curve
   ssh-pubkey-base64 ssh-identity-pubkey ssh-identity-comment)
 
-(def %byte-ref (prim-ref (lit str) (lit byte-ref)))
-(def %char->int (prim-ref (lit char) (lit ->int)))
-(def %byte-len (prim-ref (lit str) (lit byte-len)))
-(def %make-str (prim-ref (lit str) (lit make)))
-(def %str->ptr (prim-ref (lit str) (lit ->ptr)))
-(def %pset (prim-ref (lit ptr) (lit set!)))
-(def %oref (prim-ref (lit obj) (lit ref)))
-(def %oset! (prim-ref (lit obj) (lit set!)))
+(import x/core/doors str-byte-ref char->int str-byte-len str-make str->ptr ptr-set! obj-ref obj-set!)
 (def %cvt (prim-ref (lit convert) (lit to)))
 (def %num (fn (_ n) (%cvt n (Type named STRING) 10)))
 
-(def %say (fn (_ fd text) (File write fd text (%byte-len text))))
+(def %say (fn (_ fd text) (File write fd text (str-byte-len text))))
 
 (def %bytes
   (fn (_ s n)
-    ((fn (self i acc) (if (< i 0) acc (self (- i 1) (pair (%char->int (%byte-ref s i)) acc))))
+    ((fn (self i acc) (if (< i 0) acc (self (- i 1) (pair (char->int (str-byte-ref s i)) acc))))
      (- n 1) ())))
 
 ; The public key's blob: string "ssh-ed25519", string the 32 bytes.
@@ -104,12 +97,12 @@
              (if (= k 4) xy
                (do (def x (clamp (+ (first xy) (if (= (& b 1) 0) -1 1)) (- w 1)))
                    (def y (clamp (+ (rest xy) (if (= (& b 2) 0) -1 1)) (- h 1)))
-                   (when (< (%oref field (at x y)) 14) (%oset! field (at x y) (+ (%oref field (at x y)) 1)))
+                   (when (< (obj-ref field (at x y)) 14) (obj-set! field (at x y) (+ (obj-ref field (at x y)) 1)))
                    (self (+ k 1) (/ (- b (& b 3)) 4) (pair x y)))))
            0 byte xy))
         (pair 8 4) (%digest b)))
-    (%oset! field (at 8 4) 15)
-    (%oset! field (at (first end) (rest end)) 16)
+    (obj-set! field (at 8 4) 15)
+    (obj-set! field (at (first end) (rest end)) 16)
     (def border
       (fn (_ title)
         (def pad (/ (- w (Str8 length title) (& (- w (Str8 length title)) 1)) 2))
@@ -117,7 +110,7 @@
     (Str8 join "\n"
       (List append
         (list (border title))
-        (List map (fn (_ y) (Str8 append "|" (Str8 join "" (List map (fn (_ x) (Str8 sub (%oref field (at x y)) 1 symbols)) (List range 0 w))) "|"))
+        (List map (fn (_ y) (Str8 append "|" (Str8 join "" (List map (fn (_ x) (Str8 sub (obj-ref field (at x y)) 1 symbols)) (List range 0 w))) "|"))
           (List range 0 h))
         (list (border "[SHA256]") "")))))
 
@@ -142,7 +135,7 @@
 (def ssh-identity-openssh-text
   (fn (_ id comment . lock)
     (def pass (if (null? lock) "" (first lock)))
-    (def sealed (> (%byte-len pass) 0))
+    (def sealed (> (str-byte-len pass) 0))
     (def key (ssh-identity-pubkey id))
     (def secret (List ref 1 id))
     (def b (ssh-pubkey-blob key))
@@ -183,7 +176,7 @@
     (def section
       (if (not sealed) (first p)
         ((fn (_ kiv) (Aes ctr kiv 32 (ssh-copy kiv 32 16) (first p) 0 (rest p)))
-         (Bcrypt pbkdf pass (%byte-len pass) salt 16 (List ref 1 lock) 48))))
+         (Bcrypt pbkdf pass (str-byte-len pass) salt 16 (List ref 1 lock) 48))))
     (def out (ssh-out))
     (ssh-put-bytes out "openssh-key-v1" 0 14)
     (ssh-put-byte out 0)
@@ -228,9 +221,9 @@
     (def fd (File open path (list (lit wronly) (lit creat) (lit trunc)) mode))
     (if (< fd 0) #f
       (do (File chmod path mode)
-          (def n (File write fd text (%byte-len text)))
+          (def n (File write fd text (str-byte-len text)))
           (File close fd)
-          (= n (%byte-len text))))))
+          (= n (str-byte-len text))))))
 
 ; A new identity of a type: ed25519, from 32 random bytes; rsa of bits
 ; bits, from x-lang's Rsa generate; ecdsa on a curve of bits 256, 384 or
@@ -258,7 +251,7 @@
             (def len (match ((= bits 521) 66) ((= bits 384) 48) (#t 32)))
             ((fn (self)
                (def d (ssh-random len))
-               (when (= bits 521) (%pset (%str->ptr d) 0 (& (%char->int (%byte-ref d 0)) 1) 1))
+               (when (= bits 521) (ptr-set! (str->ptr d) 0 (& (char->int (str-byte-ref d 0)) 1) 1))
                (def q (guard (e ()) (Ecdsa public curve (list d 0 len))))
                (if (null? q) (self)
                  (do (def out (ssh-out))
@@ -292,11 +285,11 @@
 ; () at its end.
 (def %read-line
   (fn (_)
-    (def one (%make-str 1))
+    (def one (str-make 1))
     ((fn (self acc)
        (if (< (guard (e -1) (File read 3 one 1)) 1)
          (if (null? acc) () (Str8 join "" (List reverse acc)))
-         (if (= (%char->int (%byte-ref one 0)) 10) (Str8 join "" (List reverse acc))
+         (if (= (char->int (str-byte-ref one 0)) 10) (Str8 join "" (List reverse acc))
            (self (pair (Str8 sub 0 1 one) acc)))))
      ())))
 
@@ -327,7 +320,7 @@
   (fn (_ file comment passphrase quiet rounds type bits)
     (unless quiet (%say 1 (Str8 append "Generating public/private " type " key pair.\n")))
     (def path (%file file "Enter file in which to save the key" type))
-    (def slash ((fn (self i) (if (< i 0) () (if (= (%byte-ref path i) #\/) i (self (- i 1))))) (- (Str8 length path) 1)))
+    (def slash ((fn (self i) (if (< i 0) () (if (= (str-byte-ref path i) #\/) i (self (- i 1))))) (- (Str8 length path) 1)))
     (def dir (if (if (null? slash) #t (= slash 0)) () (Str8 sub 0 slash path)))
     (when (if (null? file) (if (null? dir) #f (not (File exists? dir))) #f)
       (do (File mkdir dir 448) (%say 1 (Str8 append "Created directory '" dir "'.\n"))))
@@ -335,7 +328,7 @@
       (if (not (File exists? path)) #t
         (do (%say 1 (Str8 append path " already exists.\nOverwrite (y/n)? "))
             (def a (%read-line))
-            (if (null? a) #f (if (> (Str8 length a) 0) (if (= (%byte-ref a 0) #\y) #t (= (%byte-ref a 0) #\Y)) #f)))))
+            (if (null? a) #f (if (> (Str8 length a) 0) (if (= (str-byte-ref a 0) #\y) #t (= (str-byte-ref a 0) #\Y)) #f)))))
     (def pass
       (match
         ((not overwrite) "")

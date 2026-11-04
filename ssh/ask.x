@@ -22,10 +22,7 @@
 (import x/sys/posix)
 (import x/repl/term)
 
-(def %byte-len (prim-ref (lit str) (lit byte-len)))
-(def %byte-ref (prim-ref (lit str) (lit byte-ref)))
-(def %make-str (prim-ref (lit str) (lit make)))
-(def %char->int (prim-ref (lit char) (lit ->int)))
+(import x/core/doors str-byte-len str-byte-ref str-make char->int)
 
 ; The caller's standard input: the platform keeps it on fd 3, fd 0
 ; carrying x's own program text.
@@ -35,11 +32,11 @@
 ; delete taking back a byte: the line, or () at end of input.
 (def %line
   (fn (_ fd)
-    (def one (%make-str 1))
+    (def one (str-make 1))
     (guard (e ())
       ((fn (self acc)
          (if (< (File read fd one 1) 1) (if (null? acc) () (Str8 join "" (List reverse acc)))
-           (do (def b (%char->int (%byte-ref one 0)))
+           (do (def b (char->int (str-byte-ref one 0)))
                (match
                  ((if (= b 13) #t (= b 10)) (Str8 join "" (List reverse acc)))
                  ((if (= b 127) #t (= b 8)) (self (if (null? acc) () (rest acc))))
@@ -56,7 +53,7 @@
     (def fd (guard (e -1) (File open "/dev/tty" (lit rdwr))))
     (if (< fd 0) ()
       (do (def saved (if secret (Term raw-with-signals! fd) ()))
-          (File write fd text (%byte-len text))
+          (File write fd text (str-byte-len text))
           (def line (%line fd))
           (when secret
             (do (Term restore! fd saved)
@@ -80,11 +77,11 @@
       (Sys close (first p)) (Sys close (rest p))
       (Sys exec program (list text))
       (unless (File exists? program)
-        ((fn (_ m) (File write 2 m (%byte-len m)))
+        ((fn (_ m) (File write 2 m (str-byte-len m)))
          (Str8 append "ssh_askpass: exec(" program "): No such file or directory\n")))
       (Sys exit 127))
     (Sys close (rest p))
-    (def buf (%make-str 1024))
+    (def buf (str-make 1024))
     (def out
       ((fn (self acc)
          (def n (File read (first p) buf 1024))
@@ -109,7 +106,7 @@
     (match
       ((if use allow #f) (ssh-askpass text))
       ((ssh-ask-tty?) (ssh-ask-tty text #t))
-      (stdin (do (File write 2 text (%byte-len text)) (%line %stdin)))
+      (stdin (do (File write 2 text (str-byte-len text)) (%line %stdin)))
       (#t ()))))
 
 (provide ssh/ask ssh-ask-tty ssh-ask-tty? ssh-askpass ssh-ask-secret)

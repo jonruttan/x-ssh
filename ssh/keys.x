@@ -28,19 +28,15 @@
 (import ssh/bytes ssh-in ssh-get-uint32 ssh-get-string ssh-get-bytes ssh-get-text ssh-copy ssh-out ssh-put-text ssh-put-string ssh-out-run)
 (import ssh/pubkey ssh-pubkey-of ssh-pubkey-type ssh-ecdsa-curve)
 
-(def %oref (prim-ref (lit obj) (lit ref)))
-(def %make-str (prim-ref (lit str) (lit make)))
-(def %str->ptr (prim-ref (lit str) (lit ->ptr)))
-(def %pset1 (prim-ref (lit ptr) (lit set!)))
-(def %byte-len (prim-ref (lit str) (lit byte-len)))
+(import x/core/doors obj-ref str-make str->ptr ptr-set! str-byte-len)
 
 ; A byte list as a string, NULs and all.
 (def %bytes->str
   (fn (_ bs)
     (def n (List length bs))
-    (def s (%make-str n))
-    (def p (%str->ptr s))
-    ((fn (self i xs) (unless (null? xs) (do (%pset1 p i (first xs) 1) (self (+ i 1) (rest xs))))) 0 bs)
+    (def s (str-make n))
+    (def p (str->ptr s))
+    ((fn (self i xs) (unless (null? xs) (do (ptr-set! p i (first xs) 1) (self (+ i 1) (rest xs))))) 0 bs)
     (pair s n)))
 
 ; The base64 body between the BEGIN and END lines of a key file's text.
@@ -94,13 +90,13 @@
       ((= size 0) (pair (ssh-copy buf (first pr) (rest pr)) (rest pr)))
       ((not (str=? (List ref 2 parts) "bcrypt"))
         (Err raise 'value (Str8 append "a key sealed under " (List ref 2 parts) ", a kdf not served") ()))
-      ((if (null? pass) #t (= (%byte-len pass) 0)) (Err raise 'value ssh-key-wrong-passphrase ()))
+      ((if (null? pass) #t (= (str-byte-len pass) 0)) (Err raise 'value ssh-key-wrong-passphrase ()))
       (#t
         (do (def opts (List ref 3 parts))
             (def oin (ssh-in buf (first opts) (rest opts)))
             (def salt (ssh-get-string oin))
             (def rounds (ssh-get-uint32 oin))
-            (def kiv (Bcrypt pbkdf pass (%byte-len pass) (ssh-copy buf (first salt) (rest salt)) (rest salt)
+            (def kiv (Bcrypt pbkdf pass (str-byte-len pass) (ssh-copy buf (first salt) (rest salt)) (rest salt)
                                 rounds (+ size 16)))
             (pair (Aes ctr kiv size (ssh-copy kiv size 16) buf (first pr) (rest pr)) (rest pr)))))))
 
@@ -193,7 +189,7 @@
   (fn (_ path)
     (def fd (File open path (lit rdonly)))
     (when (< fd 0) (Err raise 'io (Str8 append "ssh: cannot read " path) ()))
-    (def buf (%make-str 16384))
+    (def buf (str-make 16384))
     (def n (File read fd buf 16384))
     (File close fd)
     (when (< n 0) (Err raise 'io (Str8 append "ssh: cannot read " path) ()))

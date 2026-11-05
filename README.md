@@ -45,13 +45,19 @@ nistp521), for host keys and user keys, at either end.
   then `/etc/ssh/ssh_config`, the first value holding, with `Host` and
   `Match` blocks and `Include`.  Each flag stands for its keyword: `-p`
   Port, `-l` User, `-i` IdentityFile, `-L` LocalForward, `-R`
-  RemoteForward, `-g` GatewayPorts, `-N` SessionType none, `-s` SessionType
+  RemoteForward, `-D` DynamicForward, `-J` ProxyJump, `-g` GatewayPorts,
+  `-N` SessionType none, `-s` SessionType
   subsystem (the command its name), `-n` StdinNull, `-A` and `-a`
   ForwardAgent,
   `-q` and `-v` LogLevel, `-c` Ciphers, `-m` MACs; `-W host:port`
   carries standard input and
   output through the server, as a ProxyCommand wants; `-G` prints the
-  settings in force.  Served keywords: Hostname, Port, User,
+  settings in force.  ProxyCommand's command is run by the user's shell,
+  the connection on its standard input and output; ProxyJump is made the
+  command OpenSSH makes of it, `ssh` run to the last hop with `-W`, the
+  hops before it its `-J`, `-F`'s file passed on.  DynamicForward is a
+  SOCKS proxy, SOCKS 4, 4a and 5 without authentication, each connection
+  a channel to where it asks.  Served keywords: Hostname, Port, User,
   IdentityFile (`~/.ssh/id_rsa`, `id_ecdsa` and `id_ed25519` by default;
   OpenSSH's or Dropbear's key files, a key under a passphrase among
   them), IdentityAgent (SSH_AUTH_SOCK by default; the agent's keys
@@ -61,10 +67,11 @@ nistp521), for host keys and user keys, at either end.
   UserKnownHostsFile,
   GlobalKnownHostsFile, HostKeyAlias, BatchMode, PasswordAuthentication,
   PubkeyAuthentication, NumberOfPasswordPrompts, LocalForward,
-  RemoteForward, GatewayPorts, ClearAllForwardings, ServerAliveInterval,
+  RemoteForward, DynamicForward, GatewayPorts, ClearAllForwardings,
+  ServerAliveInterval,
   ServerAliveCountMax, ChannelTimeout (`global=`), SendEnv, SetEnv,
-  RemoteCommand, SessionType, StdinNull, LogLevel, Ciphers, MACs,
-  IgnoreUnknown.  A new
+  RemoteCommand, ProxyCommand, ProxyJump, SessionType, StdinNull,
+  LogLevel, Ciphers, MACs, IgnoreUnknown.  A new
   host is asked about at the terminal under StrictHostKeyChecking ask,
   as OpenSSH asks; a changed key is always refused.  A password is asked
   at the terminal with echo off, or of SSH_ASKPASS as

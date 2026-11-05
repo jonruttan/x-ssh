@@ -36,7 +36,7 @@
   ssh-config-tilde ssh-config-time ssh-config-patterns? ssh-config-ssh-keywords
   ssh-config-line ssh-config-bad ssh-config-arg ssh-config-one ssh-config-choice ssh-config-yes? ssh-config-int-or-nil
   ssh-config-count ssh-config-seconds ssh-config-channel-timeout ssh-config-algorithms)
-(import ssh/sys ssh-sys-me)
+(import ssh/sys ssh-sys-me ssh-sys-proxy)
 
 (import x/core/doors str-byte-len str-byte-ref str-make char->int)
 (def %cvt (prim-ref (lit convert) (lit to)))
@@ -73,8 +73,7 @@
 ; What ssh_config may say that this client does not do: refused unless
 ; given the value that leaves it off.
 (def %refused
-  (list (pair "proxycommand" "none") (pair "proxyjump" "none") (pair "dynamicforward" "")
-        (pair "knownhostscommand" "none") (pair "tunnel" "no") (pair "forkafterauthentication" "no")
+  (list (pair "knownhostscommand" "none") (pair "tunnel" "no") (pair "forkafterauthentication" "no")
         (pair "permitremoteopen" "any")))
 
 ; %-tokens expanded from an alist of (LETTER . TEXT), %% a percent.
@@ -108,6 +107,72 @@
       (ssh-config-bad l (Str8 append what " '" spec "'"))
       (list (match ((not given) (if gateway () "localhost")) ((if (str=? given "*") #t (str=? given "")) ()) (#t given))
             lport (List ref (- n 2) parts) rport))))
+
+; A port's digits as a number from 1 to 65535, or ().
+(def %port-of
+  (fn (_ t)
+    ((fn (_ n) (if (null? n) () (if (if (< n 1) #t (> n 65535)) () n))) (ssh-config-int-or-nil t))))
+
+; HOST[:PORT], HOST in brackets when it holds colons, as (HOST PORT):
+; PORT the digits given, () for none; () when it does not read so.
+(def %host-port
+  (fn (_ s)
+    (def n (Str8 length s))
+    (def after (fn (_ i) (Str8 sub i (- n i) s)))
+    (match
+      ((= n 0) ())
+      ((= (str-byte-ref s 0) #\[)
+        (do (def close (Str8 index-of "]" s))
+            (match ((if (null? close) #t (< close 2)) ())
+                   ((= close (- n 1)) (list (Str8 sub 1 (- close 1) s) ()))
+                   ((= (str-byte-ref s (+ close 1)) #\:) (list (Str8 sub 1 (- close 1) s) (after (+ close 2))))
+                   (#t ()))))
+      (#t (do (def colon (Str8 index-of ":" s))
+              (match ((null? colon) (list s ()))
+                     ((= colon 0) ())
+                     ((not (null? (Str8 index-of ":" (after (+ colon 1))))) (list s ()))
+                     (#t (list (Str8 sub 0 colon s) (after (+ colon 1))))))))))
+
+; A DynamicForward, `[bind_address:]port`, as (GIVEN PORT): GIVEN the
+; address as written, () for none; () when it does not read so.
+(def ssh-client-dynamic
+  (fn (_ spec)
+    (def hp (if (null? (Str8 index-of ":" spec)) (list () spec) (%host-port spec)))
+    (def port (if (null? hp) () (if (null? (List ref 1 hp)) () (%port-of (List ref 1 hp)))))
+    (if (null? port) () (list (first hp) port))))
+
+; A ProxyJump's hops, `[user@]host[:port]` or `ssh://[user@]host[:port][/]`
+; separated by commas, as (USER HOST PORT) each, USER and PORT () when
+; not given, an empty port none; () when one does not read so, as
+; OpenSSH reads them -- a URI's host never in brackets.
+(def ssh-client-jump
+  (fn (_ text)
+    (def cut-last (fn (_ s c) (if (if (> (Str8 length s) 0) (= (str-byte-ref s (- (Str8 length s) 1)) c) #f) (Str8 sub 0 (- (Str8 length s) 1) s) s)))
+    (def hop
+      (fn (_ h)
+        (def url (if (> (Str8 length h) 6) (str=? (Str8 sub 0 6 h) "ssh://") #f))
+        (def s (if url (cut-last (Str8 sub 6 (- (Str8 length h) 6) h) #\/) h))
+        (def at ((fn (self i) (if (< i 0) () (if (= (str-byte-ref s i) #\@) i (self (- i 1))))) (- (Str8 length s) 1)))
+        (def user (if (null? at) () (Str8 sub 0 at s)))
+        (def where (cut-last (if (null? at) s (Str8 sub (+ at 1) (- (Str8 length s) at 1) s)) #\:))
+        (def hp (if (if url (not (null? (Str8 index-of "[" where))) #f) () (%host-port where)))
+        (match ((if (null? hp) #t (if (null? user) #f (= (Str8 length user) 0))) ())
+               ((null? (List ref 1 hp)) (list user (first hp) ()))
+               ((null? (%port-of (List ref 1 hp))) ())
+               (#t (list user (first hp) (%port-of (List ref 1 hp)))))))
+    (def hops (List map hop (Str8 split "," text)))
+    (if (List any? (fn (_ h) (null? h)) hops) () hops)))
+
+; A ProxyJump as -G prints it: the hops before the last as written, the
+; last as [user@]host[:port].
+(def %jump-text
+  (fn (_ text)
+    (def hops (Str8 split "," text))
+    (def h (first (ssh-client-jump (List last hops))))
+    (def host (if (null? (Str8 index-of ":" (List ref 1 h))) (List ref 1 h) (Str8 append "[" (List ref 1 h) "]")))
+    (Str8 append (Str8 join "" (List map (fn (_ x) (Str8 append x ",")) (List reverse (rest (List reverse hops)))))
+                 (if (null? (first h)) "" (Str8 append (first h) "@")) host
+                 (if (null? (List ref 2 h)) "" (Str8 append ":" (%num (List ref 2 h)))))))
 
 ; IdentityAgent's socket: none for (), SSH_AUTH_SOCK or $NAME for the
 ; variable's value, a path otherwise, its tokens and ~ expanded.
@@ -143,7 +208,31 @@
     (def clear (ssh-config-yes? lines "clearallforwardings" #f))
     (def forwards (fn (_ kw what) (if clear () (List map (fn (_ l) (%forward l gateway what)) (List filter (fn (_ l) (str=? (first l) kw)) lines)))))
     (def session (ssh-config-choice lines "sessiontype" (list "default" "none" "subsystem") "default"))
-    (list (pair (lit host) host) (pair (lit hostname) hostname) (pair (lit port) port) (pair (lit user) user)
+    ; ProxyCommand or ProxyJump, whichever is met first holding, `none`
+    ; for neither
+    (def proxy-line (List find (fn (_ l) (if (str=? (first l) "proxycommand") #t (str=? (first l) "proxyjump"))) lines))
+    (def proxy-value (if (null? proxy-line) () ((fn (_ v) (if (str=? (Str8 downcase v) "none") () v)) (ssh-config-arg proxy-line))))
+    (def jump? (if (null? proxy-value) #f (str=? (first proxy-line) "proxyjump")))
+    (when (if jump? (null? (ssh-client-jump proxy-value)) #f)
+      (ssh-config-bad proxy-line (Str8 append "Invalid ProxyJump \"" proxy-value "\"")))
+    ; a last hop that is the destination itself -- its host, its user if
+    ; it names one, its port or 22 -- is no jump, as OpenSSH drops it
+    (def self-jump?
+      (if jump?
+        ((fn (_ h) (if (str=? (List ref 1 h) hostname)
+                     (if (if (null? (first h)) #t (str=? (first h) user)) (= (if (null? (List ref 2 h)) 22 (List ref 2 h)) port) #f)
+                     #f))
+         (first (ssh-client-jump (List last (Str8 split "," proxy-value)))))
+        #f))
+    (def dynamics
+      (if clear ()
+        (List map (fn (_ l) ((fn (_ d) (if (null? d) (ssh-config-bad l "Bad forwarding specification.") d)) (ssh-client-dynamic (ssh-config-arg l))))
+          (List filter (fn (_ l) (str=? (first l) "dynamicforward")) lines))))
+    (list (pair (lit host) host)
+          (pair (lit proxy-command) (if jump? () proxy-value))
+          (pair (lit proxy-jump) (if (if jump? (not self-jump?) #f) proxy-value ()))
+          (pair (lit dynamics) dynamics)
+          (pair (lit tokens) tokens) (pair (lit hostname) hostname) (pair (lit port) port) (pair (lit user) user)
           (pair (lit identities) (if (null? ids) (List map (fn (_ p) (pair (path p) #f)) (list "~/.ssh/id_rsa" "~/.ssh/id_ecdsa" "~/.ssh/id_ed25519")) (List map (fn (_ p) (pair (path p) #t)) ids)))
           (pair (lit known) (files "userknownhostsfile" (list "~/.ssh/known_hosts" "~/.ssh/known_hosts2")))
           (pair (lit global) (files "globalknownhostsfile" (list "/etc/ssh/ssh_known_hosts" "/etc/ssh/ssh_known_hosts2")))
@@ -203,6 +292,10 @@
                 (Str8 append "gatewayports " (yn (%get s (lit gateway)))))
           (List map (fn (_ f) (Str8 append "localforward " (fwd f))) (%get s (lit forwards)))
           (List map (fn (_ f) (Str8 append "remoteforward " (fwd f))) (%get s (lit remotes)))
+          (List map (fn (_ d) (Str8 append "dynamicforward " (if (null? (first d)) "" (Str8 append "[" (first d) "]:")) (%num (List ref 1 d))))
+            (%get s (lit dynamics)))
+          (if (null? (%get s (lit proxy-command))) () (list (Str8 append "proxycommand " (%get s (lit proxy-command)))))
+          (if (null? (%get s (lit proxy-jump))) () (list (Str8 append "proxyjump " (%jump-text (%get s (lit proxy-jump))))))
           (List map (fn (_ e) (Str8 append "sendenv " e)) (%get s (lit sendenv)))
           (List map (fn (_ e) (Str8 append "setenv " e)) (%get s (lit setenv)))
           (list (Str8 append "loglevel " (Str8 upcase (%get s (lit level))))
@@ -289,7 +382,8 @@
              ((if (str=? a "yes") #t (str=? a fp)) (record!))
              ((str=? a "no") (%verification-failed))
              (#t (self "Please type 'yes', 'no' or the fingerprint: "))))
-         (Str8 append "The authenticity of host '" name " (" (ssh-known-name addr port) ")' can't be established.\n"
+         (Str8 append "The authenticity of host '" name " ("
+                      (if (null? addr) "<no hostip for proxy command>" (ssh-known-name addr port)) ")' can't be established.\n"
                       label " key fingerprint is " fp ".\n"
                       "This key is not known by any other names.\n"
                       "Are you sure you want to continue connecting (yes/no/[fingerprint])? "))))))
@@ -441,30 +535,80 @@
 
 ; --- the connection --------------------------------------------------------
 
+(def %debug-levels (list "verbose" "debug" "debug1" "debug2" "debug3"))
+
+; The command the connection is carried over, its tokens expanded, or ()
+; to connect directly: ProxyCommand's, or for ProxyJump the one OpenSSH
+; makes of it -- this client run to the last hop with -W, the hops
+; before it its own -J, -F's file and -v passed on.
+(def %proxy-command
+  (fn (_ s)
+    (def jump (%get s (lit proxy-jump)))
+    (def raw
+      (if (null? jump) (%get s (lit proxy-command))
+        (do (def hops (Str8 split "," jump))
+            (def h (first (ssh-client-jump (List last hops))))
+            (def extra (List reverse (rest (List reverse hops))))
+            (def config (%get s (lit config-file)))
+            (Str8 append "ssh"
+              (if (null? (first h)) "" (Str8 append " -l " (first h)))
+              (if (null? (List ref 2 h)) "" (Str8 append " -p " (%num (List ref 2 h))))
+              (if (null? extra) "" (Str8 append " -J " (Str8 join "," extra)))
+              (if (null? config) "" (Str8 append " -F " config))
+              (if (List any? (fn (_ l) (str=? l (%get s (lit level)))) %debug-levels) " -v" "")
+              " -W '[%h]:%p' " (List ref 1 h)))))
+    (if (null? raw) () (%expand raw (%get s (lit tokens))))))
+
+; A proxy command's end, as OpenSSH's client ends it: a hangup, then
+; waited for.
+(def %end-proxy
+  (fn (_ pid)
+    (def hup ((fn (_ e) (if (null? e) 1 (rest e))) (List find (fn (_ p) (str=? (first p) "HUP")) (Sys signals))))
+    (guard (e ()) (Sys kill pid hup))
+    (guard (e ()) (Sys wait pid))))
+
 ; The connection made and the command run under settings s: its exit
 ; status, or 255.
 (def %run
   (fn (_ s command stdio)
+    (def proxy (%proxy-command s))
+    (def spawned (if (null? proxy) () (ssh-sys-proxy proxy)))
+    (def status (%connected s command stdio proxy spawned))
+    (unless (null? spawned) (%end-proxy (first spawned)))
+    status))
+
+(def %connected
+  (fn (_ s command stdio proxy spawned)
     (def level (%get s (lit level)))
     (def quiet (List any? (fn (_ l) (str=? l level)) (list "quiet" "fatal" "error")))
-    (def tr (if (List any? (fn (_ l) (str=? l level)) (list "verbose" "debug" "debug1" "debug2" "debug3"))
+    (def tr (if (List any? (fn (_ l) (str=? l level)) %debug-levels)
               (fn (_ t) (%say 2 (Str8 append "debug1: " (%ms) " ms " t "\n")))
               ()))
     (def host (%get s (lit hostname)))
     (def port (%get s (lit port)))
-    (def addr (%address host))
-    (def fd (guard (e ()) (Socket tcp-connect addr port)))
-    (if (null? fd)
-      (do (%say 2 (Str8 append "ssh: connect to host " host " port " (%num port) ": Connection refused\n")) 255)
+    ; through a proxy command there is no address of the host's own
+    (def addr (if (null? proxy) (%address host) ()))
+    (def fd (if (null? proxy) (guard (e ()) (Socket tcp-connect addr port)) (if (null? spawned) () (rest spawned))))
+    (match
+      ((if (null? fd) (null? proxy) #f)
+        (do (%say 2 (Str8 append "ssh: connect to host " host " port " (%num port) ": Connection refused\n")) 255))
+      ((null? fd) (do (%say 2 "ssh: the proxy command could not be started\n") 255))
+      (#t
       (guard (e (do (%say 2 (match ((str=? (%message e) "keepalive") (Str8 append "Timeout, server " host " not responding.\n"))
                                     ((str=? (%message e) "idle") (Str8 append "Connection to " host " closed: the channels were idle past ChannelTimeout.\n"))
                                     (#t (Str8 append (%message e) "\n"))))
                     (guard (e2 ()) (Socket close fd))
                     255))
-        (unless (null? tr) (tr (Str8 append "Connecting to " host " [" addr "] port " (%num port) ".")))
+        (unless (null? tr)
+          (tr (if (null? proxy) (Str8 append "Connecting to " host " [" addr "] port " (%num port) ".")
+                (Str8 append "Executing proxy command: exec " proxy))))
         (def c (ssh-open fd tr))
         (ssh-engines! c)
-        (ssh-exchange-versions! c)
+        ; a proxy that ends before the versions are exchanged is a
+        ; connection closed by a peer with no address, in OpenSSH's words
+        (if (null? proxy) (ssh-exchange-versions! c)
+          (guard (e (Err raise 'value "Connection closed by UNKNOWN port 65535\r" ()))
+            (ssh-exchange-versions! c)))
         (ssh-algorithms! c (%get s (lit ciphers)) (%get s (lit macs)))
         (ssh-kex! c (%hostkey-order s))
         (if (not (%host-key-ok c s addr quiet tr))
@@ -475,7 +619,8 @@
                 (do (%say 2 (Str8 append (%get s (lit user)) "@" host ": Permission denied (" (Str8 join "," ok) ").\n"))
                     (Socket close fd)
                     255)
-                (do (unless (null? tr) (tr (Str8 append "Authenticated to " host " ([" addr "]:" (%num port) ").")))
+                (do (unless (null? tr)
+                      (tr (Str8 append "Authenticated to " host (if (null? addr) " (via proxy)" (Str8 append " ([" addr "]:" (%num port) ")")) ".")))
                     ; a terminal as RequestTTY says: force always, yes
                     ; when standard input is one, auto for a shell on one
                     (def local-tty (Sys isatty %stdin))
@@ -499,7 +644,14 @@
                             (if (if (%get s (lit stdin-null)) #t (if (null? command) (null? stdio) #f)) () %stdin)
                             (fn (_ buf start len) (File write 1 (ssh-copy buf start len) len))
                             (fn (_ buf start len) (File write 2 (ssh-copy buf start len) len))
-                            (List map (fn (_ f) (pair (if (null? (first f)) () (%address (first f))) (rest f))) (%get s (lit forwards)))
+                            (List map (fn (_ f) (pair (if (null? (first f)) () (%address (first f))) (rest f)))
+                              (List append (%get s (lit forwards))
+                                ; DynamicForward: a listener whose connections say where they go, by SOCKS
+                                (List map (fn (_ d) (list (match ((null? (first d)) (if (%get s (lit gateway)) () "localhost"))
+                                                                 ((if (str=? (first d) "*") #t (str=? (first d) "")) ())
+                                                                 (#t (first d)))
+                                                          (List ref 1 d) #f #f))
+                                  (%get s (lit dynamics)))))
                             (%get s (lit remotes))
                             (if (null? stdio) () (pair (%address (first stdio)) (rest stdio)))
                             (%get s (lit limits))
@@ -519,7 +671,7 @@
                       ((str=? (rest outcome) "escape") (do (%say 2 closed) 255))
                       ((str=? (rest outcome) "keepalive") (do (%say 2 (Str8 append "Timeout, server " host " not responding.\n")) 255))
                       ((str=? (rest outcome) "idle") (do (%say 2 (Str8 append "Connection to " host " closed: the channels were idle past ChannelTimeout.\n")) 255))
-                      (#t (do (%say 2 (Str8 append (rest outcome) "\n")) 255)))))))))))
+                      (#t (do (%say 2 (Str8 append (rest outcome) "\n")) 255))))))))))))
 
 ; The client's plan done: (HOST COMMAND OPTIONS CONFIG STDIO PRINT).
 ; The configuration settled -- the options, the user's file (-F's, or
@@ -550,13 +702,14 @@
         (do (List for-each (fn (_ f) (%say 2 (Str8 append f "\n"))) faults)
             (%say 2 (Str8 append "terminating, " (%num (List length faults)) " bad configuration options\n"))
             255)
-        (do (def s (ssh-client-settings lines host local))
+        (do (def s (pair (pair (lit config-file) config) (ssh-client-settings lines host local)))
+            ; -W's host:port, the host in brackets when it holds colons
             (def stdio (if (null? (List ref 4 plan)) ()
-                         ((fn (_ w) (def i (Str8 index-of ":" w))
-                            (def p (if (null? i) () (ssh-config-int-or-nil (Str8 sub (+ i 1) (- (Str8 length w) i 1) w))))
-                            (if (if (null? i) #t (null? p)) (Err raise 'value "stdio forward specification must be host:port" ())
-                              (pair (Str8 sub 0 i w) p)))
-                          (List ref 4 plan))))
+                         ((fn (_ hp)
+                            (def p (if (null? hp) () (if (null? (List ref 1 hp)) () (ssh-config-int-or-nil (List ref 1 hp)))))
+                            (if (null? p) (Err raise 'value "stdio forward specification must be host:port" ())
+                              (pair (first hp) p)))
+                          (%host-port (List ref 4 plan)))))
             ; the command: none under SessionType none, the one given or
             ; RemoteCommand's -- under SessionType subsystem the name of the
             ; subsystem asked for -- or else the user's shell, unless -W
@@ -573,4 +726,4 @@
               (do (%say 1 (%print s)) 0)
               (%run s command stdio)))))))
 
-(provide ssh/client ssh-client-main ssh-client-settings)
+(provide ssh/client ssh-client-main ssh-client-settings ssh-client-jump ssh-client-dynamic)

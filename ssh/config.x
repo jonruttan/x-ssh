@@ -31,8 +31,13 @@
 
 (def %space? (fn (_ c) (if (= c #\space) #t (if (= c #\tab) #t (= c #\return)))))
 
+; The keywords whose argument is a command: the rest of the line, quotes
+; and all, as OpenSSH takes it.
+(def %command-keywords (list "proxycommand" "remotecommand" "localcommand" "knownhostscommand"))
+
 ; A line's words: the keyword, to a space or an `=`, then the arguments,
-; a quoted one whole.  () for a blank line or a comment.
+; a quoted one whole, or a command keyword's one argument, the rest of
+; the line.  () for a blank line or a comment.
 (def ssh-config-words
   (fn (_ line)
     (def n (Str8 length line))
@@ -54,8 +59,15 @@
     (if (if (>= i0 n) #t (= (at i0) #\#)) ()
       (do (def kend ((fn (self i) (if (if (< i n) (not (if (%space? (at i)) #t (= (at i) #\=))) #f) (self (+ i 1)) i)) i0))
           (def j (skip kend))
-          (pair (Str8 sub i0 (- kend i0) line)
-                (args (if (if (< j n) (= (at j) #\=) #f) (+ j 1) j) ()))))))
+          (def from (if (if (< j n) (= (at j) #\=) #f) (+ j 1) j))
+          (def kw (Str8 sub i0 (- kend i0) line))
+          (pair kw
+                (if (List any? (fn (_ c) (str=? c (Str8 downcase kw))) %command-keywords)
+                  ; a command: the rest of the line as written, trailing space aside
+                  (do (def a (skip from))
+                      (def e ((fn (self i) (if (if (> i a) (%space? (at (- i 1))) #f) (self (- i 1)) i)) n))
+                      (if (>= a e) () (list (Str8 sub a (- e a) line))))
+                  (args from ())))))))
 
 ; Whether a pattern matches a string: `*` any run of characters, `?` any
 ; one.

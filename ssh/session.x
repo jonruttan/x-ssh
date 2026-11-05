@@ -11,7 +11,8 @@
 ; to the caller as they arrive, our input pumped to it as the server's
 ; window allows, its exit status taken from the request that carries it.
 ; Beside it, each connection accepted on a -L listener is a direct-tcpip
-; channel to the host and port the forward names, and each -R forward is
+; channel to the host and port the forward names -- on a -D listener, to
+; the host and port its SOCKS request names -- and each -R forward is
 ; asked of the server by a tcpip-forward global request, the connections
 ; it then opens as forwarded-tcpip channels connected here to the host
 ; and port the forward names; a forward's bytes are pumped each way until
@@ -83,9 +84,11 @@
 ; MODES the local terminal's as Term modes answers them, or (), 10
 ; the window last sent, 11 where the escape character stands: 1 at a
 ; line's start, 2 just after a tilde there, 0 elsewhere, 12 the agent's
-; socket forwarded, or ().
+; socket forwarded, or (), 13 the connections on dynamic listeners yet
+; to say where they go, as (FD BYTES GREETED).
 (def %CHANNELS 1) (def %NEXT 2) (def %MOVED 3) (def %LISTENERS 4) (def %SESSION 5)
 (def %REMOTES 6) (def %UNANSWERED 7) (def %ENV 8) (def %TTY 9) (def %SIZE 10) (def %ESC 11) (def %AGENT 12)
+(def %SOCKS 13)
 (def %rn (fn (_ run i) (obj-ref run i)))
 (def %rn! (fn (_ run i v) (obj-set! run i v)))
 
@@ -165,6 +168,124 @@
     (ssh-put-text open (first peer))
     (ssh-put-uint32 open (rest peer))
     (%send c open)))
+
+; --- DynamicForward: SOCKS (RFC 1928, and SOCKS 4 and 4a) -------------------
+;
+; A connection accepted on a dynamic listener says where it goes before
+; it is a channel: SOCKS 4 or 4a, or SOCKS 5 without authentication,
+; CONNECT only, as OpenSSH's client serves them.  What it has sent is
+; kept, a byte at a time as a list, until the request is whole; then the
+; reply is sent at once, as OpenSSH sends it, and the connection is a
+; direct-tcpip channel's like any -L forward's.  Each read takes no more
+; than the request still lacks, so nothing meant for the channel is read
+; here.
+
+; The most a request may hold, SOCKS 4's user and host names with it.
+(def %socks-max 1024)
+
+(def %bytes-text
+  (fn (_ bs)
+    (def out (ssh-out))
+    (List for-each (fn (_ b) (ssh-put-byte out b)) bs)
+    ((fn (_ r) (ssh-copy (first r) 0 (rest r))) (ssh-out-run out))))
+
+(def %slice (fn (_ bs from n) (List take n (List drop from bs))))
+
+; The index of the first zero byte at or past from, or ().
+(def %nul-from
+  (fn (_ bs from)
+    ((fn (self xs i) (match ((null? xs) ()) ((= (first xs) 0) i) (#t (self (rest xs) (+ i 1)))))
+     (List drop from bs) from)))
+
+(def %hex (fn (_ n) ((prim-ref (lit convert) (lit to)) n (Type named STRING) 16)))
+
+; What a request so far calls for: (more N) bytes, (greet) for SOCKS 5's
+; greeting answered, (done HOST PORT REPLY) with the reply's bytes, or
+; (bad) to close the connection.
+(def %socks
+  (fn (_ bs greeted)
+    (def n (List length bs))
+    (def at (fn (_ i) (List ref i bs)))
+    (def port-at (fn (_ i) (+ (* (at i) 256) (at (+ i 1)))))
+    (match
+      ((= n 0) (list (lit more) 1))
+      ((> n %socks-max) (list (lit bad)))
+      ((= (at 0) 4)
+        (match
+          ((< n 8) (list (lit more) (- 8 n)))
+          ((not (= (at 1) 1)) (list (lit bad)))
+          (#t
+            (do (def user-end (%nul-from bs 8))
+                (def ip (%slice bs 4 4))
+                ; 4a: an address 0.0.0.x, x not 0, is a name after the user's
+                (def named (if (= (first ip) 0) (if (= (at 5) 0) (if (= (at 6) 0) (not (= (at 7) 0)) #f) #f) #f))
+                (def host-end (if (if named (not (null? user-end)) #f) (%nul-from bs (+ user-end 1)) ()))
+                (def reply (list 0 90 0 0 0 0 0 0))
+                (match
+                  ((null? user-end) (list (lit more) 1))
+                  ((not named) (list (lit done) (Str8 join "." (List map %num ip)) (port-at 2) reply))
+                  ((null? host-end) (list (lit more) 1))
+                  (#t (list (lit done) (%bytes-text (%slice bs (+ user-end 1) (- host-end user-end 1))) (port-at 2) reply)))))))
+      ((= (at 0) 5)
+        (if (< n 2) (list (lit more) (- 2 n))
+          (do (def hdr (+ 2 (at 1)))
+              (match
+                ((< n hdr) (list (lit more) (- hdr n)))
+                ((not greeted) (if (List any? (fn (_ m) (= m 0)) (%slice bs 2 (at 1))) (list (lit greet)) (list (lit bad))))
+                ((< n (+ hdr 5)) (list (lit more) (- (+ hdr 5) n)))
+                ((not (if (= (at hdr) 5) (= (at (+ hdr 1)) 1) #f)) (list (lit bad)))
+                (#t
+                  (do (def atyp (at (+ hdr 3)))
+                      (def a (+ hdr 4))
+                      (def size (match ((= atyp 1) 4) ((= atyp 3) (+ 1 (at a))) ((= atyp 4) 16) (#t ())))
+                      (def reply (list 5 0 0 1 0 0 0 0 0 0))
+                      (match
+                        ((null? size) (list (lit bad)))
+                        ((< n (+ a size 2)) (list (lit more) (- (+ a size 2) n)))
+                        ((= atyp 1) (list (lit done) (Str8 join "." (List map %num (%slice bs a 4))) (port-at (+ a 4)) reply))
+                        ((= atyp 3) (list (lit done) (%bytes-text (%slice bs (+ a 1) (at a))) (port-at (+ a size)) reply))
+                        (#t (list (lit done)
+                                  (Str8 join ":" ((fn (self xs) (if (null? xs) () (pair (%hex (+ (* (first xs) 256) (first (rest xs)))) (self (rest (rest xs))))))
+                                                  (%slice bs a 16)))
+                                  (port-at (+ a 16)) reply)))))))))
+      (#t (list (lit bad))))))
+
+; A connection on a dynamic listener, waiting to say where it goes: (FD
+; BYTES GREETED), BYTES what it has sent.
+(def %socks-wait!
+  (fn (_ run fd) (%rn! run %SOCKS (List append (%rn run %SOCKS) (list (list fd () #f))))))
+
+(def %socks-drop!
+  (fn (_ run fd) (%rn! run %SOCKS (List filter (fn (_ w) (not (= (first w) fd))) (%rn run %SOCKS)))))
+
+(def %send-bytes
+  (fn (_ fd bs) (def t (%bytes-text bs)) (guard (e ()) (Socket send-run fd t (List length bs)))))
+
+; A waiting connection's bytes read, as many as its request still
+; lacks, and what they call for done: the greeting answered, the
+; connection opened as a channel, or closed.
+(def %socks-read!
+  (fn (_ c run w)
+    (def fd (first w))
+    (def bs (List ref 1 w))
+    (def greeted (List ref 2 w))
+    (def want (%socks bs greeted))
+    (def got (if (eq? (first want) (lit more)) (guard (e ()) (Socket recv-run fd (List ref 1 want))) ()))
+    (def close! (fn (_) (do (%socks-drop! run fd) (guard (e ()) (Socket close fd)))))
+    (if (if (null? got) #t (= (rest got) 0))
+      (close!)
+      (do (def now (List append bs ((fn (self i) (if (= i (rest got)) () (pair (%byte (first got) i) (self (+ i 1))))) 0)))
+          (def next (%socks now greeted))
+          (%rn! run %SOCKS (List map (fn (_ x) (if (= (first x) fd) (list fd now greeted) x)) (%rn run %SOCKS)))
+          (match
+            ((eq? (first next) (lit more)) ())
+            ((eq? (first next) (lit bad)) (close!))
+            ((eq? (first next) (lit greet))
+              (do (%send-bytes fd (list 5 0))
+                  (%rn! run %SOCKS (List map (fn (_ x) (if (= (first x) fd) (list fd now #t) x)) (%rn run %SOCKS)))))
+            (#t (do (%socks-drop! run fd)
+                    (%send-bytes fd (List ref 3 next))
+                    (%open-forward! c run fd (List ref 1 next) (List ref 2 next)))))))))
 
 ; -W: a direct-tcpip channel to a host and port whose two
 ; ways are this process's own input and output, the loop's to end as a
@@ -475,11 +596,12 @@
 ; none.
 (def ssh-session-run!
   (fn (_ c command input on-out on-err forwards remotes netcat limits env tty agent)
-    (def run (Vector make 12 ()))
+    (def run (Vector make 13 ()))
     (ssh-clocks-start!)
     (%rn! run %CHANNELS ()) (%rn! run %NEXT 0) (%rn! run %MOVED 0)
     (%rn! run %REMOTES remotes) (%rn! run %UNANSWERED ()) (%rn! run %ENV env)
     (%rn! run %TTY tty) (%rn! run %SIZE (if (null? tty) () ((List ref 1 tty)))) (%rn! run %ESC 1) (%rn! run %AGENT agent)
+    (%rn! run %SOCKS ())
     (%rn! run %LISTENERS
       (List map (fn (_ f) (list (if (null? (first f)) (Socket tcp-listen (List ref 1 f))
                                   (Socket tcp-listen-on (first f) (List ref 1 f)))
@@ -497,15 +619,19 @@
                    (def ready
                      (Sys poll (List append (list (pair sock (list (lit in))))
                                             (List map (fn (_ l) (pair (first l) (list (lit in)))) (%rn run %LISTENERS))
-                                            (List map (fn (_ ch) (pair (%ch ch %INPUT) (list (lit in)))) inputs))
+                                            (List map (fn (_ ch) (pair (%ch ch %INPUT) (list (lit in)))) inputs)
+                                            (List map (fn (_ w) (pair (first w) (list (lit in)))) (%rn run %SOCKS)))
                                (%poll-ms run limits)))
                    (List for-each
                      (fn (_ l) (when (%ready? ready (first l))
-                                 (%open-forward! c run (Socket accept (first l)) (List ref 1 l) (List ref 2 l))))
+                                 ; a dynamic listener's connection says where it goes first
+                                 ((fn (_ fd) (if (List ref 1 l) (%open-forward! c run fd (List ref 1 l) (List ref 2 l)) (%socks-wait! run fd)))
+                                  (Socket accept (first l)))))
                      (%rn run %LISTENERS))
                    (List for-each
                      (fn (_ ch) (when (%ready? ready (%ch ch %INPUT)) (%pump! c run ch)))
                      inputs)
+                   (List for-each (fn (_ w) (when (%ready? ready (first w)) (%socks-read! c run w))) (%rn run %SOCKS))
                    (when (%ready? ready sock) (%handle! c run))
                    (ssh-clocks! c limits)
                    (%resized! c run)))

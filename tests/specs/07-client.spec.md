@@ -70,6 +70,59 @@ tests/oracle/client.sh and tests/oracle/server.sh.
 ---
     ((("/k/git@h" . #t)) (("/.ssh/id_rsa" . #f) ("/.ssh/id_ecdsa" . #f) ("/.ssh/id_ed25519" . #f)))
 
+## proxies and dynamic forwards
+
+### ProxyCommand or ProxyJump, the first holding, `none` for neither; a jump to the destination itself dropped
+
+```ssh
+(import ssh/client ssh-client-settings)
+(import ssh/config ssh-config-options)
+(def %px (fn (_ opts)
+  (def s (ssh-client-settings (ssh-config-options opts) "h" "u"))
+  (def g (fn (_ k) (rest (List find (fn (_ p) (eq? (first p) k)) s))))
+  (list (g (lit proxy-command)) (g (lit proxy-jump)))))
+(write (List map %px (list (list "ProxyCommand nc %h \"%p\"")
+                           (list "ProxyJump a,u@b:2" "ProxyCommand x")
+                           (list "ProxyCommand none" "ProxyJump a")
+                           (list "ProxyJump a,h")
+                           (list "ProxyJump h:2200"))))
+```
+---
+    (("nc %h \"%p\"" ()) (() "a,u@b:2") (() ()) (() ()) (() "h:2200"))
+
+### a jump's hops, as OpenSSH reads them: a URI's, an empty port, brackets; a bad one refused
+
+```ssh
+(import ssh/client ssh-client-jump)
+(write (List map (fn (_ j) (ssh-client-jump j))
+  (list "u@a:2222,b" "ssh://u@h:22/" "[::1]:2" "h:" "a@b@c" "@h" "h:0" "ssh://[::1]:2" "::1")))
+```
+---
+    ((("u" "a" 2222) (() "b" ())) (("u" "h" 22)) ((() "::1" 2)) ((() "h" ())) (("a@b" "c" ())) () () () ())
+
+### DynamicForward: [bind_address:]port, the address as given; a bad one refused in OpenSSH's words
+
+```ssh
+(import ssh/client ssh-client-settings)
+(import ssh/config ssh-config-options)
+(def %dy (fn (_ opts) (rest (List find (fn (_ p) (eq? (first p) (lit dynamics))) (ssh-client-settings (ssh-config-options opts) "h" "u")))))
+(write (list (%dy (list "DynamicForward 1080" "DynamicForward *:1081" "DynamicForward [::1]:1082" "DynamicForward localhost:1083"))
+             (guard (e (e msg)) (%dy (list "DynamicForward 0")))
+             (guard (e (e msg)) (%dy (list "ProxyJump a:x")))))
+```
+---
+    (((() 1080) ("*" 1081) ("::1" 1082) ("localhost" 1083)) "command-line: line 1: Bad forwarding specification." "command-line: line 1: Invalid ProxyJump \"a:x\"")
+
+### a command keyword's argument is the rest of its line, quotes and all
+
+```ssh
+(import ssh/config ssh-config-words)
+(write (List map (fn (_ l) (ssh-config-words l))
+  (list "RemoteCommand echo \"a  b\" c  " "ProxyCommand=nc %h %p" "Ciphers \"a b\" c")))
+```
+---
+    (("RemoteCommand" "echo \"a  b\" c") ("ProxyCommand" "nc %h %p") ("Ciphers" "a b" "c"))
+
 ## terminals
 
 ### -t stands for RequestTTY yes, -T for no; auto is the default

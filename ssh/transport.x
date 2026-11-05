@@ -46,15 +46,9 @@
 (import ssh/pubkey ssh-pubkey-of ssh-pubkey-verify? ssh-pubkey-type ssh-pubkey-base64 ssh-pubkey-blob ssh-pubkey-algorithms
   ssh-identity-pubkey ssh-identity-sign)
 
-(def %oref (prim-ref (lit obj) (lit ref)))
-(def %oset! (prim-ref (lit obj) (lit set!)))
-(def %byte-ref (prim-ref (lit str) (lit byte-ref)))
-(def %char->int (prim-ref (lit char) (lit ->int)))
-(def %make-str (prim-ref (lit str) (lit make)))
-(def %str->ptr (prim-ref (lit str) (lit ->ptr)))
-(def %pset1 (prim-ref (lit ptr) (lit set!)))
+(import x/core/doors obj-ref obj-set! str-byte-ref char->int str-make str->ptr ptr-set!)
 
-(def %byte (fn (_ s i) (%char->int (%byte-ref s i))))
+(def %byte (fn (_ s i) (char->int (str-byte-ref s i))))
 
 (def ssh-version-string "SSH-2.0-x-ssh_0.1.0")
 
@@ -81,14 +75,14 @@
 ;        12 the server's server-sig-algs (RFC 8308), or () until it says
 ;        13 the ciphers and MACs offered, as (CIPHERS . MACS)
 
-(def %slot (fn (_ c i) (%oref c i)))
-(def %slot! (fn (_ c i v) (%oset! c i v)))
+(def %slot (fn (_ c i) (obj-ref c i)))
+(def %slot! (fn (_ c i v) (obj-set! c i v)))
 
 (def ssh-open
   (fn (_ fd trace)
     (def c (Vector make 13 ()))
     (%slot! c 1 fd)
-    (%slot! c 2 (pair (%make-str 0) 0))
+    (%slot! c 2 (pair (str-make 0) 0))
     (%slot! c 3 0)
     (%slot! c 4 0)
     (%slot! c 10 trace)
@@ -151,7 +145,7 @@
   (fn (_ n)
     (def fd (File open "/dev/urandom" (lit rdonly)))
     (when (< fd 0) (Err raise 'io "ssh: no /dev/urandom" ()))
-    (def buf (%make-str n))
+    (def buf (str-make n))
     (def got (File read fd buf n))
     (File close fd)
     (unless (= got n) (Err raise 'io "ssh: /dev/urandom came up short" ()))
@@ -228,11 +222,11 @@
 ; stays clear and outside the alignment, and the MAC is over seq, the
 ; length and the ciphertext, checked before a byte is deciphered.
 
-(def %k-cipher (fn (_ k) (%oref k 1)))
-(def %k-key (fn (_ k) (%oref k 2)))
-(def %k-size (fn (_ k) (%oref k 3)))
-(def %k-iv (fn (_ k) (%oref k 4)))
-(def %k-mac (fn (_ k) (%oref k 5)))
+(def %k-cipher (fn (_ k) (obj-ref k 1)))
+(def %k-key (fn (_ k) (obj-ref k 2)))
+(def %k-size (fn (_ k) (obj-ref k 3)))
+(def %k-iv (fn (_ k) (obj-ref k 4)))
+(def %k-mac (fn (_ k) (obj-ref k 5)))
 
 (def %etm? (fn (_ k) (if (null? k) #f (if (null? (%k-mac k)) #f (List ref 3 (%k-mac k))))))
 
@@ -252,11 +246,11 @@
 ; constraint: endian = little -- the counter's word write puts it in byte 0
 (def %iv
   (fn (_ counter seq)
-    (def iv (%make-str 16))
-    (def p (%str->ptr iv))
-    (%pset1 p 0 counter 8) (%pset1 p 8 0 4)
-    (%pset1 p 12 (>> seq 24) 1) (%pset1 p 13 (>> seq 16) 1)
-    (%pset1 p 14 (>> seq 8) 1) (%pset1 p 15 seq 1)
+    (def iv (str-make 16))
+    (def p (str->ptr iv))
+    (ptr-set! p 0 counter 8) (ptr-set! p 8 0 4)
+    (ptr-set! p 12 (>> seq 24) 1) (ptr-set! p 13 (>> seq 16) 1)
+    (ptr-set! p 14 (>> seq 8) 1) (ptr-set! p 15 seq 1)
     iv))
 
 ; A 64-byte key as the cipher uses it, split once as it is put in place:
@@ -272,20 +266,20 @@
 ; gcm's invocation count by one.
 (def %bump!
   (fn (_ s from to n)
-    (def p (%str->ptr s))
+    (def p (str->ptr s))
     ((fn (self i carry)
        (unless (if (< i from) #t (= carry 0))
          (do (def v (+ (%byte s i) carry))
-             (%pset1 p i (& v 255) 1)
+             (ptr-set! p i (& v 255) 1)
              (self (- i 1) (>> v 8)))))
      (- to 1) n)))
 
 ; A sequence number as four big-endian bytes, as the MAC reads it.
 (def %seq-bytes
   (fn (_ seq)
-    (def s (%make-str 4))
-    (def p (%str->ptr s))
-    (%pset1 p 0 (>> seq 24) 1) (%pset1 p 1 (>> seq 16) 1) (%pset1 p 2 (>> seq 8) 1) (%pset1 p 3 seq 1)
+    (def s (str-make 4))
+    (def p (str->ptr s))
+    (ptr-set! p 0 (>> seq 24) 1) (ptr-set! p 1 (>> seq 16) 1) (ptr-set! p 2 (>> seq 8) 1) (ptr-set! p 3 seq 1)
     s))
 
 ; The MAC over seq and a region, as a fresh string.
@@ -467,9 +461,9 @@
 (def ssh-clock-sent 1) (def ssh-clock-recv 2) (def ssh-clock-data 3) (def %ASKED 4)
 (def %clock (Vector make 4 0))
 
-(def ssh-clock-mark! (fn (_ i) (%oset! %clock i (Sys now))))
+(def ssh-clock-mark! (fn (_ i) (obj-set! %clock i (Sys now))))
 
-(def ssh-clocks-start! (fn (_) (def now (Sys now)) (%oset! %clock ssh-clock-sent now) (%oset! %clock ssh-clock-recv now) (%oset! %clock ssh-clock-data now) (%oset! %clock %ASKED now)))
+(def ssh-clocks-start! (fn (_) (def now (Sys now)) (obj-set! %clock ssh-clock-sent now) (obj-set! %clock ssh-clock-recv now) (obj-set! %clock ssh-clock-data now) (obj-set! %clock %ASKED now)))
 
 ; A keepalive asked: OpenSSH's global request, wanting the answer that
 ; counts as the other end alive.
@@ -481,8 +475,8 @@
     (ssh-put-bool req #t)
     (def r (ssh-out-run req))
     (ssh-send-packet! c (first r) (rest r))
-    (%oset! %clock ssh-clock-sent (Sys now))
-    (%oset! %clock %ASKED (Sys now))))
+    (obj-set! %clock ssh-clock-sent (Sys now))
+    (obj-set! %clock %ASKED (Sys now))))
 
 ; How long a wait may last before a clock wants looking at, in
 ; milliseconds, or -1 for no limit: limits is (INTERVAL COUNT IDLE), an
@@ -493,9 +487,9 @@
     (def k (first limits)) (def n (List ref 1 limits)) (def i (List ref 2 limits))
     (def dues
       (List append
-        (if (> k 0) (list (- (+ (%oref %clock ssh-clock-sent) k) now) (- (+ (%oref %clock ssh-clock-recv) k) now)
-                          (- (+ (%oref %clock ssh-clock-recv) (* k n)) now)) ())
-        (if (> i 0) (list (- (+ (%oref %clock ssh-clock-data) i) now)) ())))
+        (if (> k 0) (list (- (+ (obj-ref %clock ssh-clock-sent) k) now) (- (+ (obj-ref %clock ssh-clock-recv) k) now)
+                          (- (+ (obj-ref %clock ssh-clock-recv) (* k n)) now)) ())
+        (if (> i 0) (list (- (+ (obj-ref %clock ssh-clock-data) i) now)) ())))
     (if (null? dues) -1
       (do (def least (List fold (fn (_ a b) (if (< a b) a b)) (first dues) (rest dues)))
           (if (< least 0) 0 (* 1000 least))))))
@@ -507,12 +501,12 @@
     (def now (Sys now))
     (def k (first limits)) (def n (List ref 1 limits)) (def i (List ref 2 limits))
     (when (> k 0)
-      (do (when (>= (- now (%oref %clock ssh-clock-recv)) (* k n))
+      (do (when (>= (- now (obj-ref %clock ssh-clock-recv)) (* k n))
             (Err raise 'io "keepalive" ()))
-          (when (if (>= (- now (%oref %clock ssh-clock-sent)) k) #t
-                  (if (>= (- now (%oref %clock ssh-clock-recv)) k) (>= (- now (%oref %clock %ASKED)) k) #f))
+          (when (if (>= (- now (obj-ref %clock ssh-clock-sent)) k) #t
+                  (if (>= (- now (obj-ref %clock ssh-clock-recv)) k) (>= (- now (obj-ref %clock %ASKED)) k) #f))
             (%keepalive! c))))
-    (when (if (> i 0) (>= (- now (%oref %clock ssh-clock-data)) i) #f)
+    (when (if (> i 0) (>= (- now (obj-ref %clock ssh-clock-data)) i) #f)
       (Err raise 'io "idle" ()))))
 
 ; --- the key exchange (7), curve25519-sha256 (RFC 8731) --------------------
@@ -650,18 +644,18 @@
     (def spec (%cipher-of cipher))
     (def kind (first spec))
     (def k (Vector make 5 ()))
-    (%oset! k 1 kind)
+    (obj-set! k 1 kind)
     (def enc (%derive kmp h (+ letter 2) sid))
     (if (eq? kind 'chacha)
-      (%oset! k 2 (%split-key enc))
-      (do (%oset! k 2 enc)
-          (%oset! k 3 (rest spec))
-          (%oset! k 4 (ssh-copy (%derive kmp h letter sid) 0 (if (eq? kind 'gcm) 12 16)))
+      (obj-set! k 2 (%split-key enc))
+      (do (obj-set! k 2 enc)
+          (obj-set! k 3 (rest spec))
+          (obj-set! k 4 (ssh-copy (%derive kmp h letter sid) 0 (if (eq? kind 'gcm) 12 16)))
           (Aes jit!)
           (when (eq? kind 'gcm) (Ghash jit!))))
     (unless (null? mac)
       (do (def m (%mac-of mac))
-          (%oset! k 5 (list (first m) (%derive kmp h (+ letter 4) sid) (List ref 1 m) (List ref 2 m)))
+          (obj-set! k 5 (list (first m) (%derive kmp h (+ letter 4) sid) (List ref 1 m) (List ref 2 m)))
           (if (eq? (first m) 'sha256) (Sha256 jit!) (Sha512 jit!))))
     k))
 

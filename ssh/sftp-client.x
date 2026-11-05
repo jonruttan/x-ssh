@@ -28,23 +28,18 @@
   ssh-sftp-get-attrs ssh-sftp-mode-text)
 (import ssh/sys ssh-sys-spawn ssh-sys-after-op)
 
-(def %oref (prim-ref (lit obj) (lit ref)))
-(def %oset! (prim-ref (lit obj) (lit set!)))
-(def %byte-len (prim-ref (lit str) (lit byte-len)))
-(def %byte-ref (prim-ref (lit str) (lit byte-ref)))
-(def %char->int (prim-ref (lit char) (lit ->int)))
-(def %make-str (prim-ref (lit str) (lit make)))
+(import x/core/doors obj-ref obj-set! str-byte-len str-byte-ref char->int str-make)
 (def %cvt (prim-ref (lit convert) (lit to)))
 
-(def %ref (fn (_ v i) (%oref v (+ i 1))))
-(def %set (fn (_ v i x) (%oset! v (+ i 1) x)))
+(def %ref (fn (_ v i) (obj-ref v (+ i 1))))
+(def %set (fn (_ v i x) (obj-set! v (+ i 1) x)))
 (def %num (fn (_ n) (%cvt n (Type named STRING) 10)))
 (def %int (fn (_ t radix) (guard (e ()) (%cvt t (Type named INTEGER) radix))))
 (def %min (fn (_ a b) (if (< a b) a b)))
-(def %say (fn (_ fd t) (File write fd t (%byte-len t))))
+(def %say (fn (_ fd t) (File write fd t (str-byte-len t))))
 (def %out (fn (_ t) (%say 1 t)))
 (def %err (fn (_ t) (%say 2 t)))
-(def %char (fn (_ s i) (%char->int (%byte-ref s i))))
+(def %char (fn (_ s i) (char->int (str-byte-ref s i))))
 
 (def %stdin 3)
 
@@ -464,7 +459,7 @@
              (%open c remote (| %F-WRITE (| %F-CREAT %F-TRUNC)) (list (pair (lit perm) perm)))))
     (def chunk (%ref c 5))
     (def most (%ref c 6))
-    (def buf (%make-str chunk))
+    (def buf (str-make chunk))
     (def state (Vector make 3 ()))
     (%set state 0 0) (%set state 1 0) (%set state 2 #f)
     (def failure
@@ -950,7 +945,7 @@
 ; A line of input from fd, or () at its end.
 (def %read-line
   (fn (_ fd)
-    (def b (%make-str 1))
+    (def b (str-make 1))
     ((fn (self acc)
        (def n (File read fd b 1))
        (match

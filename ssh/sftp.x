@@ -27,20 +27,13 @@
 (import ssh/bytes ssh-out ssh-put-byte ssh-put-uint32 ssh-put-bytes ssh-put-string ssh-put-text ssh-out-run
   ssh-in ssh-in-left ssh-in-buf ssh-get-byte ssh-get-uint32 ssh-get-string ssh-get-text ssh-copy)
 
-(def %byte-len (prim-ref (lit str) (lit byte-len)))
-(def %make-str (prim-ref (lit str) (lit make)))
-(def %str->ptr (prim-ref (lit str) (lit ->ptr)))
-(def %ptr->int (prim-ref (lit ptr) (lit ->int)))
-(def %int->ptr (prim-ref (lit int) (lit ->ptr)))
-(def %mem-copy (prim-ref (lit mem) (lit copy)))
+(import x/core/doors str-byte-len str-make str->ptr ptr->int int->ptr mem-copy obj-ref obj-set!)
 (def %cvt (prim-ref (lit convert) (lit to)))
 
-(def %oref (prim-ref (lit obj) (lit ref)))
-(def %oset! (prim-ref (lit obj) (lit set!)))
 
 ; A record's field i, counted from 0.
-(def %ref (fn (_ v i) (%oref v (+ i 1))))
-(def %set (fn (_ v i x) (%oset! v (+ i 1) x)))
+(def %ref (fn (_ v i) (obj-ref v (+ i 1))))
+(def %set (fn (_ v i x) (obj-set! v (+ i 1) x)))
 
 (def %num (fn (_ n) (%cvt n (Type named STRING) 10)))
 (def %min (fn (_ a b) (if (< a b) a b)))
@@ -49,8 +42,8 @@
 (def %move
   (fn (_ to to-off from from-off n)
     (when (> n 0)
-      (%mem-copy (%int->ptr (+ (%ptr->int (%str->ptr to)) to-off))
-                 (%int->ptr (+ (%ptr->int (%str->ptr from)) from-off)) n))))
+      (mem-copy (int->ptr (+ (ptr->int (str->ptr to)) to-off))
+                 (int->ptr (+ (ptr->int (str->ptr from)) from-off)) n))))
 
 ; --- the protocol's numbers --------------------------------------------------
 
@@ -95,13 +88,13 @@
 (def %reader
   (fn (_ fd)
     (def r (Vector make 4 ()))
-    (%set r 0 fd) (%set r 1 (%make-str 65536)) (%set r 2 0) (%set r 3 0)
+    (%set r 0 fd) (%set r 1 (str-make 65536)) (%set r 2 0) (%set r 3 0)
     r))
 
 ; n bytes as a fresh string, or () when the input ends first.
 (def %take!
   (fn (_ r n)
-    (def out (%make-str (if (= n 0) 1 n)))
+    (def out (str-make (if (= n 0) 1 n)))
     ((fn (self got)
        (match
          ((= got n) out)
@@ -423,7 +416,7 @@
     (def len (%min (ssh-get-uint32 in) %max-io))
     (def fd (%ref e 1))
     (%check (File seek fd offset) (lit seek) (%ref e 2))
-    (def buf (%make-str (if (= len 0) 1 len)))
+    (def buf (str-make (if (= len 0) 1 len)))
     (def n (%check (File read fd buf len) (lit read) (%ref e 2)))
     (if (= n 0)
       (%status! st id %EOF)
@@ -502,7 +495,7 @@
     (def to-off (%get-u64 in))
     (%check (File seek (%ref from 1) from-off) (lit seek) (%ref from 2))
     (%check (File seek (%ref to 1) to-off) (lit seek) (%ref to 2))
-    (def buf (%make-str 65536))
+    (def buf (str-make 65536))
     ((fn (self left)
        (def want (if (= len 0) 65536 (%min left 65536)))
        (when (> want 0)
@@ -657,7 +650,7 @@
                     (Str8 replace "%d" (guard (e "") (%home-of (%me))) dir)))))
     (if (if (null? path) #f (< (Sys chdir path) 0))
       (do (def t (Str8 append "sftp-server: chdir to \"" path "\" failed\n"))
-          (File write 2 t (%byte-len t))
+          (File write 2 t (str-byte-len t))
           255)
       (ssh-sftp-server in out read-only))))
 

@@ -27,8 +27,7 @@
 (import ssh/sftp ssh-sftp-main)
 (import ssh/sftp-client ssh-sftp-client ssh-sftp-destination)
 
-(def %byte-len (prim-ref (lit str) (lit byte-len)))
-(def %byte-ref (prim-ref (lit str) (lit byte-ref)))
+(import x/core/doors str-byte-len str-byte-ref)
 (def %cvt (prim-ref (lit convert) (lit to)))
 
 (def %version-row (Opts flag "-V" "Print the version"))
@@ -265,7 +264,7 @@
     (def url (if (> (Str8 length d) 6) (str=? (Str8 sub 0 6 d) "ssh://") #f))
     (def rest-of (fn (_ s i) (Str8 sub i (- (Str8 length s) i) s)))
     (def s (if url (rest-of d 6) d))
-    (def at ((fn (self i) (if (< i 0) () (if (= (%byte-ref s i) #\@) i (self (- i 1))))) (- (Str8 length s) 1)))
+    (def at ((fn (self i) (if (< i 0) () (if (= (str-byte-ref s i) #\@) i (self (- i 1))))) (- (Str8 length s) 1)))
     (def user (if (null? at) () (Str8 sub 0 at s)))
     (def hp (if (null? at) s (rest-of s (+ at 1))))
     (def colon (if url (Str8 index-of ":" hp) ()))
@@ -317,7 +316,7 @@
 (def %count
   (fn (_ a)
     (def n (Str8 length a))
-    (def digits? ((fn (self i) (if (= i n) (> n 0) (if (if (>= (%byte-ref a i) #\0) (<= (%byte-ref a i) #\9) #f) (self (+ i 1)) #f))) 0))
+    (def digits? ((fn (self i) (if (= i n) (> n 0) (if (if (>= (str-byte-ref a i) #\0) (<= (str-byte-ref a i) #\9) #f) (self (+ i 1)) #f))) 0))
     (if digits? (%cvt a (Type named INTEGER) 10) ())))
 
 ; The key tool's line, as what to do: (keygen (ACTION ...) 0), the file
@@ -439,7 +438,7 @@
           ((eq? (first what) (lit to)) (ssh-scp-remote #t (List ref 1 what) (List ref 2 what) (List ref 3 what)))
           ((eq? (first what) (lit from)) (ssh-scp-remote #f (List ref 1 what) (List ref 2 what) (List ref 3 what)))
           (#t (ssh-scp-client (List ref 1 what) (List ref 2 what) (List ref 3 what) (List ref 4 what) (List ref 5 what) (List ref 6 what)))))
-      (do (File write 2 what (%byte-len what))
+      (do (File write 2 what (str-byte-len what))
           (Sys exit (first (rest (rest plan))))))))
 
 (provide ssh/cli ssh-programs ssh-program ssh-plan ssh-main ssh-destination)

@@ -122,6 +122,24 @@ Run 'x -l ssh -- <program>' with one of these programs:
 ---
     (("ForwardAgent yes") ("ForwardAgent no"))
 
+### -D is a DynamicForward and -J a ProxyJump, ahead of -o's
+
+```ssh
+(write (List ref 3 (first (rest (ssh-plan (list "ssh" "-J" "a,u@b:2" "-D" "1080" "-o" "ProxyCommand x" "h"))))))
+```
+---
+    ("DynamicForward \"1080\"" "ProxyJump \"a,u@b:2\"" "ProxyCommand x")
+
+### -J refused as OpenSSH refuses it: twice, after a -o ProxyCommand, unreadable; -D unreadable
+
+```ssh
+(write (List map (fn (_ l) (rest (ssh-plan l)))
+  (list (list "ssh" "-J" "a" "-J" "b" "h") (list "ssh" "-oProxyCommand=x" "-J" "a" "h")
+        (list "ssh" "-J" "a:x" "h") (list "ssh" "-D" "bad" "h"))))
+```
+---
+    (("Only a single -J option is permitted (use commas to separate multiple jump hops)\r\n" 255) ("Cannot specify -J with ProxyCommand\r\n" 255) ("Invalid -J argument\r\n" 255) ("Bad dynamic forwarding specification 'bad'\n" 255))
+
 ## the server
 
 ### its flags become configuration lines ahead of the file's; -d is debug, foreground and standard error

@@ -14,8 +14,40 @@
 
 (import x/sys/file)
 (import x/sys/posix)
+(import x/core/doors ffi-dlopen ffi-dlsym ptr-call ptr-ref str-make str->ptr)
 
 (def %num (fn (_ n) ((prim-ref (lit convert) (lit to)) n (Type named STRING) 10)))
+
+(def %c-socketpair (ffi-dlsym (ffi-dlopen () 1) "socketpair"))
+
+; A connected pair of unix-domain stream sockets, (A . B), or () when
+; the system refuses one.  AF_UNIX and SOCK_STREAM are 1 on Linux and
+; Darwin alike; the two descriptors land in a GC-owned region, as
+; Sys pipe's do.
+(def %socketpair
+  (fn (_)
+    (let ((s (str-make 8)))
+      (let ((buf (str->ptr s)))
+        (if (< (Sys %sign-fold (ptr-call %c-socketpair 1 1 0 buf)) 0) ()
+          (pair (ptr-ref buf 0 4) (ptr-ref buf 4 4)))))))
+
+; ProxyCommand's command run as OpenSSH runs it, `exec COMMAND` under the
+; user's shell, its standard input and output one end of a socket pair:
+; (PID . FD), FD the other end, the connection; () when it could not be
+; started.
+(def ssh-sys-proxy
+  (fn (_ command)
+    (def sp (%socketpair))
+    (if (null? sp) ()
+      (do (def pid (Sys fork))
+          (when (= pid 0)
+            (Sys dup2 (rest sp) 0) (Sys dup2 (rest sp) 1)
+            (Sys close (first sp)) (Sys close (rest sp))
+            (def shell ((fn (_ s) (if (if (null? s) #t (= (Str8 length s) 0)) "/bin/sh" s)) (Sys getenv "SHELL")))
+            (Sys exec shell (list "-c" (Str8 append "exec " command)))
+            (Sys exit 127))
+          (Sys close (rest sp))
+          (if (< pid 0) (do (Sys close (first sp)) ()) (pair pid (first sp)))))))
 
 ; The user this process runs as: USER, or the passwd entry of its uid.
 (def ssh-sys-me
@@ -45,4 +77,4 @@
 (def ssh-sys-after-op
   (fn (_ m) (def cut (Str8 index-of ": " m)) (if (null? cut) m (Str8 sub (+ cut 2) (- (Str8 length m) cut 2) m))))
 
-(provide ssh/sys ssh-sys-me ssh-sys-spawn ssh-sys-after-op)
+(provide ssh/sys ssh-sys-me ssh-sys-spawn ssh-sys-proxy ssh-sys-after-op)

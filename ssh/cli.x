@@ -19,7 +19,7 @@
 
 (import x/sys/opts Opts)
 (import x/sys/file File)
-(import ssh/client ssh-client-main)
+(import ssh/client ssh-client-main ssh-client-jump ssh-client-dynamic)
 (import ssh/keygen ssh-keygen-main)
 (import ssh/agent ssh-agent-main ssh-add-main ssh-agent-seconds)
 (import ssh/server ssh-server-main)
@@ -57,10 +57,12 @@
             (Opts flag "-a" "Do not forward the agent, as ForwardAgent no")
             (Opts flag "-C" "Ask for compression (none is served)")
             (Opts arg "-c" "cipher_spec" "The ciphers, as Ciphers: a comma-separated list")
+            (Opts arg "-D" "[bind_address:]port" "Dynamic forwarding: a SOCKS proxy on the port, as DynamicForward")
             (Opts arg "-F" "configfile" "The user configuration file, default ~/.ssh/config")
             (Opts flag "-G" "Print the configuration in force for destination and exit")
             (Opts flag "-g" "Allow remote hosts to connect to local forwarded ports")
             (Opts arg "-i" "identity_file" "A key to authenticate with, before the configuration's")
+            (Opts arg "-J" "destination" "Connect through jump hosts, [user@]host[:port] separated by commas, as ProxyJump")
             (Opts arg "-L" "address" "Local forwarding: [bind_address:]port:host:hostport")
             (Opts arg "-m" "mac_spec" "The MACs, as MACs: a comma-separated list")
             (Opts arg "-l" "login_name" "The user to log in as")
@@ -179,7 +181,7 @@
       ((not (null? (Opts unknown o)))
         (list (first p) (Str8 append "Invalid option " (Opts unknown o) "\n" (Opts usage decl)) 1))
       ((Opts on? o "-V") (list (first p) (Str8 append "x-ssh v" ssh-version "\n") 0))
-      ((eq? (first p) (lit client)) (%client-plan o decl))
+      ((eq? (first p) (lit client)) (%client-plan o decl (rest ops)))
       ((eq? (first p) (lit keygen)) (%keygen-plan o decl))
       ((eq? (first p) (lit server)) (%server-plan o decl))
       ((eq? (first p) (lit sftp)) (%sftp-plan o decl))
@@ -275,11 +277,22 @@
 ; -o's, then the destination's user and port; COMMAND () for none; STDIO
 ; -W's host:port or ().
 (def %client-plan
-  (fn (_ o decl)
+  (fn (_ o decl args)
     (def ops (Opts operands o))
     (def q (fn (_ s) (Str8 append "\"" s "\"")))
-    (if (null? ops)
-      (list (lit client) (Opts usage decl) 255)
+    (def jumps (Opts values o "-J"))
+    (def bad-dynamic (List find (fn (_ d) (null? (ssh-client-dynamic d))) (Opts values o "-D")))
+    (match
+      ((null? ops) (list (lit client) (Opts usage decl) 255))
+      ((> (List length jumps) 1)
+        (list (lit client) "Only a single -J option is permitted (use commas to separate multiple jump hops)\r\n" 255))
+      ((if (null? jumps) #f (%proxy-command-before-j? args))
+        (list (lit client) "Cannot specify -J with ProxyCommand\r\n" 255))
+      ((if (null? jumps) #f (null? (ssh-client-jump (first jumps))))
+        (list (lit client) "Invalid -J argument\r\n" 255))
+      ((not (null? bad-dynamic))
+        (list (lit client) (Str8 append "Bad dynamic forwarding specification '" bad-dynamic "'\n") 255))
+      (#t
       (do (def dest (ssh-destination (first ops)))
           (list (lit client)
                 (list (lit exec) (List ref 1 dest)
@@ -290,6 +303,8 @@
                         (List map (fn (_ i) (Str8 append "IdentityFile " (q i))) (Opts values o "-i"))
                         (List map (fn (_ f) (Str8 append "LocalForward " f)) (Opts values o "-L"))
                         (List map (fn (_ f) (Str8 append "RemoteForward " f)) (Opts values o "-R"))
+                        (List map (fn (_ f) (Str8 append "DynamicForward " (q f))) (Opts values o "-D"))
+                        (List map (fn (_ j) (Str8 append "ProxyJump " (q j))) jumps)
                         (if (Opts on? o "-g") (list "GatewayPorts yes") ())
                         (if (Opts on? o "-N") (list "SessionType none") ())
                         (if (Opts on? o "-s") (list "SessionType subsystem") ())
@@ -310,7 +325,22 @@
                       (%value o "-F")
                       (%value o "-W")
                       (Opts on? o "-G"))
-                0)))))
+                0))))))
+
+; Whether a -o ProxyCommand comes before -J on the line, which OpenSSH
+; refuses; one after it is passed over, ProxyJump holding.
+(def %proxy-command-before-j?
+  (fn (_ args)
+    (def pc? (fn (_ v) (if (>= (Str8 length v) 12) (str=? (Str8 downcase (Str8 sub 0 12 v)) "proxycommand") #f)))
+    (def starts? (fn (_ a f) (if (>= (Str8 length a) 2) (str=? (Str8 sub 0 2 a) f) #f)))
+    ((fn (self as seen)
+       (match
+         ((null? as) #f)
+         ((starts? (first as) "-J") seen)
+         ((str=? (first as) "-o") (self (if (null? (rest as)) () (rest (rest as))) (if seen #t (if (null? (rest as)) #f (pc? (first (rest as)))))))
+         ((starts? (first as) "-o") (self (rest as) (if seen #t (pc? (Str8 sub 2 (- (Str8 length (first as)) 2) (first as))))))
+         (#t (self (rest as) seen))))
+     args #f)))
 
 ; A count's digits as a number: () when they are not all digits.
 (def %count

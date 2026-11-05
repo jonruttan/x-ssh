@@ -45,6 +45,10 @@
 #            ssh port, two connections in turn reading its version line
 #   remote   -N -R: the Dropbear listens, its connections come here and
 #            reach its own ssh port, two in turn reading its version line
+#   dynamic  -N -D: a SOCKS proxy here, nc asking it by SOCKS 5 and SOCKS
+#            4 for the Dropbear's ssh port, each reading its version line
+#   proxies  ProxyCommand through nc; -J through two hops of the Dropbear,
+#            each hop x-ssh as `ssh` on the path with -F's file
 #   stdio    -W: the Dropbear's own version line carried to standard output
 #   idle     -N with ChannelTimeout global=2 ends on the client's own clock
 #   git      `git clone` of a repository behind the Dropbear, with x-ssh
@@ -412,6 +416,44 @@ if [ "$one" = "SSH-2.0-dropbear" ] && [ "$two" = "SSH-2.0-dropbear" ]; then
 else
 	fail "remote: read '$one' then '$two' through the remote port"
 	cat "$fx/fwd.err" >&2
+fi
+
+# dynamic: -N -D, a SOCKS proxy here: nc asks it by SOCKS 5 and by SOCKS
+# 4 for the Dropbear's ssh port, and each reads its version line
+dport=$((port + 30))
+xssh -N -D "$dport" 127.0.0.1 < /dev/null 2> "$fx/fwd.err" &
+fwdpid=$!
+i=0
+while ! nc -z 127.0.0.1 "$dport" 2>/dev/null && [ $i -lt 60 ]; do i=$((i + 1)); sleep 1; done
+five=$(nc -w 3 -X 5 -x "127.0.0.1:$dport" 127.0.0.1 "$port" < /dev/null 2>/dev/null | head -c 16)
+four=$(nc -w 3 -X 4 -x "127.0.0.1:$dport" 127.0.0.1 "$port" < /dev/null 2>/dev/null | head -c 16)
+kill_tree $fwdpid
+fwdpid=
+if [ "$five" = "SSH-2.0-dropbear" ] && [ "$four" = "SSH-2.0-dropbear" ]; then
+	echo "ok: dynamic -- -D serves SOCKS 5 and SOCKS 4, each connection carried through the Dropbear"
+else
+	fail "dynamic: read '$five' by SOCKS 5, '$four' by SOCKS 4"
+	cat "$fx/fwd.err" >&2
+fi
+
+# proxies: ProxyCommand through nc, then -J through two hops of the same
+# Dropbear, each hop this client as `ssh` on the path, its settings from
+# -F's file as OpenSSH passes them on
+out=$(xssh -o "ProxyCommand nc 127.0.0.1 %p" 127.0.0.1 'echo through nc' < /dev/null 2> "$fx/client.err")
+if [ "$out" = "through nc" ]; then
+	echo "ok: proxycommand -- the connection carried by nc's standard input and output"
+else
+	fail "proxycommand: output '$out'"
+fi
+mkdir -p "$fx/jumpbin"
+printf '#!/bin/sh\nHOME="%s" exec "%s" -l ssh -- ssh "$@"\n' "$home" "$X" > "$fx/jumpbin/ssh"
+chmod +x "$fx/jumpbin/ssh"
+printf 'Host *\n  Port %s\n  User %s\n  IdentityFile %s\n  StrictHostKeyChecking accept-new\n' "$port" "$user" "$fx/userkey" > "$fx/jump.config"
+out=$(PATH="$fx/jumpbin:$PATH" HOME="$home" "$X" -l ssh -- ssh -F "$fx/jump.config" -J 127.0.0.1,localhost 127.0.0.1 'echo through two hops' < /dev/null 2> "$fx/client.err")
+if [ "$out" = "through two hops" ]; then
+	echo "ok: proxyjump -- -J through two hops, each this client with -W"
+else
+	fail "proxyjump: output '$out'"
 fi
 
 # stdio: -W, the client's own output carried from the Dropbear's own ssh

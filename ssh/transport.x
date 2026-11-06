@@ -243,12 +243,14 @@
 
 ; The nonce for a sequence number: the eight-byte counter, then the
 ; number as eight big-endian bytes, which is how the cipher's IV reads.
-; constraint: endian = little -- the counter's word write puts it in byte 0
+; The counter is written as two 4-byte halves: on a 4-byte word a store
+; of 8 fills the high half from past the word.
+; constraint: endian = little -- the counter's low half leads at byte 0
 (def %iv
   (fn (_ counter seq)
     (def iv (str-make 16))
     (def p (str->ptr iv))
-    (ptr-set! p 0 counter 8) (ptr-set! p 8 0 4)
+    (ptr-set! p 0 counter 4) (ptr-set! p 4 0 4) (ptr-set! p 8 0 4)
     (ptr-set! p 12 (>> seq 24) 1) (ptr-set! p 13 (>> seq 16) 1)
     (ptr-set! p 14 (>> seq 8) 1) (ptr-set! p 15 seq 1)
     iv))

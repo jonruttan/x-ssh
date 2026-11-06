@@ -19,7 +19,7 @@
 
 (import x/sys/opts Opts)
 (import x/sys/file File)
-(import ssh/client ssh-client-main ssh-client-jump ssh-client-dynamic)
+(import ssh/client ssh-client-main ssh-client-jump ssh-client-dynamic ssh-client-escape ssh-client-query)
 (import ssh/keygen ssh-keygen-main)
 (import ssh/agent ssh-agent-main ssh-add-main ssh-agent-seconds)
 (import ssh/server ssh-server-main)
@@ -55,10 +55,14 @@
     (%row (lit client) "ssh" "the client" "[options] destination [command]"
       (list (Opts flag "-A" "Forward the agent, as ForwardAgent yes")
             (Opts flag "-a" "Do not forward the agent, as ForwardAgent no")
+            (Opts arg "-b" "bind_address" "Connect from this local address, as BindAddress")
             (Opts flag "-C" "Ask for compression (none is served)")
             (Opts arg "-c" "cipher_spec" "The ciphers, as Ciphers: a comma-separated list")
             (Opts arg "-D" "[bind_address:]port" "Dynamic forwarding: a SOCKS proxy on the port, as DynamicForward")
+            (Opts arg "-E" "log_file" "Append the log to log_file instead of standard error")
+            (Opts arg "-e" "escape_char" "The escape character for a terminal session, as EscapeChar: a character, ^X, or none")
             (Opts arg "-F" "configfile" "The user configuration file, default ~/.ssh/config")
+            (Opts flag "-f" "Go to the background once authenticated, as ForkAfterAuthentication yes; implies -n")
             (Opts flag "-G" "Print the configuration in force for destination and exit")
             (Opts flag "-g" "Allow remote hosts to connect to local forwarded ports")
             (Opts arg "-i" "identity_file" "A key to authenticate with, before the configuration's")
@@ -70,6 +74,7 @@
             (Opts flag "-n" "Read standard input from /dev/null")
             (Opts arg "-o" "option" "An option in the configuration file's form, before the files'")
             (Opts arg "-p" "port" "The port to connect to")
+            (Opts arg "-Q" "query_option" "Print the algorithms served of a kind -- cipher, mac, kex, key, sig and the like; help lists them")
             (Opts flag "-q" "Quiet: warnings and diagnostics suppressed")
             (Opts arg "-R" "address" "Remote forwarding: [bind_address:]port:host:hostport")
             (Opts flag "-s" "Ask for a subsystem, the command naming it, as SessionType subsystem")
@@ -78,6 +83,7 @@
             (Opts flag "-v" "Verbose: trace the connection on standard error")
             (Opts arg "-W" "host:port" "Carry standard input and output to host:port through the server")
             (Opts flag "-x" "Disable X11 forwarding (none is served)")
+            (Opts flag "-y" "Send the log to the system log instead of standard error")
             %version-row))
     (%row (lit keygen) "ssh-keygen" "the key tool" "[options]"
       (list (Opts flag "-A" "Make each missing host key in /etc/ssh, or under -f's prefix")
@@ -273,16 +279,23 @@
     (list user (if (null? colon) hp (Str8 sub 0 colon hp)) (if (null? colon) () (rest-of hp (+ colon 1))))))
 
 ; The client's line: (client (exec HOST COMMAND OPTIONS CONFIG STDIO
-; PRINT) 0), OPTIONS the configuration lines its flags stand for, then
-; -o's, then the destination's user and port; COMMAND () for none; STDIO
-; -W's host:port or ().
+; PRINT LOG SYSLOG) 0), OPTIONS the configuration lines its flags stand
+; for, then -o's, then the destination's user and port; COMMAND () for
+; none; STDIO -W's host:port or (); LOG -E's file or (); SYSLOG -y's.
+; -Q is (client (query LINES) 0), what it prints.
 (def %client-plan
   (fn (_ o decl args)
     (def ops (Opts operands o))
     (def q (fn (_ s) (Str8 append "\"" s "\"")))
     (def jumps (Opts values o "-J"))
     (def bad-dynamic (List find (fn (_ d) (null? (ssh-client-dynamic d))) (Opts values o "-D")))
+    (def bad-escape (List find (fn (_ e) (null? (ssh-client-escape e))) (Opts values o "-e")))
+    (def query (if (Opts on? o "-Q") (ssh-client-query (Opts value o "-Q")) ()))
     (match
+      ((eq? query (lit unsupported))
+        (list (lit client) (Str8 append "Unsupported query \"" (Opts value o "-Q") "\"\r\n") 255))
+      ((not (null? query)) (list (lit client) (list (lit query) query) 0))
+      ((not (null? bad-escape)) (list (lit client) (Str8 append "Bad escape character '" bad-escape "'.\n") 255))
       ((null? ops) (list (lit client) (Opts usage decl) 255))
       ((> (List length jumps) 1)
         (list (lit client) "Only a single -J option is permitted (use commas to separate multiple jump hops)\r\n" 255))
@@ -305,10 +318,13 @@
                         (List map (fn (_ f) (Str8 append "RemoteForward " f)) (Opts values o "-R"))
                         (List map (fn (_ f) (Str8 append "DynamicForward " (q f))) (Opts values o "-D"))
                         (List map (fn (_ j) (Str8 append "ProxyJump " (q j))) jumps)
+                        (List map (fn (_ b) (Str8 append "BindAddress " (q b))) (Opts values o "-b"))
+                        (List map (fn (_ e) (Str8 append "EscapeChar " (q e))) (Opts values o "-e"))
+                        (if (Opts on? o "-f") (list "ForkAfterAuthentication yes") ())
                         (if (Opts on? o "-g") (list "GatewayPorts yes") ())
                         (if (Opts on? o "-N") (list "SessionType none") ())
                         (if (Opts on? o "-s") (list "SessionType subsystem") ())
-                        (if (Opts on? o "-n") (list "StdinNull yes") ())
+                        (if (if (Opts on? o "-n") #t (Opts on? o "-f")) (list "StdinNull yes") ())
                         (if (Opts on? o "-t") (list "RequestTTY yes") ())
                         (if (Opts on? o "-T") (list "RequestTTY no") ())
                         (if (Opts on? o "-x") (list "ForwardX11 no") ())
@@ -324,7 +340,9 @@
                         (if (null? (List ref 2 dest)) () (list (Str8 append "Port " (List ref 2 dest)))))
                       (%value o "-F")
                       (%value o "-W")
-                      (Opts on? o "-G"))
+                      (Opts on? o "-G")
+                      (%value o "-E")
+                      (Opts on? o "-y"))
                 0))))))
 
 ; Whether a -o ProxyCommand comes before -J on the line, which OpenSSH
@@ -456,7 +474,12 @@
     (if (pair? what)
       (Sys exit
         (match
-          ((eq? (first plan) (lit client)) (ssh-client-main (rest what)))
+          ((eq? (first plan) (lit client))
+            (if (eq? (first what) (lit query))
+              (do (def text (Str8 join "" (List map (fn (_ l) (Str8 append l "\n")) (List ref 1 what))))
+                  (File write 1 text (str-byte-len text))
+                  0)
+              (ssh-client-main (rest what))))
           ((eq? (first plan) (lit server)) (ssh-server-main (rest what)))
           ((eq? (first plan) (lit keygen)) (ssh-keygen-main what))
           ((eq? (first plan) (lit agent)) (ssh-agent-main what))

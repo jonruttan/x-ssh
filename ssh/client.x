@@ -21,28 +21,51 @@
 (import x/sys/file)
 (import x/sys/posix)
 (import x/repl/term)
+(import x/sys/syslog)
 (import ssh/ask ssh-ask-tty ssh-ask-secret)
 (import ssh/bytes ssh-copy)
 (import ssh/transport ssh-open ssh-host-key ssh-engines! ssh-exchange-versions! ssh-kex!
   ssh-auth-service! ssh-auth-publickey-query! ssh-auth-publickey! ssh-auth-password! ssh-hostkey-names ssh-server-sig-algs
-  ssh-cipher-names ssh-mac-names ssh-algorithms!)
+  ssh-kex-names ssh-cipher-names ssh-mac-names ssh-algorithms!)
 (import ssh/session ssh-session-run! ssh-disconnect!)
 (import ssh/keys ssh-key-file-sealed? ssh-key-wrong-passphrase ssh-identity-read-file ssh-pubkey-of-key-file)
 (import ssh/known ssh-known-name ssh-known-check ssh-known-types ssh-known-add!)
 (import ssh/keygen ssh-blob-fingerprint)
-(import ssh/pubkey ssh-pubkey-blob ssh-pubkey-label ssh-pubkey-algorithms ssh-pubkey-base64)
+(import ssh/pubkey ssh-pubkey-blob ssh-pubkey-label ssh-pubkey-algorithms ssh-pubkey-base64 ssh-pubkey-type)
 (import ssh/agent ssh-agent-connect ssh-agent-identities ssh-agent-identity)
 (import ssh/config ssh-config-read ssh-config-options ssh-config-first ssh-config-all ssh-config-faults
   ssh-config-tilde ssh-config-time ssh-config-patterns? ssh-config-ssh-keywords
   ssh-config-line ssh-config-bad ssh-config-arg ssh-config-one ssh-config-choice ssh-config-yes? ssh-config-int-or-nil
   ssh-config-count ssh-config-seconds ssh-config-channel-timeout ssh-config-algorithms)
-(import ssh/sys ssh-sys-me ssh-sys-proxy)
+(import ssh/sys ssh-sys-me ssh-sys-proxy ssh-sys-connect ssh-sys-output ssh-sys-after-op)
 
-(import x/core/doors str-byte-len str-byte-ref str-make char->int)
+(import x/core/doors str-byte-len str-byte-ref str-make str->ptr ptr-set! char->int)
 (def %cvt (prim-ref (lit convert) (lit to)))
 (def %num (fn (_ n) (%cvt n (Type named STRING) 10)))
 
 (def %say (fn (_ fd text) (File write fd text (str-byte-len text))))
+
+; --- the log ---------------------------------------------------------------
+
+; Where the log goes, set once from -E and -y and SyslogFacility: 1 the
+; descriptor -E's file is open on, or (); 2 #t for the system log; 3
+; its facility.
+(def %log-to (Vector make 3 ()))
+(obj-set! %log-to 2 #f) (obj-set! %log-to 3 (lit user))
+
+; A line of the log, given without its newline: to the system log under
+; the ident ssh, to -E's file ending in \r\n as OpenSSH's log writes
+; there, or to standard error.  A trailing \r is the terminal's, kept on
+; standard error alone.
+(def %log-at
+  (fn (_ severity text)
+    (def n (Str8 length text))
+    (def bare (if (if (> n 0) (= (char->int (str-byte-ref text (- n 1))) 13) #f) (Str8 sub 0 (- n 1) text) text))
+    (unless (if (obj-ref %log-to 2) (Syslog send "ssh" (obj-ref %log-to 3) severity bare) #f)
+      (if (null? (obj-ref %log-to 1)) (%say 2 (Str8 append text "\n"))
+        (%say (obj-ref %log-to 1) (Str8 append bare "\r\n"))))))
+
+(def %log (fn (_ text) (%log-at (lit info) text)))
 
 ; The caller's standard input.  The platform keeps it on fd 3, fd 0
 ; carrying x's own program text; with none, fd 3 is not open, a read of
@@ -71,10 +94,56 @@
 ; --- the settings ----------------------------------------------------------
 
 ; What ssh_config may say that this client does not do: refused unless
-; given the value that leaves it off.
+; given the value that leaves it off, or one of the values served.
 (def %refused
-  (list (pair "knownhostscommand" "none") (pair "tunnel" "no") (pair "forkafterauthentication" "no")
-        (pair "permitremoteopen" "any")))
+  (list (pair "tunnel" "no") (pair "permitremoteopen" "any") (pair "addressfamily" (list "any" "inet"))))
+
+; An escape character, -e's or EscapeChar's: a character, ^X for its
+; control character, or none -- as the character's number, none, or ()
+; when it does not read so.
+(def ssh-client-escape
+  (fn (_ e)
+    (match ((str=? e "none") (lit none))
+           ((= (Str8 length e) 1) (char->int (str-byte-ref e 0)))
+           ((if (= (Str8 length e) 2) (= (str-byte-ref e 0) #\^) #f) (% (char->int (str-byte-ref e 1)) 32))
+           (#t ()))))
+
+(def %char-text (fn (_ c) (def s (str-make 1)) (ptr-set! (str->ptr s) 0 c 1) s))
+
+; An escape character as -G prints it: none, a control character as \^X.
+(def %escape-text
+  (fn (_ c)
+    (match ((null? c) "none")
+           ((< c 32) (Str8 append "\\^" (%char-text (+ c 64))))
+           ((= c 127) "\\^?")
+           (#t (%char-text c)))))
+
+; What -Q answers for a query: the names served of its kind, a line
+; each, as OpenSSH's -Q names them, a keyword's name too; unsupported
+; when it is no query.
+(def ssh-client-query
+  (fn (_ q)
+    (def k (Str8 downcase q))
+    (def keys (list "ssh-ed25519" "ecdsa-sha2-nistp256" "ecdsa-sha2-nistp384" "ecdsa-sha2-nistp521" "ssh-rsa"))
+    (def sigs (list "ssh-ed25519" "ecdsa-sha2-nistp256" "ecdsa-sha2-nistp384" "ecdsa-sha2-nistp521" "rsa-sha2-256" "rsa-sha2-512"))
+    (match
+      ((if (str=? q "cipher") #t (str=? k "ciphers")) ssh-cipher-names)
+      ((str=? q "cipher-auth")
+        (List filter (fn (_ c) (if (str=? c "chacha20-poly1305@openssh.com") #t (not (null? (Str8 index-of "-gcm@" c))))) ssh-cipher-names))
+      ((if (str=? q "mac") #t (str=? k "macs")) ssh-mac-names)
+      ((if (str=? q "kex") #t (str=? k "kexalgorithms")) ssh-kex-names)
+      ((if (str=? q "key") #t (str=? q "key-plain")) keys)
+      ((str=? q "key-cert") (list ""))
+      ((if (str=? q "key-sig") #t
+         (List any? (fn (_ w) (str=? w k))
+           (list "casignaturealgorithms" "pubkeyacceptedkeytypes" "pubkeyacceptedalgorithms" "hostkeyalgorithms"
+                 "hostbasedkeytypes" "hostbasedacceptedkeytypes" "hostbasedacceptedalgorithms")))
+        (List append keys (list "rsa-sha2-256" "rsa-sha2-512")))
+      ((str=? q "sig") sigs)
+      ((str=? q "protocol-version") (list "2"))
+      ((str=? q "compression") (list "none"))
+      ((str=? q "help") (list "cipher" "cipher-auth" "compression" "kex" "key" "key-cert" "key-plain" "key-sig" "mac" "protocol-version" "sig"))
+      (#t (lit unsupported)))))
 
 ; %-tokens expanded from an alist of (LETTER . TEXT), %% a percent.
 (def %expand
@@ -228,7 +297,20 @@
       (if clear ()
         (List map (fn (_ l) ((fn (_ d) (if (null? d) (ssh-config-bad l "Bad forwarding specification.") d)) (ssh-client-dynamic (ssh-config-arg l))))
           (List filter (fn (_ l) (str=? (first l) "dynamicforward")) lines))))
+    ; EscapeChar: the character's number, () for none
+    (def escape
+      ((fn (_ l) (if (null? l) 126
+                   ((fn (_ e) (match ((null? e) (ssh-config-bad l "Bad escape character.")) ((eq? e (lit none)) ()) (#t e)))
+                    (ssh-client-escape (ssh-config-arg l)))))
+       (ssh-config-line lines "escapechar")))
     (list (pair (lit host) host)
+          (pair (lit family) (ssh-config-choice lines "addressfamily" (list "any" "inet" "inet6") "any"))
+          (pair (lit bind) (ssh-config-one lines "bindaddress" ()))
+          (pair (lit escape) escape)
+          (pair (lit fork) (ssh-config-yes? lines "forkafterauthentication" #f))
+          (pair (lit known-command) ((fn (_ c) (if (str=? (Str8 downcase c) "none") () c)) (ssh-config-one lines "knownhostscommand" "none")))
+          (pair (lit facility) (ssh-config-choice lines "syslogfacility"
+                                 (list "daemon" "user" "auth" "authpriv" "local0" "local1" "local2" "local3" "local4" "local5" "local6" "local7") "user"))
           (pair (lit proxy-command) (if jump? () proxy-value))
           (pair (lit proxy-jump) (if (if jump? (not self-jump?) #f) proxy-value ()))
           (pair (lit dynamics) dynamics)
@@ -303,7 +385,13 @@
                 (Str8 append "stdinnull " (yn (%get s (lit stdin-null))))
                 (Str8 append "requesttty " (%get s (lit tty))))
           (if (null? (%get s (lit command))) () (list (Str8 append "remotecommand " (%get s (lit command)))))
-          (if (null? (%get s (lit alias))) () (list (Str8 append "hostkeyalias " (%get s (lit alias))))))))))
+          (if (null? (%get s (lit alias))) () (list (Str8 append "hostkeyalias " (%get s (lit alias)))))
+          (list (Str8 append "addressfamily " (%get s (lit family))))
+          (if (null? (%get s (lit bind))) () (list (Str8 append "bindaddress " (%get s (lit bind)))))
+          (list (Str8 append "escapechar " (%escape-text (%get s (lit escape))))
+                (Str8 append "forkafterauthentication " (yn (%get s (lit fork)))))
+          (if (null? (%get s (lit known-command))) () (list (Str8 append "knownhostscommand " (%get s (lit known-command)))))
+          (list (Str8 append "syslogfacility " (Str8 upcase (%get s (lit facility))))))))))
 
 ; --- the terminal ----------------------------------------------------------
 
@@ -314,7 +402,54 @@
 
 ; --- the host key ----------------------------------------------------------
 
-(def %verification-failed (fn (_) (%say 2 "Host key verification failed.\n") #f))
+(def %verification-failed (fn (_) (%log "Host key verification failed.") #f))
+
+; A command line split into its words as OpenSSH's argv_split splits it:
+; on spaces and tabs, quotes holding words together, a backslash
+; escaping the character after it.
+(def %argv
+  (fn (_ line)
+    (def n (Str8 length line))
+    (def at (fn (_ i) (Str8 sub i 1 line)))
+    ((fn (self i word quote words)
+       (match
+         ((>= i n) (List reverse (if (null? word) words (pair (Str8 join "" (List reverse word)) words))))
+         ((if (str=? (at i) "\\") (< (+ i 1) n) #f) (self (+ i 2) (pair (at (+ i 1)) (if (null? word) () word)) quote words))
+         ((not (null? quote))
+           (if (str=? (at i) quote) (self (+ i 1) (if (null? word) (list "") word) () words) (self (+ i 1) (pair (at i) word) quote words)))
+         ((if (str=? (at i) "\"") #t (str=? (at i) "'")) (self (+ i 1) (if (null? word) (list "") word) (at i) words))
+         ((if (str=? (at i) " ") #t (str=? (at i) "\t"))
+           (self (+ i 1) () () (if (null? word) words (pair (Str8 join "" (List reverse word)) words))))
+         (#t (self (+ i 1) (pair (at i) word) quote words))))
+     0 () () ())))
+
+; KnownHostsCommand's lines for the reason given -- ORDER before the key
+; exchange, HOSTNAME once the server's key is in -- as a known_hosts
+; file of its own, (LABEL . TEXT); () when there is no command or it
+; fails, which is logged.  Its words' tokens are expanded: the
+; configuration's, %H the name looked up, %I the reason, and with a key
+; %K its base64, %t its type and %f its fingerprint.
+(def %known-command
+  (fn (_ s name reason key)
+    (def command (%get s (lit known-command)))
+    (if (null? command) ()
+      (do (def tokens
+            (List append
+              (list (pair "H" name) (pair "I" reason)
+                    (pair "k" (if (null? (%get s (lit alias))) (%get s (lit hostname)) (%get s (lit alias)))))
+              (if (null? key) ()
+                (list (pair "K" (ssh-pubkey-base64 key)) (pair "t" (ssh-pubkey-type key))
+                      (pair "f" (ssh-blob-fingerprint (ssh-pubkey-blob key)))))
+              (%get s (lit tokens))))
+          (def argv (List map (fn (_ w) (%expand w tokens)) (%argv command)))
+          (match
+            ((if (null? argv) #t (not (str=? (Str8 sub 0 1 (first argv)) "/")))
+              (do (%log "KnownHostsCommand path is not absolute") ()))
+            (#t
+              ((fn (_ r)
+                 (if (= (first r) 0) (pair "(KnownHostsCommand)" (rest r))
+                   (do (%log (Str8 append "KnownHostsCommand " (first argv) " exited with status " (%num (first r)))) ())))
+               (guard (e (pair 255 "")) (ssh-sys-output argv)))))))))
 
 ; The host key algorithms offered, as OpenSSH orders them: those of the
 ; types known_hosts already holds for this host first, so a known host
@@ -324,8 +459,9 @@
   (fn (_ s)
     (def port (%get s (lit port)))
     (def name (ssh-known-name (if (null? (%get s (lit alias))) (%get s (lit hostname)) (%get s (lit alias))) port))
+    (def ordered ((fn (_ k) (if (null? k) () (list k))) (%known-command s name "ORDER" ())))
     (def known (List flat-map (fn (_ t) (if (str=? t "ssh-rsa") (list "rsa-sha2-512" "rsa-sha2-256") (list t)))
-                 (ssh-known-types (List append (%get s (lit known)) (%get s (lit global))) name)))
+                 (ssh-known-types (List append (%get s (lit known)) (%get s (lit global)) ordered) name)))
     (def first-known (List filter (fn (_ a) (List any? (fn (_ k) (str=? k a)) known)) ssh-hostkey-names))
     (List append first-known (List filter (fn (_ a) (not (List any? (fn (_ k) (str=? k a)) first-known))) ssh-hostkey-names))))
 
@@ -341,20 +477,21 @@
     (def fp (ssh-blob-fingerprint (ssh-pubkey-blob key)))
     (def label (ssh-pubkey-label key))
     (def known (%get s (lit known)))
-    (def seen (ssh-known-check (List append known (%get s (lit global))) name key))
+    (def given ((fn (_ k) (if (null? k) () (list k))) (%known-command s name "HOSTNAME" key)))
+    (def seen (ssh-known-check (List append known (%get s (lit global)) given) name key))
     (def strict (%get s (lit strict)))
     (def record!
       (fn (_)
         (unless (null? known)
-          (guard (e (%say 2 (Str8 append "Failed to add the host to the list of known hosts (" (first known) ").\n")))
+          (guard (e (%log (Str8 append "Failed to add the host to the list of known hosts (" (first known) ").")))
             (ssh-known-add! (first known) name key)
             (unless quiet
-              (%say 2 (Str8 append "Warning: Permanently added '" name "' (" label ") to the list of known hosts.\n")))))
+              (%log (Str8 append "Warning: Permanently added '" name "' (" label ") to the list of known hosts.")))))
         #t))
     (match
       ((eq? (first seen) (lit known)) (do (unless (null? tr) (tr (Str8 append "Host '" name "' is known and matches the " label " host key."))) #t))
       ((eq? (first seen) (lit changed))
-        (do (%say 2 (Str8 append
+        (do (%log (Str8 append
               "@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@\n"
               "@    WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!     @\n"
               "@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@\n"
@@ -367,10 +504,10 @@
               "Offending " label " key in " (List ref 1 seen) ":" (%num (List ref 2 seen)) "\n"
               "  remove with:\n"
               "  ssh-keygen -f '" (List ref 1 seen) "' -R '" name "'\n"
-              "Host key for " name " has changed and you have requested strict checking.\n"))
+              "Host key for " name " has changed and you have requested strict checking."))
             (%verification-failed)))
       ((str=? strict "yes")
-        (do (%say 2 (Str8 append "No " label " host key is known for " name " and you have requested strict checking.\n"))
+        (do (%log (Str8 append "No " label " host key is known for " name " and you have requested strict checking."))
             (%verification-failed)))
       ((not (str=? strict "ask")) (record!))
       ((%get s (lit batch)) (%verification-failed))
@@ -411,9 +548,9 @@
                 (match
                   ((not (File exists? (first i)))
                     (do (when (if (rest i) (not quiet) #f)
-                          (%say 2 (Str8 append "Warning: Identity file " (first i) " not accessible: No such file or directory.\n")))
+                          (%log (Str8 append "Warning: Identity file " (first i) " not accessible: No such file or directory.")))
                         ()))
-                  (#t (guard (e (do (%say 2 (Str8 append "Load key \"" (first i) "\": " (%message e) "\n")) ()))
+                  (#t (guard (e (do (%log (Str8 append "Load key \"" (first i) "\": " (%message e))) ()))
                         (def key (ssh-pubkey-of-key-file (first i)))
                         (def id (if (ssh-key-file-sealed? (first i)) () (ssh-identity-read-file (first i) "")))
                         (list (list (first i) key id))))))
@@ -471,7 +608,7 @@
     (def try
       (fn (_ typed)
         (guard (e (if (str=? (%message e) ssh-key-wrong-passphrase) (lit wrong)
-                    (do (%say 2 (Str8 append "Load key \"" path "\": " (%message e) "\n")) ())))
+                    (do (%log (Str8 append "Load key \"" path "\": " (%message e))) ())))
           (ssh-identity-read-file path typed))))
     ((fn (self left)
        (if (if (= left 0) #t (%get s (lit batch))) ()
@@ -516,7 +653,7 @@
     (if (not (%get s (lit password))) by-key
       ((fn (self left answer first-try)
          (if (if (= left 0) #t (not (%offers? answer "password"))) answer
-           (do (unless first-try (%say 2 "Permission denied, please try again.\n"))
+           (do (unless first-try (%log "Permission denied, please try again."))
                (def typed (%ask-secret s prompt))
                (if (null? typed) answer
                  (do (unless (null? tr) (tr "Next authentication method: password"))
@@ -582,21 +719,38 @@
     (def level (%get s (lit level)))
     (def quiet (List any? (fn (_ l) (str=? l level)) (list "quiet" "fatal" "error")))
     (def tr (if (List any? (fn (_ l) (str=? l level)) %debug-levels)
-              (fn (_ t) (%say 2 (Str8 append "debug1: " (%ms) " ms " t "\n")))
+              (fn (_ t) (%log-at (lit debug) (Str8 append "debug1: " (%ms) " ms " t)))
               ()))
     (def host (%get s (lit hostname)))
     (def port (%get s (lit port)))
+    (def bind (%get s (lit bind)))
     ; through a proxy command there is no address of the host's own
     (def addr (if (null? proxy) (%address host) ()))
-    (def fd (if (null? proxy) (guard (e ()) (Socket tcp-connect addr port)) (if (null? spawned) () (rest spawned))))
+    ; the connection, from BindAddress's address when it names one; a
+    ; failure is (failed . WORDS), logged as OpenSSH logs it
+    (def fd
+      (if (not (null? proxy)) (if (null? spawned) () (rest spawned))
+        (guard (e (pair (lit failed) (%message e)))
+          (def from
+            (if (null? bind) ()
+              (guard (e2 (do (%log (Str8 append "getaddrinfo: " bind ": " (ssh-sys-after-op (%message e2))))
+                             (Err raise 'value "connect: failure" ())))
+                (%address bind))))
+          (ssh-sys-connect addr port from))))
+    (def failed (if (pair? fd) (eq? (first fd) (lit failed)) #f))
     (match
-      ((if (null? fd) (null? proxy) #f)
-        (do (%say 2 (Str8 append "ssh: connect to host " host " port " (%num port) ": Connection refused\n")) 255))
-      ((null? fd) (do (%say 2 "ssh: the proxy command could not be started\n") 255))
+      (failed
+        (do (def words (ssh-sys-after-op (rest fd)))
+            (if (str=? (Str8 sub 0 (if (< (Str8 length (rest fd)) 5) 0 5) (rest fd)) "bind:")
+              (do (%log (Str8 append "bind " bind ": " words))
+                  (%log (Str8 append "ssh: connect to host " host " port " (%num port) ": failure")))
+              (%log (Str8 append "ssh: connect to host " host " port " (%num port) ": " words)))
+            255))
+      ((null? fd) (do (%log "ssh: the proxy command could not be started") 255))
       (#t
-      (guard (e (do (%say 2 (match ((str=? (%message e) "keepalive") (Str8 append "Timeout, server " host " not responding.\n"))
-                                    ((str=? (%message e) "idle") (Str8 append "Connection to " host " closed: the channels were idle past ChannelTimeout.\n"))
-                                    (#t (Str8 append (%message e) "\n"))))
+      (guard (e (do (%log (match ((str=? (%message e) "keepalive") (Str8 append "Timeout, server " host " not responding."))
+                                 ((str=? (%message e) "idle") (Str8 append "Connection to " host " closed: the channels were idle past ChannelTimeout."))
+                                 (#t (%message e))))
                     (guard (e2 ()) (Socket close fd))
                     255))
         (unless (null? tr)
@@ -616,11 +770,17 @@
           (do (def ids (%identities s quiet tr))
               (def ok (%authenticate c s ids tr))
               (if (not (eq? ok #t))
-                (do (%say 2 (Str8 append (%get s (lit user)) "@" host ": Permission denied (" (Str8 join "," ok) ").\n"))
+                (do (%log (Str8 append (%get s (lit user)) "@" host ": Permission denied (" (Str8 join "," ok) ")."))
                     (Socket close fd)
                     255)
                 (do (unless (null? tr)
                       (tr (Str8 append "Authenticated to " host (if (null? addr) " (via proxy)" (Str8 append " ([" addr "]:" (%num port) ")")) ".")))
+                    ; ForkAfterAuthentication: the connection goes on in a
+                    ; child of its own session, this process leaving with 0
+                    (when (%get s (lit fork))
+                      (do (def pid (Sys fork))
+                          (unless (= pid 0) (Sys exit 0))
+                          (Sys setsid)))
                     ; a terminal as RequestTTY says: force always, yes
                     ; when standard input is one, auto for a shell on one
                     (def local-tty (Sys isatty %stdin))
@@ -632,7 +792,7 @@
                              ((str=? want "yes") local-tty)
                              (#t (if (eq? command (lit shell)) local-tty #f))))
                     (when (if (str=? want "yes") (if (not local-tty) (not quiet) #f) #f)
-                      (%say 2 "Pseudo-terminal will not be allocated because stdin is not a terminal.\r\n"))
+                      (%log "Pseudo-terminal will not be allocated because stdin is not a terminal.\r"))
                     (def term ((fn (_ t) (if (null? t) "" t)) (Sys getenv "TERM")))
                     ; the modes as they are before raw mode, for the server's terminal
                     (def modes (if tty? (Term modes %stdin) ()))
@@ -656,7 +816,7 @@
                             (if (null? stdio) () (pair (%address (first stdio)) (rest stdio)))
                             (%get s (lit limits))
                             (%environment s)
-                            (if tty? (list term (fn (_) (Term window %stdin)) modes) ())
+                            (if tty? (list term (fn (_) (Term window %stdin)) modes (%get s (lit escape))) ())
                             (%get s (lit forward-agent))))))
                     (unless (null? saved) (Term restore! %stdin saved))
                     (guard (e2 ()) (ssh-disconnect! c))
@@ -669,19 +829,32 @@
                             (unless (null? tr) (tr (Str8 append "Exit status " (%num code))))
                             code))
                       ((str=? (rest outcome) "escape") (do (%say 2 closed) 255))
-                      ((str=? (rest outcome) "keepalive") (do (%say 2 (Str8 append "Timeout, server " host " not responding.\n")) 255))
-                      ((str=? (rest outcome) "idle") (do (%say 2 (Str8 append "Connection to " host " closed: the channels were idle past ChannelTimeout.\n")) 255))
-                      (#t (do (%say 2 (Str8 append (rest outcome) "\n")) 255))))))))))))
+                      ((str=? (rest outcome) "keepalive") (do (%log (Str8 append "Timeout, server " host " not responding.")) 255))
+                      ((str=? (rest outcome) "idle") (do (%log (Str8 append "Connection to " host " closed: the channels were idle past ChannelTimeout.")) 255))
+                      (#t (do (%log (rest outcome)) 255))))))))))))
 
-; The client's plan done: (HOST COMMAND OPTIONS CONFIG STDIO PRINT).
-; The configuration settled -- the options, the user's file (-F's, or
-; ~/.ssh/config) and the system's, which -F leaves out -- and the
-; connection made, or the settings printed.  The exit status.
+; The client's plan done: (HOST COMMAND OPTIONS CONFIG STDIO PRINT LOG
+; SYSLOG).  The log sent where -E and -y say; the configuration settled
+; -- the options, the user's file (-F's, or ~/.ssh/config) and the
+; system's, which -F leaves out -- and the connection made, or the
+; settings printed.  The exit status.
 (def ssh-client-main
   (fn (_ plan)
     (def host (first plan))
     (def local (ssh-sys-me))
-    (guard (e (do (%say 2 (Str8 append (%message e) "\n")) 255))
+    (def logfile (List ref 6 plan))
+    (def log-fd (if (null? logfile) ()
+                  (guard (e (pair (lit failed) (ssh-sys-after-op (%message e))))
+                    (File open logfile (list (lit wronly) (lit creat) (lit append)) 384))))
+    (if (if (null? log-fd) #f (if (pair? log-fd) #t (< log-fd 0)))
+      (do (%say 2 (Str8 append "Couldn't open logfile " logfile (if (pair? log-fd) (Str8 append ": " (rest log-fd)) "") "\r\n")) 255)
+      (do (obj-set! %log-to 1 log-fd)
+          (obj-set! %log-to 2 (List ref 7 plan))
+          (%settled host local plan)))))
+
+(def %settled
+  (fn (_ host local plan)
+    (guard (e (do (%log (%message e)) 255))
       (def opts (ssh-config-options (List ref 2 plan)))
       (def user (if (null? (ssh-config-first opts "user")) local (first (ssh-config-first opts "user"))))
       (def config (List ref 3 plan))
@@ -699,10 +872,11 @@
             (#t (read config (ssh-config-tilde "~/.ssh") #t)))))
       (def faults (ssh-config-faults lines ssh-config-ssh-keywords %refused (ssh-config-first lines "ignoreunknown")))
       (if (not (null? faults))
-        (do (List for-each (fn (_ f) (%say 2 (Str8 append f "\n"))) faults)
-            (%say 2 (Str8 append "terminating, " (%num (List length faults)) " bad configuration options\n"))
+        (do (List for-each %log faults)
+            (%log (Str8 append "terminating, " (%num (List length faults)) " bad configuration options"))
             255)
         (do (def s (pair (pair (lit config-file) config) (ssh-client-settings lines host local)))
+            (obj-set! %log-to 3 (Str8 ->sym (%get s (lit facility))))
             ; -W's host:port, the host in brackets when it holds colons
             (def stdio (if (null? (List ref 4 plan)) ()
                          ((fn (_ hp)
@@ -722,8 +896,10 @@
                                 ((not (null? (%get s (lit command)))) (%get s (lit command)))
                                 ((null? stdio) (lit shell))
                                 (#t ())))
+            (when (if (%get s (lit fork)) (eq? command (lit shell)) #f)
+              (Err raise 'value "Cannot fork into background without a command to execute.\r" ()))
             (if (List ref 5 plan)
               (do (%say 1 (%print s)) 0)
               (%run s command stdio)))))))
 
-(provide ssh/client ssh-client-main ssh-client-settings ssh-client-jump ssh-client-dynamic)
+(provide ssh/client ssh-client-main ssh-client-settings ssh-client-jump ssh-client-dynamic ssh-client-escape ssh-client-query)

@@ -511,7 +511,7 @@
 
 ; --- the key exchange (7), curve25519-sha256 (RFC 8731) --------------------
 
-(def %kex-names (list "curve25519-sha256" "curve25519-sha256@libssh.org"))
+(def ssh-kex-names (list "curve25519-sha256" "curve25519-sha256@libssh.org"))
 ; The host key algorithms this end checks, as a client offers them unless
 ; known_hosts says which it already knows the host by.
 (def ssh-hostkey-names (list "ssh-ed25519" "ecdsa-sha2-nistp256" "ecdsa-sha2-nistp384" "ecdsa-sha2-nistp521" "rsa-sha2-512" "rsa-sha2-256"))
@@ -554,7 +554,7 @@
     (def out (ssh-out))
     (ssh-put-byte out ssh-msg-kexinit)
     (ssh-put-bytes out (ssh-random 16) 0 16)
-    (ssh-put-names out (List append %kex-names extra))
+    (ssh-put-names out (List append ssh-kex-names extra))
     (ssh-put-names out hostkeys)
     (ssh-put-names out (first (%slot c 13))) (ssh-put-names out (first (%slot c 13)))
     (ssh-put-names out (rest (%slot c 13))) (ssh-put-names out (rest (%slot c 13)))
@@ -588,7 +588,7 @@
     (def pick (fn (_ ours theirs) (if server? (%agree theirs ours) (%agree ours theirs))))
     (def ciphers (first (%slot c 13)))
     (def macs (rest (%slot c 13)))
-    (def chosen (list (pick %kex-names kex) (pick hostkeys hk) (pick ciphers c2s) (pick ciphers s2c)))
+    (def chosen (list (pick ssh-kex-names kex) (pick hostkeys hk) (pick ciphers c2s) (pick ciphers s2c)))
     (when (List any? null? chosen)
       (Err raise 'value "ssh: the peer offers none of our algorithms" ()))
     (def mac-for (fn (_ cipher theirs) (if (%aead? cipher) () (pick macs theirs))))
@@ -884,7 +884,7 @@
     (%auth-answer c)))
 
 (provide ssh/transport ssh-version-string ssh-open ssh-fd ssh-session-id ssh-host-key ssh-server-sig-algs ssh-hostkey-names ssh-pending? ssh-random ssh-engines!
-  ssh-cipher-names ssh-mac-names ssh-algorithms!
+  ssh-kex-names ssh-cipher-names ssh-mac-names ssh-algorithms!
   ssh-exchange-versions! ssh-send-packet! ssh-recv-packet! ssh-next-packet! ssh-expect! ssh-kex! ssh-kex-server! ssh-auth-service! ssh-auth-publickey-query! ssh-auth-publickey! ssh-auth-password!
   ssh-msg-disconnect ssh-msg-global-request ssh-msg-request-success ssh-msg-request-failure ssh-msg-service-request ssh-msg-service-accept
   ssh-msg-userauth-request ssh-msg-userauth-failure ssh-msg-userauth-success ssh-trace

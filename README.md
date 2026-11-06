@@ -39,7 +39,8 @@ nistp521), for host keys and user keys, at either end.
   when standard input is one, `-t` for a command too, `-T` never -- with
   TERM, the window and the local terminal's modes; the local terminal
   is raw for the session, a
-  resize is sent on, and `~.` at a line's start ends the connection.
+  resize is sent on, and `~.` at a line's start ends the connection (`-e`
+  or EscapeChar names another character, or none).
   The configuration is
   ssh_config(5)'s: `-o` options, then `~/.ssh/config` (or `-F`'s file),
   then `/etc/ssh/ssh_config`, the first value holding, with `Host` and
@@ -49,7 +50,11 @@ nistp521), for host keys and user keys, at either end.
   `-N` SessionType none, `-s` SessionType
   subsystem (the command its name), `-n` StdinNull, `-A` and `-a`
   ForwardAgent,
-  `-q` and `-v` LogLevel, `-c` Ciphers, `-m` MACs; `-W host:port`
+  `-q` and `-v` LogLevel, `-c` Ciphers, `-m` MACs, `-b` BindAddress, `-e`
+  EscapeChar, `-f` ForkAfterAuthentication (and StdinNull: once
+  authenticated the connection goes on in the background); `-E` appends
+  the log to a file and `-y` sends it to the system log; `-Q` prints the
+  algorithms served of a kind; `-W host:port`
   carries standard input and
   output through the server, as a ProxyCommand wants; `-G` prints the
   settings in force.  ProxyCommand's command is run by the user's shell,
@@ -71,7 +76,11 @@ nistp521), for host keys and user keys, at either end.
   ServerAliveInterval,
   ServerAliveCountMax, ChannelTimeout (`global=`), SendEnv, SetEnv,
   RemoteCommand, ProxyCommand, ProxyJump, SessionType, StdinNull,
-  LogLevel, Ciphers, MACs, IgnoreUnknown.  A new
+  LogLevel, Ciphers, MACs, IgnoreUnknown, AddressFamily (any or inet:
+  IPv6 is not served), BindAddress, EscapeChar, ForkAfterAuthentication,
+  SyslogFacility, KnownHostsCommand (run without a shell before the key
+  exchange and once the server's key is in, its output read as
+  known_hosts lines).  A new
   host is asked about at the terminal under StrictHostKeyChecking ask,
   as OpenSSH asks; a changed key is always refused.  A password is asked
   at the terminal with echo off, or of SSH_ASKPASS as

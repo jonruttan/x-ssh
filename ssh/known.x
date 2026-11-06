@@ -38,10 +38,11 @@
       (Str8 split " " (Str8 join " " (Str8 split "\t" line))))))
 
 ; The file's lines, numbered from 1: ((NO . TEXT) ...); () when it cannot
-; be read.
+; be read.  A file may be (LABEL . TEXT), lines given rather than read,
+; as KnownHostsCommand's output is.
 (def %lines
   (fn (_ path)
-    (def text (guard (e ()) (File read-all path)))
+    (def text (if (pair? path) (rest path) (guard (e ()) (File read-all path))))
     (if (null? text) ()
       ((fn (self ls no acc) (if (null? ls) (List reverse acc) (self (rest ls) (+ no 1) (pair (pair no (first ls)) acc))))
        (Str8 split "\n" text) 1 ()))))
@@ -74,7 +75,7 @@
           (List flat-map
             (fn (_ l)
               (def e (%entry (rest l) name))
-              (if (if (null? e) #t (not (str=? (first e) type))) () (list (list (List ref 1 e) f (first l)))))
+              (if (if (null? e) #t (not (str=? (first e) type))) () (list (list (List ref 1 e) (if (pair? f) (first f) f) (first l)))))
             (%lines f)))
         files))
     (match

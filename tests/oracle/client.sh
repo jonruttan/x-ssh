@@ -49,6 +49,9 @@
 #            4 for the Dropbear's ssh port, each reading its version line
 #   proxies  ProxyCommand through nc; -J through two hops of the Dropbear,
 #            each hop x-ssh as `ssh` on the path with -F's file
+#   flags    -b from the loopback; -E's file holding a refused
+#            connection's message; -f returning before its command ends;
+#            KnownHostsCommand vouching for a host no file knows
 #   stdio    -W: the Dropbear's own version line carried to standard output
 #   idle     -N with ChannelTimeout global=2 ends on the client's own clock
 #   git      `git clone` of a repository behind the Dropbear, with x-ssh
@@ -454,6 +457,44 @@ if [ "$out" = "through two hops" ]; then
 	echo "ok: proxyjump -- -J through two hops, each this client with -W"
 else
 	fail "proxyjump: output '$out'"
+fi
+
+# flags: -b binds the loopback and connects from it; -E puts a refused
+# connection's message in the file, as OpenSSH's log writes it; -f
+# returns once authenticated and the command finishes in the background;
+# KnownHostsCommand vouches for a host no file knows, told the reason
+# and the name looked up
+out=$(xssh -b 127.0.0.1 127.0.0.1 'echo bound' < /dev/null 2> "$fx/client.err")
+if [ "$out" = "bound" ]; then
+	echo "ok: bind -- -b connects from the address named"
+else
+	fail "bind: output '$out'"
+fi
+xssh -E "$fx/client.log" -p 1 127.0.0.1 true < /dev/null 2> "$fx/client.err"
+if [ "$(cat "$fx/client.log")" = "$(printf 'ssh: connect to host 127.0.0.1 port 1: Connection refused\r')" ] && [ ! -s "$fx/client.err" ]; then
+	echo "ok: logfile -- -E appends the log to its file, not standard error"
+else
+	fail "logfile: '$(cat "$fx/client.log" 2>/dev/null)'"
+fi
+rm -f "$fx/forked"
+xssh -f 127.0.0.1 "sleep 2; echo forked > '$fx/forked'" < /dev/null 2> "$fx/client.err"
+status=$?
+early=$([ -f "$fx/forked" ] && echo yes || echo no)
+sleep 5
+if [ $status -eq 0 ] && [ "$early" = no ] && [ "$(cat "$fx/forked" 2>/dev/null)" = forked ]; then
+	echo "ok: fork -- -f returns once authenticated, the command finishing behind it"
+else
+	fail "fork: status $status, early $early"
+fi
+printf '#!/bin/sh\necho "$1 $2" > "%s/khc.args"\ncat "%s/khc.lines"\n' "$fx" "$fx" > "$fx/khc"
+chmod +x "$fx/khc"
+grep -h . "$home/.ssh/known_hosts" > "$fx/khc.lines"
+out=$(xssh -o StrictHostKeyChecking=yes -o "UserKnownHostsFile $fx/none" -o "KnownHostsCommand $fx/khc %I %H" \
+	127.0.0.1 'echo known by command' < /dev/null 2> "$fx/client.err")
+if [ "$out" = "known by command" ] && [ "$(cat "$fx/khc.args")" = "HOSTNAME [127.0.0.1]:$port" ]; then
+	echo "ok: knownhostscommand -- the command's lines vouch for the host, told HOSTNAME and the name"
+else
+	fail "knownhostscommand: output '$out', args '$(cat "$fx/khc.args" 2>/dev/null)'"
 fi
 
 # stdio: -W, the client's own output carried from the Dropbear's own ssh

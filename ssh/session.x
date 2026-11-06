@@ -80,10 +80,11 @@
 ; 5 the session channel or (), 6 the remote forwards as (ADDRESS PORT
 ; HOST PORT), 7 those whose request the server has yet to answer, in
 ; the order asked, 8 the environment sent, 9 the terminal asked for, as
-; (TERM WINDOW MODES), WINDOW a function answering (COLUMNS . ROWS) and
-; MODES the local terminal's as Term modes answers them, or (), 10
-; the window last sent, 11 where the escape character stands: 1 at a
-; line's start, 2 just after a tilde there, 0 elsewhere, 12 the agent's
+; (TERM WINDOW MODES ESCAPE), WINDOW a function answering (COLUMNS .
+; ROWS), MODES the local terminal's as Term modes answers them, ESCAPE
+; the escape character's number or () for none; or (), 10 the window
+; last sent, 11 where the escape character stands: 1 at a line's start,
+; 2 just after the escape character there, 0 elsewhere, 12 the agent's
 ; socket forwarded, or (), 13 the connections on dynamic listeners yet
 ; to say where they go, as (FD BYTES GREETED).
 (def %CHANNELS 1) (def %NEXT 2) (def %MOVED 3) (def %LISTENERS 4) (def %SESSION 5)
@@ -369,11 +370,12 @@
 
 ; One read of a channel's input sent as its data: as much as is there,
 ; the window and the packet size allow; a read of nothing is its end.
-; Typed bytes through OpenSSH's escapes, at a line's start: ~. ends the
-; connection, ~~ is one tilde, a tilde before anything else is itself.
-; Answers (BUF . N), or raises "escape" for ~.
+; Typed bytes through OpenSSH's escapes, the escape character esc (~ by
+; default) at a line's start: esc . ends the connection, esc esc is one
+; esc, an esc before anything else is itself.  Answers (BUF . N), or
+; raises "escape" for esc . .
 (def %escape
-  (fn (_ run buf got)
+  (fn (_ run buf got esc)
     (def out (str-make (+ (* got 2) 1)))
     (def p (str->ptr out))
     (def byte (fn (_ i) ((prim-ref (lit char) (lit ->int)) ((prim-ref (lit str) (lit byte-ref)) buf i))))
@@ -386,9 +388,9 @@
                  ((= state 2)
                    (match
                      ((= b 46) (Err raise 'io "escape" ()))
-                     ((= b 126) (do (ptr-set! p n 126 1) (self (+ i 1) (+ n 1) 0)))
-                     (#t (do (ptr-set! p n 126 1) (ptr-set! p (+ n 1) b 1) (self (+ i 1) (+ n 2) (if line? 1 0))))))
-                 ((if (= state 1) (= b 126) #f) (self (+ i 1) n 2))
+                     ((= b esc) (do (ptr-set! p n esc 1) (self (+ i 1) (+ n 1) 0)))
+                     (#t (do (ptr-set! p n esc 1) (ptr-set! p (+ n 1) b 1) (self (+ i 1) (+ n 2) (if line? 1 0))))))
+                 ((if (= state 1) (= b esc) #f) (self (+ i 1) n 2))
                  (#t (do (ptr-set! p n b 1) (self (+ i 1) (+ n 1) (if line? 1 0))))))))
        0 0 (%rn run %ESC)))
     (pair out n)))
@@ -422,11 +424,11 @@
 (def %pump!
   (fn (_ c run ch)
     (def n (%min %chunk (%min (%ch ch %WINDOW) (- (%ch ch %MAX) 64))))
-    ; a held tilde comes out with the next byte, so a terminal reads one short
+    ; a held escape character comes out with the next byte, so a terminal reads one short
     (def raw (str-make n))
     (def read (File read (%ch ch %INPUT) raw (if (null? (%rn run %TTY)) n (- n 1))))
-    (def typed (if (if (< read 1) #f (if (null? (%rn run %TTY)) #f (eq? (%ch ch %KIND) (lit session))))
-                 (%escape run raw read)
+    (def typed (if (if (< read 1) #f (if (null? (%rn run %TTY)) #f (if (null? (List ref 3 (%rn run %TTY))) #f (eq? (%ch ch %KIND) (lit session)))))
+                 (%escape run raw read (List ref 3 (%rn run %TTY)))
                  (pair raw read)))
     (def buf (first typed))
     (def got (rest typed))

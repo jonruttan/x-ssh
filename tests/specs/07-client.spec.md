@@ -123,6 +123,66 @@ tests/oracle/client.sh and tests/oracle/server.sh.
 ---
     (("RemoteCommand" "echo \"a  b\" c") ("ProxyCommand" "nc %h %p") ("Ciphers" "a b" "c"))
 
+## the address, the escape character, the background, known hosts by command
+
+### AddressFamily, BindAddress, EscapeChar, ForkAfterAuthentication, KnownHostsCommand and SyslogFacility, unset and set
+
+```ssh
+(import ssh/client ssh-client-settings)
+(import ssh/config ssh-config-options)
+(def %sv (fn (_ opts)
+  (def s (ssh-client-settings (ssh-config-options opts) "h" "u"))
+  (List map (fn (_ k) (rest (List find (fn (_ p) (eq? (first p) k)) s)))
+    (list (lit family) (lit bind) (lit escape) (lit fork) (lit known-command) (lit facility)))))
+(write (list (%sv ())
+             (%sv (list "AddressFamily inet" "BindAddress 10.0.0.1" "EscapeChar none" "ForkAfterAuthentication yes"
+                        "KnownHostsCommand /bin/kh %H \"%I\"" "SyslogFacility LOCAL0"))))
+```
+---
+    (("any" () 126 #f () "user") ("inet" "10.0.0.1" () #t "/bin/kh %H \"%I\"" "local0"))
+
+### an escape character as -e and EscapeChar read it, and as -G prints it; a bad one refused
+
+```ssh
+(import ssh/client ssh-client-settings ssh-client-escape)
+(import ssh/config ssh-config-options)
+(def %et (eval (lit %escape-text) (module ssh/client)))
+(write (list (List map ssh-client-escape (list "~" "^A" "^~" "^" "none" "ab"))
+             (List map %et (list 126 1 30 127 ()))
+             (guard (e (e msg)) (ssh-client-settings (ssh-config-options (list "EscapeChar ab")) "h" "u"))))
+```
+---
+    ((126 1 30 94 'none ()) ("~" "\\^A" "\\^^" "\\^?" "none") "command-line: line 1: Bad escape character.")
+
+### AddressFamily inet6 is refused, IPv6 not being served; any and inet are not
+
+```ssh
+(import ssh/config ssh-config-options ssh-config-faults ssh-config-ssh-keywords)
+(def %rf (eval (lit %refused) (module ssh/client)))
+(write (List map (fn (_ o) (ssh-config-faults (ssh-config-options (list o)) ssh-config-ssh-keywords %rf ()))
+  (list "AddressFamily any" "AddressFamily inet" "AddressFamily inet6")))
+```
+---
+    (() () ("command-line: line 1: addressfamily is not served"))
+
+### -Q's answers: kex by either name, key-sig, no certificates, an unknown query
+
+```ssh
+(import ssh/client ssh-client-query)
+(write (List map ssh-client-query (list "kex" "KexAlgorithms" "key-sig" "key-cert" "nope")))
+```
+---
+    (("curve25519-sha256" "curve25519-sha256@libssh.org") ("curve25519-sha256" "curve25519-sha256@libssh.org") ("ssh-ed25519" "ecdsa-sha2-nistp256" "ecdsa-sha2-nistp384" "ecdsa-sha2-nistp521" "ssh-rsa" "rsa-sha2-256" "rsa-sha2-512") ("") 'unsupported)
+
+### KnownHostsCommand's words, split as OpenSSH splits them
+
+```ssh
+(def %av (eval (lit %argv) (module ssh/client)))
+(write (%av "/bin/kh %H \"a b\" 'c d' e\\ f  "))
+```
+---
+    ("/bin/kh" "%H" "a b" "c d" "e f")
+
 ## terminals
 
 ### -t stands for RequestTTY yes, -T for no; auto is the default
@@ -136,19 +196,20 @@ tests/oracle/client.sh and tests/oracle/server.sh.
 ---
     (("RequestTTY yes") "auto" "force")
 
-### typed bytes through the escapes: ~~ is a tilde, a tilde mid-line is itself, ~. ends it
+### typed bytes through the escapes: ~~ is a tilde, a tilde mid-line is itself, ~. ends it; another escape character in its place
 
 ```ssh
 (import x/type/vector)
 (def %ce-escape (eval (lit %escape) (module ssh/session)))
 (def %ce-run (Vector make 11 ()))
 (def %ce-pass
-  (fn (_ text)
+  (fn (_ text esc)
     ((prim-ref (lit obj) (lit set!)) %ce-run 11 1)
-    (def r (%ce-escape %ce-run text (Str8 length text)))
+    (def r (%ce-escape %ce-run text (Str8 length text) esc))
     (Str8 sub 0 (rest r) (first r))))
-(write (list (%ce-pass "~~x") (%ce-pass "a~b") (%ce-pass "~x") (%ce-pass "ab\n~~")
-             (guard (e (e msg)) (%ce-pass "ls\n~."))))
+(write (list (%ce-pass "~~x" 126) (%ce-pass "a~b" 126) (%ce-pass "~x" 126) (%ce-pass "ab\n~~" 126)
+             (guard (e (e msg)) (%ce-pass "ls\n~." 126))
+             (%ce-pass "!!x\n~." 33) (guard (e (e msg)) (%ce-pass "ls\n!." 33))))
 ```
 ---
-    ("~x" "a~b" "~x" "ab\n~" "escape")
+    ("~x" "a~b" "~x" "ab\n~" "escape" "!x\n~." "escape")

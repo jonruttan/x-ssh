@@ -276,7 +276,8 @@
 
 ; What is wrong with lines, as messages: a keyword OpenSSH does not know,
 ; unless ignore patterns match it, and one this program does not serve
-; given other than the value that leaves it off.
+; given other than the value that leaves it off, or one of the values it
+; serves when the refusal lists them.
 (def ssh-config-faults
   (fn (_ lines known refused ignore)
     (List flat-map
@@ -288,7 +289,10 @@
             (if (if (null? ignore) #f (ssh-config-patterns? ignore kw)) ()
               (list (Str8 append (List ref 2 l) ": Bad configuration option: " kw))))
           ((null? r) ())
-          ((if (null? (first (rest l))) #f (str=? (Str8 downcase (first (first (rest l)))) (rest r))) ())
+          ((if (null? (first (rest l))) #f
+             ((fn (_ v) (if (pair? (rest r)) (List any? (fn (_ ok) (str=? ok v)) (rest r)) (str=? v (rest r))))
+              (Str8 downcase (first (first (rest l))))))
+            ())
           (#t (list (Str8 append (List ref 2 l) ": " kw " is not served")))))
       lines)))
 ; Every keyword sshd_config(5) knows, lowercased, the deprecated ones too.

@@ -14,11 +14,54 @@
 
 (import x/sys/file)
 (import x/sys/posix)
-(import x/core/doors ffi-dlopen ffi-dlsym ptr-call ptr-ref str-make str->ptr)
+(import x/platform/syscall os-darwin?)
+(import x/core/doors ffi-dlopen ffi-dlsym ptr-call ptr-ref ptr-set! str-make str->ptr str-byte-ref char->int int/ int%)
 
 (def %num (fn (_ n) ((prim-ref (lit convert) (lit to)) n (Type named STRING) 10)))
 
-(def %c-socketpair (ffi-dlsym (ffi-dlopen () 1) "socketpair"))
+(def %libc (ffi-dlopen () 1))
+(def %c-socketpair (ffi-dlsym %libc "socketpair"))
+(def %c-socket (ffi-dlsym %libc "socket"))
+(def %c-bind (ffi-dlsym %libc "bind"))
+(def %c-connect (ffi-dlsym %libc "connect"))
+(def %c-close (ffi-dlsym %libc "close"))
+
+; A dotted quad's four numbers.
+(def %quad
+  (fn (_ q)
+    (List map (fn (_ t) ((fn (self i n) (if (= i (Str8 length t)) n (self (+ i 1) (+ (* n 10) (- (char->int (str-byte-ref t i)) 48))))) 0 0))
+      (Str8 split "." q))))
+
+; An IPv4 socket address in a GC-owned region, as the system lays it
+; out: Darwin leads with its length and a one-byte family, Linux with a
+; two-byte family; the port is in network order.
+(def %sockaddr
+  (fn (_ quad port)
+    (def s (str-make 16))
+    (def p (str->ptr s))
+    ((fn (self i) (when (< i 16) (ptr-set! p i 0 1) (self (+ i 1)))) 0)
+    (if os-darwin? (do (ptr-set! p 0 16 1) (ptr-set! p 1 2 1)) (ptr-set! p 0 2 1))
+    (ptr-set! p 2 (int/ port 256) 1) (ptr-set! p 3 (int% port 256) 1)
+    ((fn (self os i) (unless (null? os) (ptr-set! p i (first os) 1) (self (rest os) (+ i 1)))) (%quad quad) 4)
+    s))
+
+; A TCP connection to quad:port, from the local address bind when it is
+; not (), as BindAddress makes one: the descriptor, or a label 'io Err
+; whose message is the call's and the system's words, `bind: ...` or
+; `connect: ...`.
+(def ssh-sys-connect
+  (fn (_ quad port bind)
+    (def fd (Sys %sign-fold (ptr-call %c-socket 2 1 0)))
+    (when (< fd 0) (error (Err from-errno (Err errno-of fd) 'socket port)))
+    (def fail (fn (_ r op) (def en (Err errno-of r)) (ptr-call %c-close fd) (error (Err from-errno en op port))))
+    (unless (null? bind)
+      (do (def local (%sockaddr bind 0))
+          (def r (Sys %sign-fold (ptr-call %c-bind fd (str->ptr local) 16)))
+          (when (< r 0) (fail r 'bind))))
+    (def remote (%sockaddr quad port))
+    (def r (Sys %sign-fold (ptr-call %c-connect fd (str->ptr remote) 16)))
+    (when (< r 0) (fail r 'connect))
+    fd))
 
 ; A connected pair of unix-domain stream sockets, (A . B), or () when
 ; the system refuses one.  AF_UNIX and SOCK_STREAM are 1 on Linux and
@@ -73,8 +116,23 @@
     (Sys close (first a)) (Sys close (rest b))
     (list pid (rest a) (first b))))
 
+; PROGRAM run with nothing on its standard input: (STATUS . OUTPUT), its
+; exit status and what it wrote to its standard output.
+(def ssh-sys-output
+  (fn (_ argv)
+    (def p (ssh-sys-spawn argv))
+    (Sys close (List ref 1 p))
+    (def buf (str-make 4096))
+    (def text
+      ((fn (self acc)
+         (def n (File read (List ref 2 p) buf 4096))
+         (if (< n 1) (Str8 join "" (List reverse acc)) (self (pair (Str8 sub 0 n buf) acc))))
+       ()))
+    (Sys close (List ref 2 p))
+    (pair (Sys wait (first p)) text)))
+
 ; A failed call's message after its "OP: ", the system's own words.
 (def ssh-sys-after-op
   (fn (_ m) (def cut (Str8 index-of ": " m)) (if (null? cut) m (Str8 sub (+ cut 2) (- (Str8 length m) cut 2) m))))
 
-(provide ssh/sys ssh-sys-me ssh-sys-spawn ssh-sys-proxy ssh-sys-after-op)
+(provide ssh/sys ssh-sys-me ssh-sys-spawn ssh-sys-proxy ssh-sys-connect ssh-sys-output ssh-sys-after-op)

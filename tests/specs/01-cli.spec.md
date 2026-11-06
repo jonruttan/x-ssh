@@ -80,7 +80,7 @@ Run 'x -l ssh -- <program>' with one of these programs:
                                     "-o" "ServerAliveInterval=5" "-v" "you@host")))))
 ```
 ---
-    ('exec "host" () ("User \"me\"" "Port 2222" "IdentityFile \"k\"" "LocalForward 8080:h:80" "RemoteForward 9:h:9" "GatewayPorts yes" "SessionType none" "LogLevel DEBUG1" "ServerAliveInterval=5" "User \"you\"") () () #f)
+    ('exec "host" () ("User \"me\"" "Port 2222" "IdentityFile \"k\"" "LocalForward 8080:h:80" "RemoteForward 9:h:9" "GatewayPorts yes" "SessionType none" "LogLevel DEBUG1" "ServerAliveInterval=5" "User \"you\"") () () #f () #f)
 
 ### the command is the operands after the destination, joined
 
@@ -96,7 +96,7 @@ Run 'x -l ssh -- <program>' with one of these programs:
 (write (first (rest (ssh-plan (list "ssh" "-F" "none" "-W" "git.example:9418" "-G" "ssh://git@example.org:2200")))))
 ```
 ---
-    ('exec "example.org" () ("User \"git\"" "Port 2200") "none" "git.example:9418" #t)
+    ('exec "example.org" () ("User \"git\"" "Port 2200") "none" "git.example:9418" #t () #f)
 
 ### no destination is the usage, status 255
 
@@ -112,7 +112,7 @@ Run 'x -l ssh -- <program>' with one of these programs:
 (write (first (rest (ssh-plan (list "ssh" "-s" "h" "sftp")))))
 ```
 ---
-    ('exec "h" "sftp" ("SessionType subsystem") () () #f)
+    ('exec "h" "sftp" ("SessionType subsystem") () () #f () #f)
 
 ### -A and -a forward the agent and do not
 
@@ -139,6 +139,23 @@ Run 'x -l ssh -- <program>' with one of these programs:
 ```
 ---
     (("Only a single -J option is permitted (use commas to separate multiple jump hops)\r\n" 255) ("Cannot specify -J with ProxyCommand\r\n" 255) ("Invalid -J argument\r\n" 255) ("Bad dynamic forwarding specification 'bad'\n" 255))
+
+### -b, -e and -f are BindAddress, EscapeChar and ForkAfterAuthentication, -f with StdinNull; -E's file and -y ride along
+
+```ssh
+(write (first (rest (ssh-plan (list "ssh" "-b" "127.0.0.1" "-e" "^A" "-f" "-E" "log" "-y" "h" "true")))))
+```
+---
+    ('exec "h" "true" ("BindAddress \"127.0.0.1\"" "EscapeChar \"^A\"" "ForkAfterAuthentication yes" "StdinNull yes") () () #f "log" #t)
+
+### -Q answers what is served, before any destination; a query it does not know and a bad -e refused as OpenSSH refuses them
+
+```ssh
+(write (List map (fn (_ l) (rest (ssh-plan l)))
+  (list (list "ssh" "-Q" "cipher-auth") (list "ssh" "-Q" "nope") (list "ssh" "-e" "ab" "h"))))
+```
+---
+    ((('query ("chacha20-poly1305@openssh.com" "aes128-gcm@openssh.com" "aes256-gcm@openssh.com")) 0) ("Unsupported query \"nope\"\r\n" 255) ("Bad escape character 'ab'.\n" 255))
 
 ## the server
 

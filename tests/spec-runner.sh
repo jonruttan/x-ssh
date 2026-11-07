@@ -47,22 +47,14 @@ SPEC_PATH="${SPEC_PATH:-$BUNDLE/tests/specs}"
 #
 # The image writer is a checkout tool: an installed tree has none, and a library
 # holding words no image can carry is refused; either way the suite boots from
-# source and says so. The `Ansi repl-own` probe checks for a specific platform
-# fix (x-lang#655) rather than a version. IMG=0 runs the same suite from source,
-# one file per process, for when the image is the suspect.
+# source and says so. IMG=0 runs the same suite from source, one file per
+# process, for when the image is the suspect.
 if [ "${IMG:-1}" = 0 ]; then
 	SPEC_BATCH="${SPEC_BATCH:-1}"; export SPEC_BATCH
 else
 	_builder="$X_ROOT/tools/dev/image-build.sh"
-	_probe="${TMPDIR:-/tmp}/x-imgprobe.$$.x"
-	printf '(Ansi repl-own)\n' > "$_probe"
-	_keeps_printer=0
-	"$X" -f "$_probe" >/dev/null 2>&1 && _keeps_printer=1
-	rm -f "$_probe"
 	if [ ! -f "$_builder" ]; then
 		echo "x-ssh: no image writer at $_builder (not a checkout) -- the suite boots from source" >&2
-	elif [ "$_keeps_printer" = 0 ]; then
-		echo "x-ssh: the platform moves a REPL printer it does not own (x-lang#655) -- the suite boots from source" >&2
 	elif X_BIN="$X_BIN" sh "$_builder" "$LANG_LIB" "$BUNDLE/tests/lib/.images" "$BUNDLE/ssh"; then
 		X_IMG_DIR="$BUNDLE/tests/lib/.images"; export X_IMG_DIR
 	else

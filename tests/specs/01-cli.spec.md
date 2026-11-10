@@ -148,6 +148,15 @@ Run 'x -l ssh -- <program>' with one of these programs:
 ---
     ('exec "h" "true" ("BindAddress \"127.0.0.1\"" "EscapeChar \"^A\"" "ForkAfterAuthentication yes" "StdinNull yes") () () #f "log" #t)
 
+### -4 and -6 are AddressFamily inet and inet6, the last given winning
+
+```ssh
+(write (List map (fn (_ a) (List ref 3 (first (rest (ssh-plan a)))))
+         (list (list "ssh" "-4" "h") (list "ssh" "-46" "h") (list "ssh" "-6" "-4" "h") (list "ssh" "h"))))
+```
+---
+    (("AddressFamily inet") ("AddressFamily inet6") ("AddressFamily inet") ())
+
 ### -Q answers what is served, before any destination; a query it does not know and a bad -e refused as OpenSSH refuses them
 
 ```ssh
@@ -195,6 +204,14 @@ Run 'x -l ssh -- <program>' with one of these programs:
 ---
     (('to ("dir") #f #f) ('from ("a" "b") #f #t) (#f #t))
 
+### -3 is taken, the copy going through this host as it does anyway; -4 and -6 pass to ssh in the order given
+
+```ssh
+(write (List ref 3 (first (rest (ssh-plan (list "scp" "-3" "-6" "-4" "a" "h:b"))))))
+```
+---
+    ("-x" "-oPermitLocalCommand=no" "-oClearAllForwardings=yes" "-oRemoteCommand=none" "-oRequestTTY=no" "-oForwardAgent=no" "-6" "-4")
+
 ## sftp
 
 ### a session: ssh's argv, OpenSSH's set first, ending in the subsystem; the path, the batch, -p -r -q, -B and -R
@@ -204,6 +221,14 @@ Run 'x -l ssh -- <program>' with one of these programs:
 ```
 ---
     ('sftp ('client ("ssh" "-x" "-oPermitLocalCommand=no" "-oClearAllForwardings=yes" "-oForwardAgent=no" "-v" "-o" "BatchMode=yes" "-p" "2222" "-i" "k" "-l" "me" "-s" "--" "h" "sftp") "dir" "cmds" (#t #t #f) 65536 16) 0)
+
+### -4 and -6 pass to ssh
+
+```ssh
+(write (List ref 1 (first (rest (ssh-plan (list "sftp" "-4" "h"))))))
+```
+---
+    ("ssh" "-x" "-oPermitLocalCommand=no" "-oClearAllForwardings=yes" "-oForwardAgent=no" "-4" "-s" "--" "h" "sftp")
 
 ### -D runs a server directly; -S names the ssh program and -s the subsystem; no destination is the usage
 

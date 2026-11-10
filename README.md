@@ -50,7 +50,8 @@ nistp521), for host keys and user keys, at either end.
   `-N` SessionType none, `-s` SessionType
   subsystem (the command its name), `-n` StdinNull, `-A` and `-a`
   ForwardAgent,
-  `-q` and `-v` LogLevel, `-c` Ciphers, `-m` MACs, `-b` BindAddress, `-e`
+  `-q` and `-v` LogLevel, `-c` Ciphers, `-m` MACs, `-4` and `-6`
+  AddressFamily, `-b` BindAddress, `-e`
   EscapeChar, `-f` ForkAfterAuthentication (and StdinNull: once
   authenticated the connection goes on in the background); `-E` appends
   the log to a file and `-y` sends it to the system log; `-Q` prints the
@@ -136,7 +137,7 @@ nistp521), for host keys and user keys, at either end.
 - `scp`: files to and from a host, over SFTP by default, as OpenSSH's
   scp (`-s`), or in the original protocol (`-O`).  As the client it
   spawns the ssh program (`-S`, default `ssh`) with OpenSSH's options and
-  passes on `-P`, `-i`, `-o`, `-F` and `-v`, `-r` walking directories
+  passes on `-P`, `-i`, `-o`, `-F`, `-v`, `-4` and `-6`, `-r` walking directories
   and `-p` sending times; a copy between two remote hosts is carried
   through this one (`-3`, the default).  Over SFTP it asks for the sftp
   subsystem and says each failure in OpenSSH's words.  As the remote end
@@ -144,7 +145,7 @@ nistp521), for host keys and user keys, at either end.
   scp without `-O` reaches the SFTP server.
 - `sftp`: SFTP version 3 from the client's end, as OpenSSH's sftp: the
   ssh program (`-S`, default `ssh`) spawned with OpenSSH's options and
-  `-P`, `-i`, `-o`, `-F`, `-v` passed on, its subsystem `-s` (default
+  `-P`, `-i`, `-o`, `-F`, `-v`, `-4`, `-6` passed on, its subsystem `-s` (default
   `sftp`), or `-D`'s server run directly.  A destination is
   `[user@]host[:path]` or `sftp://[user@]host[:port][/path]`, a path to a
   file fetched.  Commands are read at the terminal or from `-b`'s file

@@ -53,7 +53,9 @@
             (Opts flag "-T" "Test the configuration and print the settings in force")
             %version-row))
     (%row (lit client) "ssh" "the client" "[options] destination [command]"
-      (list (Opts flag "-A" "Forward the agent, as ForwardAgent yes")
+      (list (Opts flag "-4" "Use IPv4 addresses only, as AddressFamily inet")
+            (Opts flag "-6" "Use IPv6 addresses only, as AddressFamily inet6 (none is served)")
+            (Opts flag "-A" "Forward the agent, as ForwardAgent yes")
             (Opts flag "-a" "Do not forward the agent, as ForwardAgent no")
             (Opts arg "-b" "bind_address" "Connect from this local address, as BindAddress")
             (Opts flag "-C" "Ask for compression (none is served)")
@@ -103,6 +105,8 @@
             (Opts flag "-y" "Print the public key of a private key file")))
     (%row (lit scp) "scp" "secure copy" "[options] source ... target"
       (list (Opts flag "-3" "Copies between two remote hosts through this one (the default)")
+            (Opts flag "-4" "Use IPv4 addresses only, passed to ssh")
+            (Opts flag "-6" "Use IPv6 addresses only, passed to ssh")
             (Opts arg "-F" "ssh_config" "The configuration file, passed to ssh")
             (Opts arg "-i" "identity_file" "The key to authenticate with, passed to ssh")
             (Opts flag "-O" "The original scp protocol, in place of SFTP")
@@ -118,7 +122,9 @@
             (Opts hidden (Opts flag "-t" "Receive files (the remote end)"))
             (Opts hidden (Opts flag "-f" "Send files (the remote end)"))))
     (%row (lit sftp) "sftp" "secure file transfer" "[options] destination"
-      (list (Opts arg "-B" "buffer_size" "Bytes a read or write asks for (default 32768)")
+      (list (Opts flag "-4" "Use IPv4 addresses only, passed to ssh")
+            (Opts flag "-6" "Use IPv6 addresses only, passed to ssh")
+            (Opts arg "-B" "buffer_size" "Bytes a read or write asks for (default 32768)")
             (Opts arg "-b" "batchfile" "Commands from batchfile, - for standard input; a failure ends it")
             (Opts arg "-D" "sftp_server_command" "Run this command as the server, in place of ssh")
             (Opts arg "-F" "ssh_config" "The configuration file, passed to ssh")
@@ -278,6 +284,18 @@
     (def colon (if url (Str8 index-of ":" hp) ()))
     (list user (if (null? colon) hp (Str8 sub 0 colon hp)) (if (null? colon) () (rest-of hp (+ colon 1))))))
 
+; -4 and -6 as given, in order: scp and sftp pass them to ssh, which
+; takes the last.
+(def %families
+  (fn (_ o)
+    (List filter (fn (_ f) (if (str=? f "-4") #t (str=? f "-6"))) (rest (Assoc entry (lit on) o)))))
+
+; The AddressFamily line the last of -4 and -6 stands for, or none.
+(def %family-line
+  (fn (_ given)
+    (if (null? given) ()
+      (list (if (str=? (List last given) "-4") "AddressFamily inet" "AddressFamily inet6")))))
+
 ; The client's line: (client (exec HOST COMMAND OPTIONS CONFIG STDIO
 ; PRINT LOG SYSLOG) 0), OPTIONS the configuration lines its flags stand
 ; for, then -o's, then the destination's user and port; COMMAND () for
@@ -318,6 +336,7 @@
                         (List map (fn (_ f) (Str8 append "RemoteForward " f)) (Opts values o "-R"))
                         (List map (fn (_ f) (Str8 append "DynamicForward " (q f))) (Opts values o "-D"))
                         (List map (fn (_ j) (Str8 append "ProxyJump " (q j))) jumps)
+                        (%family-line (%families o))
                         (List map (fn (_ b) (Str8 append "BindAddress " (q b))) (Opts values o "-b"))
                         (List map (fn (_ e) (Str8 append "EscapeChar " (q e))) (Opts values o "-e"))
                         (if (Opts on? o "-f") (list "ForkAfterAuthentication yes") ())
@@ -425,6 +444,7 @@
                     (list (if (Opts on? o "-S") (Opts value o "-S") "ssh")
                           "-x" "-oPermitLocalCommand=no" "-oClearAllForwardings=yes" "-oForwardAgent=no")
                     (if (Opts on? o "-v") (list "-v") ())
+                    (%families o)
                     (if (Opts on? o "-F") (list "-F" (Opts value o "-F")) ())
                     (List flat-map (fn (_ v) (list "-o" v)) (Opts values o "-o"))
                     (if (Opts on? o "-P") (list "-p" (Opts value o "-P")) (if (null? (List ref 2 dest)) () (list "-p" (List ref 2 dest))))
@@ -458,6 +478,7 @@
                         (list "-x" "-oPermitLocalCommand=no" "-oClearAllForwardings=yes" "-oRemoteCommand=none"
                               "-oRequestTTY=no" "-oForwardAgent=no")
                         (if (Opts on? o "-v") (list "-v") ())
+                        (%families o)
                         (if (Opts on? o "-F") (list "-F" (Opts value o "-F")) ())
                         (List flat-map (fn (_ v) (list "-o" v)) (Opts values o "-o"))
                         (if (Opts on? o "-P") (list "-p" (Opts value o "-P")) ())

@@ -1,7 +1,9 @@
 # x-ssh
 
-SSH on x-lang, as a lang bundle: OpenSSH's client, server and key tool,
-scp, SFTP's client and server, and the authentication agent.
+SSH on [x-lang](https://github.com/jonruttan/x-lang), as a lang bundle:
+OpenSSH's client, server and key tool, scp, SFTP's client and server, and
+the authentication agent.  It has had no independent review; see
+[Security](#security).
 
     x -l ssh -- PROGRAM [ARGS]
 
@@ -187,7 +189,40 @@ shadow file and a known password, and a root server's other users, run as
 root in a container built from `tests/linux/Containerfile` at the declared
 release, with Dropbear's and OpenSSH's clients as the oracles.
 
+## Security
+
+x-ssh has had no independent review.  Its tests show that it and
+OpenSSH or Dropbear agree with each other, which is not evidence about a
+peer that does not follow the protocol.  It is for a lab network, a
+container or x-os; where a connection has to be relied on, use OpenSSH.
+
+- **Timing.**  The ciphers, digests, key exchange and signatures are
+  x-lang's codecs (`lib/x/codec`), and their arithmetic is not
+  constant-time: `x25519.x`, `ed25519.x` and `ecdsa.x` say so of
+  themselves, and no claim is made for RSA.  The ChaCha20-Poly1305 tag is
+  compared over every byte.
+- **Key exchange.**  One exchange a connection, curve25519-sha256.
+  There is no second exchange, so a connection keeps its first keys
+  however long it lasts or however much it carries.  The strict key
+  exchange extension (`kex-strict-c-v00@openssh.com`,
+  `kex-strict-s-v00@openssh.com`) is not offered.
+- **The server.**  A connection is authenticated in the process that
+  then becomes the user (`initgroups`, `setgid`, `setuid`); there is no
+  privilege separation.  PermitRootLogin defaults to
+  `prohibit-password` and MaxAuthTries to 6, as OpenSSH's do.  A
+  password is checked against the passwd or shadow entry with x-lang's
+  `Crypt`.
+- **The client.**  A server's key is checked against known_hosts as
+  StrictHostKeyChecking says, and a changed key is always refused.
+- **Random bytes** are read from `/dev/urandom`.
+- **Not served:** certificates, security-key (`sk-`) key types,
+  keyboard-interactive, hostbased and GSSAPI authentication,
+  compression, and IPv6.
+
 ## Install and test
+
+It needs [x-lang](https://github.com/jonruttan/x-lang) at the release
+`lang.xon` declares.
 
     make install          # into <share>/langs/ssh
     make test             # the spec suite

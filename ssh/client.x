@@ -96,7 +96,7 @@
 ; What ssh_config may say that this client does not do: refused unless
 ; given the value that leaves it off, or one of the values served.
 (def %refused
-  (list (pair "tunnel" "no") (pair "permitremoteopen" "any") (pair "addressfamily" (list "any" "inet"))))
+  (list (pair "tunnel" "no") (pair "addressfamily" (list "any" "inet"))))
 
 ; An escape character, -e's or EscapeChar's: a character, ^X for its
 ; control character, or none -- as the character's number, none, or ()
@@ -163,19 +163,46 @@
 ; [bind_address:]port:host:hostport, the command line's -L shape, or the
 ; file's `[bind_address:]port host:hostport`.  No address is localhost,
 ; or every interface under GatewayPorts; `*` or an empty one is every
-; interface, ().
+; interface, ().  A RemoteForward given only `[bind_address:]port`
+; (socks? true) is a remote dynamic one, (ADDRESS PORT () 0): its
+; connections say where they go by SOCKS.
 (def %forward
-  (fn (_ l gateway what)
+  (fn (_ l gateway what socks?)
     (def spec (Str8 join ":" (first (rest l))))
     (def parts (Str8 split ":" spec))
     (def n (List length parts))
     (def lport (if (if (= n 3) #t (= n 4)) (ssh-config-int-or-nil (List ref (- n 3) parts)) ()))
     (def rport (if (if (= n 3) #t (= n 4)) (ssh-config-int-or-nil (List ref (- n 1) parts)) ()))
     (def given (if (= n 4) (first parts) #f))
-    (if (if (null? lport) #t (null? rport))
-      (ssh-config-bad l (Str8 append what " '" spec "'"))
-      (list (match ((not given) (if gateway () "localhost")) ((if (str=? given "*") #t (str=? given "")) ()) (#t given))
-            lport (List ref (- n 2) parts) rport))))
+    (def dynamic (if (if socks? (= (List length (first (rest l))) 1) #f) (ssh-client-dynamic spec) ()))
+    (def bind (fn (_ given) (match ((not given) (if gateway () "localhost")) ((if (str=? given "*") #t (str=? given "")) ()) (#t given))))
+    (match
+      ((not (null? dynamic)) (list (bind (if (null? (first dynamic)) #f (first dynamic))) (List ref 1 dynamic) () 0))
+      ((if (null? lport) #t (null? rport)) (ssh-config-bad l (Str8 append what " '" spec "'")))
+      (#t (list (bind given) lport (List ref (- n 2) parts) rport)))))
+
+; PermitRemoteOpen as (TEXT . OPEN): TEXT as written, for -G, and OPEN
+; () for any, none, or (HOST PORT) each, PORT () for `*`; any and none
+; stand alone.
+(def %remote-open
+  (fn (_ l)
+    (def bad (fn (_) (ssh-config-bad l "bad port number in permitremoteopen")))
+    (if (null? l) (pair "any" ())
+      (do (def args (first (rest l)))
+          (def word (List find (fn (_ a) (if (str=? (Str8 downcase a) "any") #t (str=? (Str8 downcase a) "none"))) args))
+          (match
+            ((if (null? word) #f (> (List length args) 1))
+              (ssh-config-bad l (Str8 append "keyword permitremoteopen \"" word "\" argument must appear alone.")))
+            ((not (null? word)) (pair (Str8 join " " args) (if (str=? (Str8 downcase word) "any") () (lit none))))
+            (#t (pair (Str8 join " " args)
+                      (List map (fn (_ a)
+                                  (def hp (%host-port a))
+                                  (def p (if (null? hp) () (List ref 1 hp)))
+                                  (match ((null? p) (bad))
+                                         ((str=? p "*") (list (first hp) ()))
+                                         ((null? (%port-of p)) (bad))
+                                         (#t (list (first hp) (%port-of p)))))
+                        args))))))))
 
 ; A port's digits as a number from 1 to 65535, or ().
 (def %port-of
@@ -275,7 +302,7 @@
         (if (if (= (List length l) 1) (str=? (Str8 downcase (first l)) "none") #f) () (List map path l))))
     (def gateway (ssh-config-yes? lines "gatewayports" #f))
     (def clear (ssh-config-yes? lines "clearallforwardings" #f))
-    (def forwards (fn (_ kw what) (if clear () (List map (fn (_ l) (%forward l gateway what)) (List filter (fn (_ l) (str=? (first l) kw)) lines)))))
+    (def forwards (fn (_ kw what) (if clear () (List map (fn (_ l) (%forward l gateway what (str=? kw "remoteforward"))) (List filter (fn (_ l) (str=? (first l) kw)) lines)))))
     (def session (ssh-config-choice lines "sessiontype" (list "default" "none" "subsystem") "default"))
     ; ProxyCommand or ProxyJump, whichever is met first holding, `none`
     ; for neither
@@ -336,6 +363,7 @@
           (pair (lit gateway) gateway)
           (pair (lit forwards) (forwards "localforward" "Bad local forwarding specification"))
           (pair (lit remotes) (forwards "remoteforward" "Bad remote forwarding specification"))
+          (pair (lit remote-open) (%remote-open (ssh-config-line lines "permitremoteopen")))
           (pair (lit sendenv) (List flat-map (fn (_ a) a) (ssh-config-all lines "sendenv")))
           (pair (lit setenv) (List flat-map (fn (_ a) a) (ssh-config-all lines "setenv")))
           (pair (lit level) (ssh-config-choice lines "loglevel" (list "quiet" "fatal" "error" "info" "verbose" "debug" "debug1" "debug2" "debug3") "info"))
@@ -351,7 +379,7 @@
   (fn (_ s)
     (def yn (fn (_ b) (if b "yes" "no")))
     (def fwd (fn (_ f) (Str8 append (if (null? (first f)) "*" (first f)) ":" (%num (List ref 1 f)) " "
-                                     (List ref 2 f) ":" (%num (List ref 3 f)))))
+                                     (if (null? (List ref 2 f)) "socks" (List ref 2 f)) ":" (%num (List ref 3 f)))))
     (def limits (%get s (lit limits)))
     (Str8 join ""
       (List map (fn (_ l) (Str8 append l "\n"))
@@ -374,6 +402,7 @@
                 (Str8 append "gatewayports " (yn (%get s (lit gateway)))))
           (List map (fn (_ f) (Str8 append "localforward " (fwd f))) (%get s (lit forwards)))
           (List map (fn (_ f) (Str8 append "remoteforward " (fwd f))) (%get s (lit remotes)))
+          (list (Str8 append "permitremoteopen " (first (%get s (lit remote-open)))))
           (List map (fn (_ d) (Str8 append "dynamicforward " (if (null? (first d)) "" (Str8 append "[" (first d) "]:")) (%num (List ref 1 d))))
             (%get s (lit dynamics)))
           (if (null? (%get s (lit proxy-command))) () (list (Str8 append "proxycommand " (%get s (lit proxy-command)))))
@@ -817,7 +846,8 @@
                             (%get s (lit limits))
                             (%environment s)
                             (if tty? (list term (fn (_) (Term window %stdin)) modes (%get s (lit escape))) ())
-                            (%get s (lit forward-agent))))))
+                            (%get s (lit forward-agent))
+                            (rest (%get s (lit remote-open)))))))
                     (unless (null? saved) (Term restore! %stdin saved))
                     (guard (e2 ()) (ssh-disconnect! c))
                     (Socket close fd)

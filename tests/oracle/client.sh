@@ -47,6 +47,10 @@
 #            reach its own ssh port, two in turn reading its version line
 #   dynamic  -N -D: a SOCKS proxy here, nc asking it by SOCKS 5 and SOCKS
 #            4 for the Dropbear's ssh port, each reading its version line
+#   rdynamic -N -R port: the Dropbear listens and this client serves its
+#            connections' SOCKS, 5 and 4, for the Dropbear's ssh port;
+#            the same port by another name, which PermitRemoteOpen
+#            denies, reads nothing
 #   proxies  ProxyCommand through nc; -J through two hops of the Dropbear,
 #            each hop x-ssh as `ssh` on the path with -F's file
 #   flags    -b from the loopback; -E's file holding a refused
@@ -436,6 +440,27 @@ if [ "$five" = "SSH-2.0-dropbear" ] && [ "$four" = "SSH-2.0-dropbear" ]; then
 	echo "ok: dynamic -- -D serves SOCKS 5 and SOCKS 4, each connection carried through the Dropbear"
 else
 	fail "dynamic: read '$five' by SOCKS 5, '$four' by SOCKS 4"
+	cat "$fx/fwd.err" >&2
+fi
+
+# rdynamic: -N -R given only a port, the Dropbear listening for SOCKS
+# that this client serves: nc asks through it by SOCKS 5 and SOCKS 4 for
+# the Dropbear's ssh port as 127.0.0.1, which PermitRemoteOpen allows, and
+# as localhost, which it does not and which reads nothing
+rdport=$((port + 50))
+xssh -N -R "$rdport" -o "PermitRemoteOpen=127.0.0.1:$port" 127.0.0.1 < /dev/null 2> "$fx/fwd.err" &
+fwdpid=$!
+i=0
+while ! nc -z 127.0.0.1 "$rdport" 2>/dev/null && [ $i -lt 60 ]; do i=$((i + 1)); sleep 1; done
+five=$(nc -w 3 -X 5 -x "127.0.0.1:$rdport" 127.0.0.1 "$port" < /dev/null 2>/dev/null | head -c 16)
+four=$(nc -w 3 -X 4 -x "127.0.0.1:$rdport" 127.0.0.1 "$port" < /dev/null 2>/dev/null | head -c 16)
+denied=$(nc -w 3 -X 5 -x "127.0.0.1:$rdport" localhost "$port" < /dev/null 2>/dev/null | head -c 16)
+kill_tree $fwdpid
+fwdpid=
+if [ "$five" = "SSH-2.0-dropbear" ] && [ "$four" = "SSH-2.0-dropbear" ] && [ -z "$denied" ]; then
+	echo "ok: rdynamic -- -R port serves SOCKS 5 and SOCKS 4 at the Dropbear's end, PermitRemoteOpen holding"
+else
+	fail "rdynamic: read '$five' by SOCKS 5, '$four' by SOCKS 4, '$denied' where denied"
 	cat "$fx/fwd.err" >&2
 fi
 

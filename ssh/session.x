@@ -15,7 +15,8 @@
 ; the host and port its SOCKS request names -- and each -R forward is
 ; asked of the server by a tcpip-forward global request, the connections
 ; it then opens as forwarded-tcpip channels connected here to the host
-; and port the forward names; a forward's bytes are pumped each way until
+; and port the forward names, or, for one given only a port, to the host
+; and port each one's SOCKS request names; a forward's bytes are pumped each way until
 ; both ends close.  The channels are a table keyed by our channel
 ; number, which every message from the server names first; one loop
 ; waits on the socket, the listeners, and each channel's input while
@@ -68,10 +69,11 @@
 ; ended, 6 the exit status, 7 whether the server has closed the channel,
 ; 8 what takes its data, 9 what takes its extended data or (), 10 its
 ; kind, session or forward, 11 a forward's connection, 12 the session's
-; command, 13 the bytes taken from the server not yet given back.
+; command, 13 the bytes taken from the server not yet given back, 14
+; whether we have closed it first.
 (def %OURS 1) (def %SERVER 2) (def %WINDOW 3) (def %MAX 4) (def %INPUT 5) (def %STATUS 6)
 (def %CLOSED 7) (def %OUT 8) (def %ERR 9) (def %KIND 10) (def %FD 11) (def %COMMAND 12)
-(def %OWED 13)
+(def %OWED 13) (def %SHUT 14)
 (def %ch (fn (_ ch i) (obj-ref ch i)))
 (def %ch! (fn (_ ch i v) (obj-set! ch i v)))
 
@@ -86,10 +88,12 @@
 ; last sent, 11 where the escape character stands: 1 at a line's start,
 ; 2 just after the escape character there, 0 elsewhere, 12 the agent's
 ; socket forwarded, or (), 13 the connections on dynamic listeners yet
-; to say where they go, as (FD BYTES GREETED).
+; to say where they go, as (FD BYTES GREETED), 14 where a remote
+; forward's SOCKS requests may go: () anywhere, none nowhere, or (HOST
+; PORT) each, HOST "*" any host and PORT () any port.
 (def %CHANNELS 1) (def %NEXT 2) (def %MOVED 3) (def %LISTENERS 4) (def %SESSION 5)
 (def %REMOTES 6) (def %UNANSWERED 7) (def %ENV 8) (def %TTY 9) (def %SIZE 10) (def %ESC 11) (def %AGENT 12)
-(def %SOCKS 13)
+(def %SOCKS 13) (def %OPEN 14)
 (def %rn (fn (_ run i) (obj-ref run i)))
 (def %rn! (fn (_ run i v) (obj-set! run i v)))
 
@@ -115,10 +119,10 @@
 ; A channel added to the table, numbered next.
 (def %channel!
   (fn (_ run kind input out err fd command)
-    (def ch (Vector make 13 ()))
+    (def ch (Vector make 14 ()))
     (%ch! ch %OURS (%rn run %NEXT))
     (%rn! run %NEXT (+ (%rn run %NEXT) 1))
-    (%ch! ch %WINDOW 0) (%ch! ch %MAX 32768) (%ch! ch %INPUT input) (%ch! ch %CLOSED #f) (%ch! ch %OWED 0)
+    (%ch! ch %WINDOW 0) (%ch! ch %MAX 32768) (%ch! ch %INPUT input) (%ch! ch %CLOSED #f) (%ch! ch %OWED 0) (%ch! ch %SHUT #f)
     (%ch! ch %OUT out) (%ch! ch %ERR err) (%ch! ch %KIND kind) (%ch! ch %FD fd) (%ch! ch %COMMAND command)
     (%rn! run %CHANNELS (List append (%rn run %CHANNELS) (list ch)))
     ch))
@@ -201,8 +205,9 @@
 (def %hex (fn (_ n) ((prim-ref (lit convert) (lit to)) n (Type named STRING) 16)))
 
 ; What a request so far calls for: (more N) bytes, (greet) for SOCKS 5's
-; greeting answered, (done HOST PORT REPLY) with the reply's bytes, or
-; (bad) to close the connection.
+; greeting answered, (done HOST PORT REPLY USED) with the reply's bytes
+; and how many of bs the greeting and request took, or (bad) to close
+; the connection.
 (def %socks
   (fn (_ bs greeted)
     (def n (List length bs))
@@ -224,9 +229,9 @@
                 (def reply (list 0 90 0 0 0 0 0 0))
                 (match
                   ((null? user-end) (list (lit more) 1))
-                  ((not named) (list (lit done) (Str8 join "." (List map %num ip)) (port-at 2) reply))
+                  ((not named) (list (lit done) (Str8 join "." (List map %num ip)) (port-at 2) reply (+ user-end 1)))
                   ((null? host-end) (list (lit more) 1))
-                  (#t (list (lit done) (%bytes-text (%slice bs (+ user-end 1) (- host-end user-end 1))) (port-at 2) reply)))))))
+                  (#t (list (lit done) (%bytes-text (%slice bs (+ user-end 1) (- host-end user-end 1))) (port-at 2) reply (+ host-end 1))))))))
       ((= (at 0) 5)
         (if (< n 2) (list (lit more) (- 2 n))
           (do (def hdr (+ 2 (at 1)))
@@ -243,12 +248,12 @@
                       (match
                         ((null? size) (list (lit bad)))
                         ((< n (+ a size 2)) (list (lit more) (- (+ a size 2) n)))
-                        ((= atyp 1) (list (lit done) (Str8 join "." (List map %num (%slice bs a 4))) (port-at (+ a 4)) reply))
-                        ((= atyp 3) (list (lit done) (%bytes-text (%slice bs (+ a 1) (at a))) (port-at (+ a size)) reply))
+                        ((= atyp 1) (list (lit done) (Str8 join "." (List map %num (%slice bs a 4))) (port-at (+ a 4)) reply (+ a size 2)))
+                        ((= atyp 3) (list (lit done) (%bytes-text (%slice bs (+ a 1) (at a))) (port-at (+ a size)) reply (+ a size 2)))
                         (#t (list (lit done)
                                   (Str8 join ":" ((fn (self xs) (if (null? xs) () (pair (%hex (+ (* (first xs) 256) (first (rest xs)))) (self (rest (rest xs))))))
                                                   (%slice bs a 16)))
-                                  (port-at (+ a 16)) reply)))))))))
+                                  (port-at (+ a 16)) reply (+ a size 2))))))))))
       (#t (list (lit bad))))))
 
 ; A connection on a dynamic listener, waiting to say where it goes: (FD
@@ -314,6 +319,82 @@
     (%send c req)
     (%rn! run %UNANSWERED (List append (%rn run %UNANSWERED) (list remote)))))
 
+; --- RemoteForward without a destination: SOCKS at the server's end --------
+;
+; A remote forward given only a port is OpenSSH's remote dynamic
+; forward: each connection the server opens for it says where it goes by
+; SOCKS, as a -D listener's do, its request read from the channel's data.
+; Where PermitRemoteOpen allows it, the place is connected, the reply sent
+; and the channel a forward's like any; where it does not, or the
+; connect fails, the channel is closed with no reply, as OpenSSH closes
+; it.
+
+; Whether a SOCKS request for host and port may be connected.
+(def %open-allowed?
+  (fn (_ open host port)
+    (match ((null? open) #t)
+           ((eq? open (lit none)) #f)
+           (#t (List any? (fn (_ p) (if (if (str=? (first p) "*") #t (str=? (first p) host))
+                                       (if (null? (List ref 1 p)) #t (= (List ref 1 p) port))
+                                       #f))
+                 open)))))
+
+; Bytes, a list, sent as a channel's data.
+(def %channel-data!
+  (fn (_ c ch bs)
+    (def data (%packet-of %msg-channel-data))
+    (ssh-put-uint32 data (%ch ch %SERVER))
+    (ssh-put-string data (%bytes-text bs) 0 (List length bs))
+    (%send c data)
+    (%ch! ch %WINDOW (- (%ch ch %WINDOW) (List length bs)))))
+
+; Our close of a channel before the server's: sent once.
+(def %shut!
+  (fn (_ c ch)
+    (unless (%ch ch %SHUT)
+      (do (def cl (%packet-of %msg-channel-close))
+          (ssh-put-uint32 cl (%ch ch %SERVER))
+          (%send c cl)
+          (%ch! ch %SHUT #t)))))
+
+; A forward channel with no connection yet: its data is kept, the
+; request's bytes and whether SOCKS 5's greeting is answered, until the
+; request is whole; then it is connected or closed.  Bytes past the
+; request go to the connection.
+(def %socks-channel!
+  (fn (_ c run)
+    (def ch (%channel! run (lit forward) () () () () ()))
+    (def state (Vector make 2 ()))
+    (obj-set! state 2 #f)
+    (%ch! ch %OUT
+      (fn (_ buf start len)
+        (unless (%ch ch %SHUT)
+          (do (obj-set! state 1 (List append (obj-ref state 1)
+                                  ((fn (self i) (if (= i len) () (pair (%byte buf (+ start i)) (self (+ i 1))))) 0)))
+              ((fn (self)
+                 (def next (%socks (obj-ref state 1) (obj-ref state 2)))
+                 (match
+                   ((eq? (first next) (lit more)) ())
+                   ((eq? (first next) (lit bad)) (%shut! c ch))
+                   ((eq? (first next) (lit greet))
+                     (do (%channel-data! c ch (list 5 0)) (obj-set! state 2 #t) (self)))
+                   (#t
+                     (do (def host (List ref 1 next))
+                         (def port (List ref 2 next))
+                         (def fd (if (%open-allowed? (%rn run %OPEN) host port)
+                                   (guard (e ()) (Socket tcp-connect (%address host) port))
+                                   ()))
+                         (if (null? fd)
+                           (%shut! c ch)
+                           (do (def after (List drop (List ref 4 next) (obj-ref state 1)))
+                               (%channel-data! c ch (List ref 3 next))
+                               (%ch! ch %FD fd)
+                               (%ch! ch %INPUT fd)
+                               (%ch! ch %OUT (fn (_ b s n) (Socket send-run fd (ssh-copy b s n) n)))
+                               (unless (null? after)
+                                 (Socket send-run fd (%bytes-text after) (List length after))))))))))))))
+    ch))
+
 ; The server's answer to the oldest request still open: a refusal said
 ; as OpenSSH says it.
 (def %answered!
@@ -324,10 +405,11 @@
           (%rn! run %UNANSWERED (rest asked))
           (unless ok
             (%say (Str8 append "x-ssh: Remote TCP forward request failed (port " (%num (List ref 1 r))
-                              " -> " (List ref 2 r) ":" (%num (List ref 3 r)) ")\n")))))))
+                              " -> " (if (null? (List ref 2 r)) "socks" (List ref 2 r)) ":" (%num (List ref 3 r)) ")\n")))))))
 
 ; A channel the server opens: a forwarded-tcpip for a remote forward's
-; port, connected here to the forward's host and port, or an
+; port, connected here to the forward's host and port, or, for a forward
+; without one, confirmed to say where it goes by SOCKS; or an
 ; auth-agent@openssh.com, connected to the agent forwarded, and
 ; confirmed; any other, or a connect that fails, refused.
 (def %opened!
@@ -339,19 +421,21 @@
     (def agent? (if (str=? type "auth-agent@openssh.com") (not (null? (%rn run %AGENT))) #f))
     (def port (if (str=? type "forwarded-tcpip") (do (ssh-get-text in) (ssh-get-uint32 in)) ()))
     (def remote (if (null? port) () (List find (fn (_ r) (= (List ref 1 r) port)) (%rn run %REMOTES))))
+    (def socks? (if (null? remote) #f (null? (List ref 2 remote))))
     (def fd (match
               (agent? (guard (e ()) (Socket unix-connect (%rn run %AGENT))))
               ((null? remote) ())
+              (socks? ())
               (#t (guard (e ()) (Socket tcp-connect (%address (List ref 2 remote)) (List ref 3 remote))))))
     (def asked (if agent? #t (not (null? remote))))
-    (if (null? fd)
+    (if (if (null? fd) (not socks?) #f)
       (do (def no (%packet-of %msg-channel-open-failure))
           (ssh-put-uint32 no sender)
           (ssh-put-uint32 no (if asked 2 1))
           (ssh-put-text no (if asked "connect failed" (Str8 append "unrequested channel: " type)))
           (ssh-put-text no "")
           (%send c no))
-      (do (def ch (%forward-channel! run fd))
+      (do (def ch (if socks? (%socks-channel! c run) (%forward-channel! run fd)))
           (%ch! ch %SERVER sender) (%ch! ch %WINDOW window) (%ch! ch %MAX max)
           (def ok (%packet-of %msg-channel-open-confirmation))
           (ssh-put-uint32 ok sender)
@@ -446,9 +530,10 @@
 ; the channel dropped, a session marked closed for the loop's end.
 (def %close!
   (fn (_ c run ch)
-    (def cl (%packet-of %msg-channel-close))
-    (ssh-put-uint32 cl (%ch ch %SERVER))
-    (%send c cl)
+    (unless (%ch ch %SHUT)
+      (do (def cl (%packet-of %msg-channel-close))
+          (ssh-put-uint32 cl (%ch ch %SERVER))
+          (%send c cl)))
     (%ch! ch %CLOSED #t)
     (when (eq? (%ch ch %KIND) (lit forward))
       (do (guard (e ()) (Socket close (%ch ch %FD)))
@@ -589,21 +674,23 @@
 ; each forward (ADDRESS PORT HOST PORT) listened on, ADDRESS () for every
 ; one, its connections carried to HOST:PORT through the server; and each
 ; remote (ADDRESS PORT HOST PORT) asked of the server, ADDRESS () for
-; every one, the connections it opens carried to HOST:PORT from here;
+; every one, the connections it opens carried to HOST:PORT from here,
+; HOST () for SOCKS, where open allows (see %OPEN);
 ; and netcat (HOST . PORT) or (), -W's: a direct-tcpip channel to
 ; HOST:PORT whose two ways are input and on-out, in a session's place;
-; and agent, the agent socket forwarded to the session, or ().
+; agent, the agent socket forwarded to the session, or (); and open,
+; where a remote forward's SOCKS requests may go.
 ; Runs until the session channel closes, or, with no command, until the
 ; connection ends.  Answers the exit status, or () when the server gave
 ; none.
 (def ssh-session-run!
-  (fn (_ c command input on-out on-err forwards remotes netcat limits env tty agent)
-    (def run (Vector make 13 ()))
+  (fn (_ c command input on-out on-err forwards remotes netcat limits env tty agent open)
+    (def run (Vector make 14 ()))
     (ssh-clocks-start!)
     (%rn! run %CHANNELS ()) (%rn! run %NEXT 0) (%rn! run %MOVED 0)
     (%rn! run %REMOTES remotes) (%rn! run %UNANSWERED ()) (%rn! run %ENV env)
     (%rn! run %TTY tty) (%rn! run %SIZE (if (null? tty) () ((List ref 1 tty)))) (%rn! run %ESC 1) (%rn! run %AGENT agent)
-    (%rn! run %SOCKS ())
+    (%rn! run %SOCKS ()) (%rn! run %OPEN open)
     (%rn! run %LISTENERS
       (List map (fn (_ f) (list (if (null? (first f)) (Socket tcp-listen (List ref 1 f))
                                   (Socket tcp-listen-on (first f) (List ref 1 f)))

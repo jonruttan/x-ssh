@@ -65,7 +65,10 @@ nistp521), for host keys and user keys, at either end.
   command OpenSSH makes of it, `ssh` run to the last hop with `-W`, the
   hops before it its `-J`, `-F`'s file passed on.  DynamicForward is a
   SOCKS proxy, SOCKS 4, 4a and 5 without authentication, each connection
-  a channel to where it asks.  Served keywords: Hostname, Port, User,
+  a channel to where it asks; a RemoteForward (or `-R`) given only
+  `[bind_address:]port` is the same proxy at the server's end, each
+  connection the server opens asking by SOCKS where it goes, where
+  PermitRemoteOpen allows.  Served keywords: Hostname, Port, User,
   IdentityFile (`~/.ssh/id_rsa`, `id_ecdsa` and `id_ed25519` by default;
   OpenSSH's or Dropbear's key files, a key under a passphrase among
   them), IdentityAgent (SSH_AUTH_SOCK by default; the agent's keys
@@ -75,7 +78,7 @@ nistp521), for host keys and user keys, at either end.
   UserKnownHostsFile,
   GlobalKnownHostsFile, HostKeyAlias, BatchMode, PasswordAuthentication,
   PubkeyAuthentication, NumberOfPasswordPrompts, LocalForward,
-  RemoteForward, DynamicForward, GatewayPorts, ClearAllForwardings,
+  RemoteForward, DynamicForward, PermitRemoteOpen, GatewayPorts, ClearAllForwardings,
   ServerAliveInterval,
   ServerAliveCountMax, ChannelTimeout (`global=`), SendEnv, SetEnv,
   RemoteCommand, ProxyCommand, ProxyJump, SessionType, StdinNull,

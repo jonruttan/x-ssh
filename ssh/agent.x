@@ -38,6 +38,7 @@
 
 (import x/sys/file)
 (import x/sys/posix)
+(import x/sys/proc)
 (import x/sys/socket)
 (import x/sys/gc)
 (import x/codec/base64)
@@ -460,16 +461,6 @@
                                   "echo Agent pid " (%num pid) " killed;\n"))
               0)))))
 
-(def %setsid! (fn (_) ((prim-ref (lit ptr) (lit call)) ((prim-ref (lit ffi) (lit dlsym)) ((prim-ref (lit ffi) (lit dlopen)) () 1) "setsid"))))
-
-; The standard descriptors on /dev/null, as a daemon's are.
-(def %quiet!
-  (fn (_)
-    (def null (File open "/dev/null" (lit rdwr)))
-    (unless (< null 0)
-      (do (Sys dup2 null 0) (Sys dup2 null 1) (Sys dup2 null 2)
-          (when (> null 2) (File close null))))))
-
 ; The agent served until its end, its socket then removed; the status.
 (def %run-agent
   (fn (_ a lfd path parent loud)
@@ -508,7 +499,7 @@
                     (do (def parent (Sys getpid))
                         (def pid (Sys fork))
                         (if (= pid 0)
-                          (do (%setsid!) (Sys chdir "/") (%quiet!)
+                          (do (Sys setsid) (Sys chdir "/") (Proc quiet!)
                               (Sys exit (%run-agent a lfd full parent #f)))
                           (do (Socket close lfd)
                               (Sys setenv "SSH_AUTH_SOCK" path)
@@ -519,7 +510,7 @@
                   (#t
                     (do (def pid (Sys fork))
                         (if (= pid 0)
-                          (do (%setsid!) (Sys chdir "/") (%quiet!)
+                          (do (Sys setsid) (Sys chdir "/") (Proc quiet!)
                               (Sys exit (%run-agent a lfd full () #f)))
                           (do (%say 1 (%env-lines csh path pid pid)) 0)))))))))))
 

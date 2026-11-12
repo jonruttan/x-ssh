@@ -26,6 +26,7 @@
 (import x/sys/socket)
 (import x/sys/file)
 (import x/sys/posix)
+(import x/sys/proc)
 (import x/sys/gc)
 (import x/codec/base64)
 (import x/repl/term)
@@ -59,12 +60,6 @@
 (def %byte (fn (_ s i) (char->int (str-byte-ref s i))))
 (def %num (fn (_ n) (%cvt n (Type named STRING) 10)))
 (def %get (fn (_ s k) (rest (List find (fn (_ p) (eq? (first p) k)) s))))
-
-; An error's message: an Err's own, or a word for what the engine raised.
-(def %message
-  (fn (_ e)
-    (guard (e2 "an internal error")
-      (if (Err engine? e) (Str8 append (Err %str (Err code-of e)) ": " (Err %str (Err subject-of e))) (e msg)))))
 
 ; --- the log ---------------------------------------------------------------
 
@@ -1067,10 +1062,6 @@
       () (%get s (lit hostkeys)))))
 
 
-; setsid(2) through libc: the platform's Darwin syscall table has no
-; number for it, and Sys has no door.
-(def %setsid! (fn (_) (ptr-call (ffi-dlsym (ffi-dlopen () 1) "setsid"))))
-
 ; The connection's process made the user's once a root server has let
 ; them in, as sshd's session is: the groups initgroups(3) gives, the
 ; group, then the user, through libc, and USER, LOGNAME, HOME and SHELL
@@ -1096,16 +1087,8 @@
 (def %background!
   (fn (_)
     (unless (= (Sys fork) 0) (Sys exit 0))
-    (%setsid!)
+    (Sys setsid)
     (Sys chdir "/")))
-
-; The standard descriptors on /dev/null, as a daemon's are.
-(def %quiet!
-  (fn (_)
-    (def null (File open "/dev/null" (lit rdwr)))
-    (unless (< null 0)
-      (do (Sys dup2 null 0) (Sys dup2 null 1) (Sys dup2 null 2)
-          (when (> null 2) (File close null))))))
 
 ; The pid written to the PidFile; a path that cannot be written is
 ; logged and let be.
@@ -1139,9 +1122,9 @@
     (if (null? user)
       (%log (Str8 append "Connection closed by " from " [preauth]"))
       (do (def done (Str8 append "Disconnected from user " user " " from))
-          (%log (guard (e (match ((str=? (%message e) "keepalive") (Str8 append "Timeout, client not responding from user " user " " from))
-                                 ((str=? (%message e) "idle") (Str8 append done ": the channels were idle past ChannelTimeout"))
-                                 (#t (Str8 append done ": " (%message e)))))
+          (%log (guard (e (match ((str=? (Err text e) "keepalive") (Str8 append "Timeout, client not responding from user " user " " from))
+                                 ((str=? (Err text e) "idle") (Str8 append done ": the channels were idle past ChannelTimeout"))
+                                 (#t (Str8 append done ": " (Err text e)))))
                   (%become! user)
                   (%serve-session c fd s)
                   done))))
@@ -1177,11 +1160,11 @@
     (def path (first plan))
     (def text (guard (e ()) (File read-all path)))
     (def lines
-      (guard (e (do (say (%message e)) ()))
+      (guard (e (do (say (Err text e)) ()))
         (List append (ssh-config-options (List ref 1 plan))
                      (if (null? text) () (ssh-config-read text path () () () "/etc/ssh")))))
     (def faults (ssh-config-faults lines ssh-config-sshd-keywords %refused ()))
-    (def s (if (null? faults) (guard (e (do (say (%message e)) ())) (ssh-server-settings lines)) ()))
+    (def s (if (null? faults) (guard (e (do (say (Err text e)) ())) (ssh-server-settings lines)) ()))
     (match
       ((null? text) (do (say (Str8 append path ": No such file or directory")) 255))
       ((not (null? faults))
@@ -1213,7 +1196,7 @@
     (when (null? lfds) (do (%log-at "fatal" "Cannot bind any address.") (Sys exit 255)))
     (unless foreground (%background!))
     (unless debug (unless (null? (%get s (lit pidfile))) (%pidfile! (%get s (lit pidfile)))))
-    (unless foreground (%quiet!))
+    (unless foreground (Proc quiet!))
     ; the engines, built once: each connection's process inherits them
     (ssh-engines! ())
     ; and the heap collected before the first fork: x collects only when

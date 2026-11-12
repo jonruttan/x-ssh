@@ -113,6 +113,47 @@ tests/oracle/client.sh and tests/oracle/server.sh.
 ---
     (((() 1080) ("*" 1081) ("::1" 1082) ("localhost" 1083)) "command-line: line 1: Bad forwarding specification." "command-line: line 1: Invalid ProxyJump \"a:x\"")
 
+### RemoteForward given only [bind_address:]port is SOCKS at the server's end, no host and port 0
+
+```ssh
+(import ssh/client ssh-client-settings)
+(import ssh/config ssh-config-options)
+(def %rm (fn (_ opts) (rest (List find (fn (_ p) (eq? (first p) (lit remotes))) (ssh-client-settings (ssh-config-options opts) "h" "u")))))
+(write (list (%rm (list "RemoteForward 1080" "RemoteForward *:1081" "RemoteForward 10.0.0.1:1082" "RemoteForward [::1]:1083" "RemoteForward 1084 h:22"))
+             (%rm (list "GatewayPorts yes" "RemoteForward 1080"))))
+```
+---
+    ((("localhost" 1080 () 0) (() 1081 () 0) ("10.0.0.1" 1082 () 0) ("::1" 1083 () 0) ("localhost" 1084 "h" 22)) ((() 1080 () 0)))
+
+### PermitRemoteOpen: any by default, none, or host:port each, `*` any host or port, the first line holding; refused in OpenSSH's words
+
+```ssh
+(import ssh/client ssh-client-settings)
+(import ssh/config ssh-config-options)
+(def %po (fn (_ opts) (rest (List find (fn (_ p) (eq? (first p) (lit remote-open))) (ssh-client-settings (ssh-config-options opts) "h" "u")))))
+(write (list (%po ()) (%po (list "PermitRemoteOpen none")) (%po (list "PermitRemoteOpen ANY"))
+             (%po (list "PermitRemoteOpen a.b:22 *:80 [::1]:* c:*" "PermitRemoteOpen d:1"))
+             (guard (e (e msg)) (%po (list "PermitRemoteOpen a.b")))
+             (guard (e (e msg)) (%po (list "PermitRemoteOpen a:0")))
+             (guard (e (e msg)) (%po (list "PermitRemoteOpen x:1 none")))))
+```
+---
+    (("any") ("none" . 'none) ("ANY") ("a.b:22 *:80 [::1]:* c:*" ("a.b" 22) ("*" 80) ("::1" ()) ("c" ())) "command-line: line 1: bad port number in permitremoteopen" "command-line: line 1: bad port number in permitremoteopen" "command-line: line 1: keyword permitremoteopen \"none\" argument must appear alone.")
+
+### a SOCKS request says how many bytes it took; PermitRemoteOpen allows a place by host and port, `*` either
+
+```ssh
+(def %so (eval (lit %socks) (module ssh/session)))
+(def %oa (eval (lit %open-allowed?) (module ssh/session)))
+(write (list (List ref 4 (%so (list 4 1 0 22 127 0 0 1 0 9 9) #f))
+             (List ref 4 (%so (list 5 1 0 5 1 0 3 1 104 0 22 7) #t))
+             (List map (fn (_ hp) (%oa (list (list "a" 22) (list "*" 80) (list "b" ())) (first hp) (rest hp)))
+               (list (pair "a" 22) (pair "a" 23) (pair "z" 80) (pair "b" 1) (pair "A" 22)))
+             (%oa () "x" 1) (%oa (lit none) "x" 1)))
+```
+---
+    (9 11 (#t #f #t #t #f) #t #f)
+
 ### a command keyword's argument is the rest of its line, quotes and all
 
 ```ssh

@@ -34,7 +34,7 @@ tests/oracle/client.sh and tests/oracle/server.sh.
 (write (List map %cg (list (lit hostname) (lit port) (lit forwards) (lit remotes) (lit limits) (lit strict))))
 ```
 ---
-    ("gw.example.org" 2200 (("localhost" 8080 "web" 80) (() 9000 "db" 5432)) (("localhost" 7000 "localhost" 22)) (60 3 0) "accept-new")
+    ("gw.example.org" 2200 (("localhost" 8080 "web" 80 ()) (() 9000 "db" 5432 "*")) (("localhost" 7000 "localhost" 22 ())) (60 3 0) "accept-new")
 
 ### ClearAllForwardings clears them; GatewayPorts binds every interface
 
@@ -45,7 +45,7 @@ tests/oracle/client.sh and tests/oracle/server.sh.
 (write (list (%cf (list "ClearAllForwardings yes" "LocalForward 1:h:1")) (%cf (list "GatewayPorts yes" "LocalForward 1:h:1"))))
 ```
 ---
-    (() ((() 1 "h" 1)))
+    (() ((() 1 "h" 1 ())))
 
 ### a value OpenSSH refuses is refused in its words
 
@@ -123,7 +123,22 @@ tests/oracle/client.sh and tests/oracle/server.sh.
              (%rm (list "GatewayPorts yes" "RemoteForward 1080"))))
 ```
 ---
-    ((("localhost" 1080 () 0) (() 1081 () 0) ("10.0.0.1" 1082 () 0) ("::1" 1083 () 0) ("localhost" 1084 "h" 22)) ((() 1080 () 0)))
+    ((("localhost" 1080 () 0 ()) (() 1081 () 0 "*") ("10.0.0.1" 1082 () 0 "10.0.0.1") ("::1" 1083 () 0 "::1") ("localhost" 1084 "h" 22 ())) ((() 1080 () 0 ())))
+
+### -G prints forwards as OpenSSH does: dynamic, local, then remote; an address as written in brackets, a destination bracketed
+
+```ssh
+(import ssh/client ssh-client-settings)
+(import ssh/config ssh-config-options)
+(def %pr (eval (lit %print) (module ssh/client)))
+(write (List filter (fn (_ l) (not (null? (Str8 index-of "forward " l))))
+  (Str8 split "\n" (%pr (ssh-client-settings
+    (ssh-config-options (list "LocalForward 8080 h:80" "LocalForward *:8081 h:81" "RemoteForward localhost:9 h:9"
+                              "RemoteForward 1080" "DynamicForward 1082" "DynamicForward [::1]:1083"))
+    "h" "u")))))
+```
+---
+    ("dynamicforward 1082" "dynamicforward [::1]:1083" "localforward 8080 [h]:80" "localforward [*]:8081 [h]:81" "remoteforward [localhost]:9 [h]:9" "remoteforward 1080 [socks]:0")
 
 ### PermitRemoteOpen: any by default, none, or host:port each, `*` any host or port, the first line holding; refused in OpenSSH's words
 

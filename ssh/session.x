@@ -31,7 +31,7 @@
 (import ssh/tty ssh-tty-modes-encode)
 (import ssh/bytes ssh-out ssh-put-byte ssh-put-bool ssh-put-uint32 ssh-put-text ssh-put-string ssh-out-run
   ssh-in ssh-get-byte ssh-get-bool ssh-get-uint32 ssh-get-string ssh-get-text ssh-in-buf ssh-copy)
-(import ssh/transport ssh-fd ssh-pending? ssh-send-packet! ssh-next-packet! ssh-msg-disconnect
+(import ssh/transport ssh-fd ssh-pending? ssh-send-packet! ssh-take-packet! ssh-msg-disconnect
   ssh-msg-global-request ssh-msg-request-success ssh-msg-request-failure
   ssh-clock-sent ssh-clock-recv ssh-clock-data ssh-clock-mark! ssh-clocks-start! ssh-wait-ms ssh-clocks!)
 
@@ -547,11 +547,16 @@
     (when (ssh-get-bool in) (%send c (%packet-of ssh-msg-request-failure)))))
 
 ; One packet from the server handled: a channel message is for the
-; channel it names, ours.
+; channel it names, ours; one the transport keeps (EXT_INFO, IGNORE)
+; is only a packet received.
 (def %handle!
   (fn (_ c run)
-    (def p (ssh-next-packet! c))
+    (def p (ssh-take-packet! c))
     (ssh-clock-mark! ssh-clock-recv)
+    (unless (null? p) (%packet! c run p))))
+
+(def %packet!
+  (fn (_ c run p)
     (def t (%byte (first p) 0))
     (when (if (= t %msg-channel-data) #t (= t %msg-channel-extended-data)) (ssh-clock-mark! ssh-clock-data))
     (def in (ssh-in (first p) 1 (- (rest p) 1)))

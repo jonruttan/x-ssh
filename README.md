@@ -70,7 +70,11 @@ nistp521), for host keys and user keys, at either end.
   a channel to where it asks; a RemoteForward (or `-R`) given only
   `[bind_address:]port` is the same proxy at the server's end, each
   connection the server opens asking by SOCKS where it goes, where
-  PermitRemoteOpen allows.  Served keywords: Hostname, Port, User,
+  PermitRemoteOpen allows.  Either end of a local or remote forward may
+  be a Unix socket, a field holding `/` its path, as OpenSSH reads
+  them (streamlocal); a socket listened on is made under
+  StreamLocalBindMask, an old one in its place removed first under
+  StreamLocalBindUnlink.  Served keywords: Hostname, Port, User,
   IdentityFile (`~/.ssh/id_rsa`, `id_ecdsa` and `id_ed25519` by default;
   OpenSSH's or Dropbear's key files, a key under a passphrase among
   them), IdentityAgent (SSH_AUTH_SOCK by default; the agent's keys
@@ -81,6 +85,7 @@ nistp521), for host keys and user keys, at either end.
   GlobalKnownHostsFile, HostKeyAlias, BatchMode, PasswordAuthentication,
   PubkeyAuthentication, NumberOfPasswordPrompts, LocalForward,
   RemoteForward, DynamicForward, PermitRemoteOpen, GatewayPorts, ClearAllForwardings,
+  StreamLocalBindMask, StreamLocalBindUnlink,
   ServerAliveInterval,
   ServerAliveCountMax, ChannelTimeout (`global=`), SendEnv, SetEnv,
   RemoteCommand, ProxyCommand, ProxyJump, SessionType, StdinNull,
@@ -187,7 +192,9 @@ The oracles in `tests/oracle/` are the live tests: `client.sh` drives
 the client against a built Dropbear, `server.sh` drives the server with
 Dropbear's and OpenSSH's clients, `scp.sh` runs scp from either end, and
 `agent.sh` pairs ssh-agent and ssh-add with OpenSSH's and forwards the agent.
-Each takes a built Dropbear's directory.
+`sshd.sh` drives the client against OpenSSH's server, run unprivileged:
+forwards, and Unix sockets at either end.
+All but `sshd.sh` take a built Dropbear's directory.
 
 `tests/linux/run.sh` is the Linux leg: password logins, which want a
 shadow file and a known password, and a root server's other users, run as

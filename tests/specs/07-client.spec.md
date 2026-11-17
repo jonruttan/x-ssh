@@ -34,7 +34,7 @@ tests/oracle/client.sh and tests/oracle/server.sh.
 (write (List map %cg (list (lit hostname) (lit port) (lit forwards) (lit remotes) (lit limits) (lit strict))))
 ```
 ---
-    ("gw.example.org" 2200 (("localhost" 8080 "web" 80 ()) (() 9000 "db" 5432 "*")) (("localhost" 7000 "localhost" 22 ())) (60 3 0) "accept-new")
+    ("gw.example.org" 2200 (("localhost" 8080 "web" 80 () () ()) (() 9000 "db" 5432 "*" () ())) (("localhost" 7000 "localhost" 22 () () ())) (60 3 0) "accept-new")
 
 ### ClearAllForwardings clears them; GatewayPorts binds every interface
 
@@ -45,7 +45,7 @@ tests/oracle/client.sh and tests/oracle/server.sh.
 (write (list (%cf (list "ClearAllForwardings yes" "LocalForward 1:h:1")) (%cf (list "GatewayPorts yes" "LocalForward 1:h:1"))))
 ```
 ---
-    (() ((() 1 "h" 1 ())))
+    (() ((() 1 "h" 1 () () ())))
 
 ### a value OpenSSH refuses is refused in its words
 
@@ -123,7 +123,7 @@ tests/oracle/client.sh and tests/oracle/server.sh.
              (%rm (list "GatewayPorts yes" "RemoteForward 1080"))))
 ```
 ---
-    ((("localhost" 1080 () 0 ()) (() 1081 () 0 "*") ("10.0.0.1" 1082 () 0 "10.0.0.1") ("::1" 1083 () 0 "::1") ("localhost" 1084 "h" 22 ())) ((() 1080 () 0 ())))
+    ((("localhost" 1080 () 0 () () ()) (() 1081 () 0 "*" () ()) ("10.0.0.1" 1082 () 0 "10.0.0.1" () ()) ("::1" 1083 () 0 "::1" () ()) ("localhost" 1084 "h" 22 () () ())) ((() 1080 () 0 () () ())))
 
 ### -G prints forwards as OpenSSH does: dynamic, local, then remote; an address as written in brackets, a destination bracketed
 
@@ -139,6 +139,47 @@ tests/oracle/client.sh and tests/oracle/server.sh.
 ```
 ---
     ("dynamicforward 1082" "dynamicforward [::1]:1083" "localforward 8080 [h]:80" "localforward [*]:8081 [h]:81" "remoteforward [localhost]:9 [h]:9" "remoteforward 1080 [socks]:0")
+
+### a field holding / is a Unix socket's path, at either end: (ADDRESS PORT HOST HPORT GIVEN LPATH CPATH); a bare name is a bad port
+
+```ssh
+(import ssh/client ssh-client-settings)
+(import ssh/config ssh-config-options)
+(def %g (fn (_ k opts) (rest (List find (fn (_ p) (eq? (first p) k)) (ssh-client-settings (ssh-config-options opts) "h" "u")))))
+(write (list (%g (lit forwards) (list "LocalForward /a.sock h:80" "LocalForward 8080 /b.sock" "LocalForward /c.sock /d.sock" "LocalForward 10.0.0.1:8081 ./e.sock"))
+             (%g (lit remotes) (list "RemoteForward /r.sock h:22" "RemoteForward 9 /s.sock"))
+             (guard (e (e msg)) (%g (lit forwards) (list "LocalForward a.sock:h:80")))))
+```
+---
+    (((() () "h" 80 () "/a.sock" ()) ("localhost" 8080 () () () () "/b.sock") (() () () () () "/c.sock" "/d.sock") ("10.0.0.1" 8081 () () "10.0.0.1" () "./e.sock")) ((() () "h" 22 () "/r.sock" ()) ("localhost" 9 () () () () "/s.sock")) "command-line: line 1: Bad local forwarding specification 'a.sock:h:80'")
+
+### StreamLocalBindMask is octal, 0177 by default, at most 0777; StreamLocalBindUnlink is no by default; bad ones refused in OpenSSH's words
+
+```ssh
+(import ssh/client ssh-client-settings)
+(import ssh/config ssh-config-options)
+(def %g (fn (_ k opts) (rest (List find (fn (_ p) (eq? (first p) k)) (ssh-client-settings (ssh-config-options opts) "h" "u")))))
+(write (list (%g (lit bind-mask) ()) (%g (lit bind-mask) (list "StreamLocalBindMask 0077")) (%g (lit bind-unlink) ()) (%g (lit bind-unlink) (list "StreamLocalBindUnlink yes"))
+             (guard (e (e msg)) (%g (lit bind-mask) (list "StreamLocalBindMask 1000")))
+             (guard (e (e msg)) (%g (lit bind-mask) (list "StreamLocalBindMask 9")))
+             (guard (e (e msg)) (%g (lit bind-unlink) (list "StreamLocalBindUnlink maybe")))))
+```
+---
+    (127 63 #f #t "command-line: line 1: Bad mask." "command-line: line 1: Bad mask." "command-line: line 1: unsupported option \"maybe\".")
+
+### -G prints a path bare, the mask as 0 and its octal, and, as OpenSSH does, a dynamicforward line for a local forward to a socket
+
+```ssh
+(import ssh/client ssh-client-settings)
+(import ssh/config ssh-config-options)
+(def %pr (eval (lit %print) (module ssh/client)))
+(def %gp (fn (_ opts) (List filter (fn (_ l) (if (null? (Str8 index-of "forward " l)) (not (null? (Str8 index-of "streamlocal" l))) #t))
+  (Str8 split "\n" (%pr (ssh-client-settings (ssh-config-options opts) "h" "u"))))))
+(write (list (%gp (list "LocalForward /a.sock h:80" "LocalForward 8080 /b.sock" "RemoteForward /r.sock /s.sock" "StreamLocalBindMask 0077" "StreamLocalBindUnlink yes"))
+             (%gp (list "StreamLocalBindMask 0"))))
+```
+---
+    (("dynamicforward 8080" "localforward /a.sock [h]:80" "localforward 8080 /b.sock" "remoteforward /r.sock /s.sock" "streamlocalbindmask 077" "streamlocalbindunlink yes") ("streamlocalbindmask 00" "streamlocalbindunlink no"))
 
 ### PermitRemoteOpen: any by default, none, or host:port each, `*` any host or port, the first line holding; refused in OpenSSH's words
 

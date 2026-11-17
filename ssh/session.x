@@ -16,7 +16,9 @@
 ; asked of the server by a tcpip-forward global request, the connections
 ; it then opens as forwarded-tcpip channels connected here to the host
 ; and port the forward names, or, for one given only a port, to the host
-; and port each one's SOCKS request names; a forward's bytes are pumped each way until
+; and port each one's SOCKS request names.  Either end may be a Unix
+; socket instead, by OpenSSH's streamlocal channels and request.  A
+; forward's bytes are pumped each way until
 ; both ends close.  The channels are a table keyed by our channel
 ; number, which every message from the server names first; one loop
 ; waits on the socket, the listeners, and each channel's input while
@@ -29,6 +31,7 @@
 (import x/sys/socket)
 (import x/sys/gc)
 (import ssh/tty ssh-tty-modes-encode)
+(import ssh/sys ssh-sys-umask)
 (import ssh/bytes ssh-out ssh-put-byte ssh-put-bool ssh-put-uint32 ssh-put-text ssh-put-string ssh-out-run
   ssh-in ssh-get-byte ssh-get-bool ssh-get-uint32 ssh-get-string ssh-get-text ssh-in-buf ssh-copy)
 (import ssh/transport ssh-fd ssh-pending? ssh-send-packet! ssh-take-packet! ssh-msg-disconnect
@@ -78,9 +81,9 @@
 (def %ch! (fn (_ ch i v) (obj-set! ch i v)))
 
 ; The run's state: 1 the channels, 2 the next channel number, 3 the
-; bytes moved since the last collect, 4 the listeners as (FD HOST PORT),
-; 5 the session channel or (), 6 the remote forwards as (ADDRESS PORT
-; HOST PORT), 7 those whose request the server has yet to answer, in
+; bytes moved since the last collect, 4 the listeners as (FD HOST PORT CPATH),
+; 5 the session channel or (), 6 the remote forwards as forwards are,
+; 7 those whose request the server has yet to answer, in
 ; the order asked, 8 the environment sent, 9 the terminal asked for, as
 ; (TERM WINDOW MODES ESCAPE), WINDOW a function answering (COLUMNS .
 ; ROWS), MODES the local terminal's as Term modes answers them, ESCAPE
@@ -163,9 +166,11 @@
 
 ; A connection accepted on a listener opened as a direct-tcpip channel
 ; to the forward's host and port, the connection its input and output.
+; One on a Unix socket has no address (the system says port 0): it says
+; 127.0.0.1 port 65535, as OpenSSH says it for servers that check.
 (def %open-forward!
   (fn (_ c run fd host port)
-    (def peer (Socket peer fd))
+    (def peer ((fn (_ p) (if (= (rest p) 0) (pair "127.0.0.1" 65535) p)) (Socket peer fd)))
     (def ch (%forward-channel! run fd))
     (def open (%open-packet ch "direct-tcpip"))
     (ssh-put-text open host)
@@ -173,6 +178,48 @@
     (ssh-put-text open (first peer))
     (ssh-put-uint32 open (rest peer))
     (%send c open)))
+
+; --- Unix sockets: OpenSSH's streamlocal forwarding ------------------------
+;
+; Either end of a forward may be a Unix socket.  A connection accepted
+; for a forward to a socket is a direct-streamlocal@openssh.com channel
+; to its path; a listener on a socket is made under StreamLocalBindMask,
+; an old file in its place removed first under StreamLocalBindUnlink,
+; and one that cannot be made is said as OpenSSH says it and left out.
+
+(def %open-streamlocal!
+  (fn (_ c run fd path)
+    (def ch (%forward-channel! run fd))
+    (def open (%open-packet ch "direct-streamlocal@openssh.com"))
+    (ssh-put-text open path)
+    (ssh-put-text open "")
+    (ssh-put-uint32 open 0)
+    (%send c open)))
+
+; An Err's words past its call's name: "bind: Address already in use" is
+; "Address already in use".
+(def %reason
+  (fn (_ e)
+    (def m (e msg))
+    (def i (Str8 index-of ": " m))
+    (if (null? i) m (Str8 sub (+ i 2) (- (Str8 length m) i 2) m))))
+
+; A forward's listener, (FD HOST PORT CPATH), or () for a socket's that
+; cannot be made; sl is (MASK . UNLINK).
+(def %listen
+  (fn (_ f sl)
+    (def lpath (List ref 5 f))
+    (if (null? lpath)
+      (list (if (null? (first f)) (Socket tcp-listen (List ref 1 f)) (Socket tcp-listen-on (first f) (List ref 1 f)))
+            (List ref 2 f) (List ref 3 f) (List ref 6 f))
+      (do (when (rest sl) (guard (e ()) (File unlink lpath)))
+          (def old (ssh-sys-umask (first sl)))
+          (def fd (guard (e (do (%say (Str8 append "unix_listener: cannot bind to path " lpath ": " (%reason e)
+                                                    "\nCould not request local forwarding.\n"))
+                                ()))
+                    (Socket unix-listen lpath)))
+          (ssh-sys-umask old)
+          (if (null? fd) () (list fd (List ref 2 f) (List ref 3 f) (List ref 6 f)))))))
 
 ; --- DynamicForward: SOCKS (RFC 1928, and SOCKS 4 and 4a) -------------------
 ;
@@ -308,14 +355,20 @@
     (%send c open)))
 
 ; A remote forward asked of the server: tcpip-forward for its address
-; and port, the address "" for every interface, as OpenSSH asks.
+; and port, the address "" for every interface, as OpenSSH asks; or
+; streamlocal-forward@openssh.com for a socket at the server's end.
 (def %ask-remote!
   (fn (_ c run remote)
     (def req (%packet-of ssh-msg-global-request))
-    (ssh-put-text req "tcpip-forward")
-    (ssh-put-bool req #t)
-    (ssh-put-text req (if (null? (first remote)) "" (first remote)))
-    (ssh-put-uint32 req (List ref 1 remote))
+    (def path (List ref 5 remote))
+    (if (null? path)
+      (do (ssh-put-text req "tcpip-forward")
+          (ssh-put-bool req #t)
+          (ssh-put-text req (if (null? (first remote)) "" (first remote)))
+          (ssh-put-uint32 req (List ref 1 remote)))
+      (do (ssh-put-text req "streamlocal-forward@openssh.com")
+          (ssh-put-bool req #t)
+          (ssh-put-text req path)))
     (%send c req)
     (%rn! run %UNANSWERED (List append (%rn run %UNANSWERED) (list remote)))))
 
@@ -404,12 +457,14 @@
       (do (def r (first asked))
           (%rn! run %UNANSWERED (rest asked))
           (unless ok
-            (%say (Str8 append "x-ssh: Remote TCP forward request failed (port " (%num (List ref 1 r))
-                              " -> " (if (null? (List ref 2 r)) "socks" (List ref 2 r)) ":" (%num (List ref 3 r)) ")\n")))))))
+            (%say (if (null? (List ref 5 r))
+                    (Str8 append "Warning: remote port forwarding failed for listen port " (%num (List ref 1 r)) "\n")
+                    (Str8 append "Warning: remote port forwarding failed for listen path " (List ref 5 r) "\n"))))))))
 
 ; A channel the server opens: a forwarded-tcpip for a remote forward's
-; port, connected here to the forward's host and port, or, for a forward
-; without one, confirmed to say where it goes by SOCKS; or an
+; port, or a forwarded-streamlocal@openssh.com for its socket's path,
+; connected here to the forward's host and port or socket, or, for a
+; forward without one, confirmed to say where it goes by SOCKS; or an
 ; auth-agent@openssh.com, connected to the agent forwarded, and
 ; confirmed; any other, or a connect that fails, refused.
 (def %opened!
@@ -420,12 +475,19 @@
     (def max (ssh-get-uint32 in))
     (def agent? (if (str=? type "auth-agent@openssh.com") (not (null? (%rn run %AGENT))) #f))
     (def port (if (str=? type "forwarded-tcpip") (do (ssh-get-text in) (ssh-get-uint32 in)) ()))
-    (def remote (if (null? port) () (List find (fn (_ r) (= (List ref 1 r) port)) (%rn run %REMOTES))))
-    (def socks? (if (null? remote) #f (null? (List ref 2 remote))))
+    ; a socket's: its path, then a reserved string
+    (def path (if (str=? type "forwarded-streamlocal@openssh.com") (do (def p (ssh-get-text in)) (ssh-get-text in) p) ()))
+    (def remote
+      (match
+        ((not (null? port)) (List find (fn (_ r) (if (null? (List ref 5 r)) (= (List ref 1 r) port) #f)) (%rn run %REMOTES)))
+        ((not (null? path)) (List find (fn (_ r) (if (null? (List ref 5 r)) #f (str=? (List ref 5 r) path))) (%rn run %REMOTES)))
+        (#t ())))
+    (def socks? (if (null? remote) #f (if (null? (List ref 2 remote)) (null? (List ref 6 remote)) #f)))
     (def fd (match
               (agent? (guard (e ()) (Socket unix-connect (%rn run %AGENT))))
               ((null? remote) ())
               (socks? ())
+              ((not (null? (List ref 6 remote))) (guard (e ()) (Socket unix-connect (List ref 6 remote))))
               (#t (guard (e ()) (Socket tcp-connect (%address (List ref 2 remote)) (List ref 3 remote))))))
     (def asked (if agent? #t (not (null? remote))))
     (if (if (null? fd) (not socks?) #f)
@@ -676,20 +738,22 @@
 ; The command run on the server, () for none, with input the descriptor
 ; its standard input is read from (() for none: EOF at once), on-out and
 ; on-err called with each (BUF START LEN) of its output as it arrives;
-; each forward (ADDRESS PORT HOST PORT) listened on, ADDRESS () for every
-; one, its connections carried to HOST:PORT through the server; and each
-; remote (ADDRESS PORT HOST PORT) asked of the server, ADDRESS () for
-; every one, the connections it opens carried to HOST:PORT from here,
+; each forward (ADDRESS PORT HOST PORT GIVEN LPATH CPATH) listened on,
+; ADDRESS () for every one, or on the socket LPATH, its connections
+; carried to HOST:PORT, or the socket CPATH, through the server; and each
+; remote of the same shape asked of the server, ADDRESS () for
+; every one, the connections it opens carried to HOST:PORT, or CPATH, from here,
 ; HOST () for SOCKS, where open allows (see %OPEN);
 ; and netcat (HOST . PORT) or (), -W's: a direct-tcpip channel to
 ; HOST:PORT whose two ways are input and on-out, in a session's place;
 ; agent, the agent socket forwarded to the session, or (); and open,
-; where a remote forward's SOCKS requests may go.
+; where a remote forward's SOCKS requests may go; and streamlocal,
+; (MASK . UNLINK), StreamLocalBindMask and StreamLocalBindUnlink.
 ; Runs until the session channel closes, or, with no command, until the
 ; connection ends.  Answers the exit status, or () when the server gave
 ; none.
 (def ssh-session-run!
-  (fn (_ c command input on-out on-err forwards remotes netcat limits env tty agent open)
+  (fn (_ c command input on-out on-err forwards remotes netcat limits env tty agent open streamlocal)
     (def run (Vector make 14 ()))
     (ssh-clocks-start!)
     (%rn! run %CHANNELS ()) (%rn! run %NEXT 0) (%rn! run %MOVED 0)
@@ -697,10 +761,7 @@
     (%rn! run %TTY tty) (%rn! run %SIZE (if (null? tty) () ((List ref 1 tty)))) (%rn! run %ESC 1) (%rn! run %AGENT agent)
     (%rn! run %SOCKS ()) (%rn! run %OPEN open)
     (%rn! run %LISTENERS
-      (List map (fn (_ f) (list (if (null? (first f)) (Socket tcp-listen (List ref 1 f))
-                                  (Socket tcp-listen-on (first f) (List ref 1 f)))
-                                (List ref 2 f) (List ref 3 f)))
-        forwards))
+      (List filter (fn (_ l) (not (null? l))) (List map (fn (_ f) (%listen f streamlocal)) forwards)))
     (List for-each (fn (_ r) (%ask-remote! c run r)) remotes)
     (unless (null? command) (%open-session! c run command input on-out on-err))
     (unless (null? netcat) (%open-netcat! c run (first netcat) (rest netcat) input on-out))
@@ -718,8 +779,11 @@
                                (%poll-ms run limits)))
                    (List for-each
                      (fn (_ l) (when (%ready? ready (first l))
-                                 ; a dynamic listener's connection says where it goes first
-                                 ((fn (_ fd) (if (List ref 1 l) (%open-forward! c run fd (List ref 1 l) (List ref 2 l)) (%socks-wait! run fd)))
+                                 ; to a socket, to a host and port, or, on a dynamic
+                                 ; listener, where its connection says first
+                                 ((fn (_ fd) (match ((not (null? (List ref 3 l))) (%open-streamlocal! c run fd (List ref 3 l)))
+                                                    ((List ref 1 l) (%open-forward! c run fd (List ref 1 l) (List ref 2 l)))
+                                                    (#t (%socks-wait! run fd))))
                                   (Socket accept (first l)))))
                      (%rn run %LISTENERS))
                    (List for-each

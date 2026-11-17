@@ -159,28 +159,62 @@
          (#t (self (+ i 1) (pair (Str8 sub i 1 s) acc)))))
      0 ())))
 
-; A LocalForward or RemoteForward line as (ADDRESS PORT HOST PORT GIVEN):
-; [bind_address:]port:host:hostport, the command line's -L shape, or the
-; file's `[bind_address:]port host:hostport`.  No address is localhost,
-; or every interface under GatewayPorts; `*` or an empty one is every
-; interface, (); GIVEN is the address as written, () for none, for -G.
-; A RemoteForward given only `[bind_address:]port`
-; (socks? true) is a remote dynamic one, (ADDRESS PORT () 0 GIVEN): its
-; connections say where they go by SOCKS.
+; A LocalForward or RemoteForward line as (ADDRESS PORT HOST PORT GIVEN
+; LPATH CPATH): [bind_address:]port:host:hostport, the command line's -L
+; shape, or the file's `[bind_address:]port host:hostport`.  No address
+; is localhost, or every interface under GatewayPorts; `*` or an empty
+; one is every interface, (); GIVEN is the address as written, () for
+; none, for -G.  Either end may be a Unix socket instead, a field
+; holding a `/` as OpenSSH tells one: `socket:host:hostport`,
+; `[bind_address:]port:socket` or `socket:socket`; LPATH is the
+; listening one, ADDRESS and PORT () beside it, and CPATH the one
+; connected to, HOST and PORT () beside it, each () when not a socket.
+; A RemoteForward given only `[bind_address:]port` (socks? true) is a
+; remote dynamic one, (ADDRESS PORT () 0 GIVEN () ()): its connections
+; say where they go by SOCKS.
 (def %forward
   (fn (_ l gateway what socks?)
     (def spec (Str8 join ":" (first (rest l))))
     (def parts (Str8 split ":" spec))
     (def n (List length parts))
-    (def lport (if (if (= n 3) #t (= n 4)) (ssh-config-int-or-nil (List ref (- n 3) parts)) ()))
-    (def rport (if (if (= n 3) #t (= n 4)) (ssh-config-int-or-nil (List ref (- n 1) parts)) ()))
-    (def given (if (= n 4) (first parts) #f))
+    (def part (fn (_ i) (List ref i parts)))
+    (def path? (fn (_ t) (not (null? (Str8 index-of "/" t)))))
+    (def port ssh-config-int-or-nil)
     (def dynamic (if (if socks? (= (List length (first (rest l))) 1) #f) (ssh-client-dynamic spec) ()))
     (def bind (fn (_ given) (match ((not given) (if gateway () "localhost")) ((if (str=? given "*") #t (str=? given "")) ()) (#t given))))
+    ; the listener as (GIVEN PORT LPATH) and the destination as (HOST
+    ; PORT CPATH), GIVEN #f for no address; () for a shape not read
+    (def shape
+      (match
+        ((= n 2) (if (path? (part 1))
+                   (list (if (path? (part 0)) (list #f () (part 0)) (list #f (port (part 0)) ())) (list () () (part 1)))
+                   ()))
+        ((= n 3) (match ((path? (part 0)) (list (list #f () (part 0)) (list (part 1) (port (part 2)) ())))
+                        ((path? (part 2)) (list (list (part 0) (port (part 1)) ()) (list () () (part 2))))
+                        (#t (list (list #f (port (part 0)) ()) (list (part 1) (port (part 2)) ())))))
+        ((= n 4) (list (list (part 0) (port (part 1)) ()) (list (part 2) (port (part 3)) ())))
+        (#t ())))
+    (def from (if (null? shape) () (first shape)))
+    (def to (if (null? shape) () (List ref 1 shape)))
     (match
-      ((not (null? dynamic)) (list (bind (if (null? (first dynamic)) #f (first dynamic))) (List ref 1 dynamic) () 0 (first dynamic)))
-      ((if (null? lport) #t (null? rport)) (ssh-config-bad l (Str8 append what " '" spec "'")))
-      (#t (list (bind given) lport (List ref (- n 2) parts) rport (if given given ()))))))
+      ((not (null? dynamic)) (list (bind (if (null? (first dynamic)) #f (first dynamic))) (List ref 1 dynamic) () 0 (first dynamic) () ()))
+      ((if (null? shape) #t
+         (if (if (null? (List ref 1 from)) (null? (List ref 2 from)) #f) #t
+           (if (null? (List ref 1 to)) (null? (List ref 2 to)) #f)))
+        (ssh-config-bad l (Str8 append what " '" spec "'")))
+      (#t (do (def given (first from))
+              (def lpath (List ref 2 from))
+              (list (if (null? lpath) (bind given) ()) (List ref 1 from) (first to) (List ref 1 to)
+                    (if given given ()) lpath (List ref 2 to)))))))
+
+; StreamLocalBindMask's value: octal, 0777 at most, 0177 by default.
+(def %bind-mask
+  (fn (_ l)
+    (def t (if (null? l) "0177" (ssh-config-arg l)))
+    (def n (Str8 length t))
+    (def octal? (if (> n 0) ((fn (self i) (if (= i n) #t (if (if (>= (str-byte-ref t i) #\0) (<= (str-byte-ref t i) #\7) #f) (self (+ i 1)) #f))) 0) #f))
+    (def v (if octal? ((prim-ref (lit convert) (lit to)) t (Type named INTEGER) 8) ()))
+    (if (if (null? v) #t (> v 511)) (ssh-config-bad l "Bad mask.") v)))
 
 ; PermitRemoteOpen as (TEXT . OPEN): TEXT as written, for -G, and OPEN
 ; () for any, none, or (HOST PORT) each, PORT () for `*`; any and none
@@ -365,6 +399,8 @@
           (pair (lit forwards) (forwards "localforward" "Bad local forwarding specification"))
           (pair (lit remotes) (forwards "remoteforward" "Bad remote forwarding specification"))
           (pair (lit remote-open) (%remote-open (ssh-config-line lines "permitremoteopen")))
+          (pair (lit bind-mask) (%bind-mask (ssh-config-line lines "streamlocalbindmask")))
+          (pair (lit bind-unlink) (ssh-config-yes? lines "streamlocalbindunlink" #f))
           (pair (lit sendenv) (List flat-map (fn (_ a) a) (ssh-config-all lines "sendenv")))
           (pair (lit setenv) (List flat-map (fn (_ a) a) (ssh-config-all lines "setenv")))
           (pair (lit level) (ssh-config-choice lines "loglevel" (list "quiet" "fatal" "error" "info" "verbose" "debug" "debug1" "debug2" "debug3") "info"))
@@ -381,10 +417,13 @@
     (def yn (fn (_ b) (if b "yes" "no")))
     ; a listener as OpenSSH prints it: the port alone, or the address as
     ; written in brackets before it; a destination always bracketed, a
-    ; SOCKS one [socks]:0
+    ; SOCKS one [socks]:0; a Unix socket at either end its path, bare
     (def listen (fn (_ given port) (if (null? given) (%num port) (Str8 append "[" given "]:" (%num port)))))
-    (def fwd (fn (_ f) (Str8 append (listen (List ref 4 f) (List ref 1 f)) " ["
-                                     (if (null? (List ref 2 f)) "socks" (List ref 2 f)) "]:" (%num (List ref 3 f)))))
+    (def from (fn (_ f) (if (null? (List ref 5 f)) (listen (List ref 4 f) (List ref 1 f)) (List ref 5 f))))
+    (def fwd (fn (_ f) (Str8 append (from f) " "
+                                     (if (null? (List ref 6 f))
+                                       (Str8 append "[" (if (null? (List ref 2 f)) "socks" (List ref 2 f)) "]:" (%num (List ref 3 f)))
+                                       (List ref 6 f)))))
     (def limits (%get s (lit limits)))
     (Str8 join ""
       (List map (fn (_ l) (Str8 append l "\n"))
@@ -407,9 +446,15 @@
                 (Str8 append "gatewayports " (yn (%get s (lit gateway)))))
           ; dynamic, local, then remote, as OpenSSH orders them
           (List map (fn (_ d) (Str8 append "dynamicforward " (listen (first d) (List ref 1 d)))) (%get s (lit dynamics)))
+          ; OpenSSH's -G takes a local forward to a socket, which has no
+          ; destination host, for a dynamic one too, and prints it so
+          (List map (fn (_ f) (Str8 append "dynamicforward " (from f)))
+            (List filter (fn (_ f) (not (null? (List ref 6 f)))) (%get s (lit forwards))))
           (List map (fn (_ f) (Str8 append "localforward " (fwd f))) (%get s (lit forwards)))
           (List map (fn (_ f) (Str8 append "remoteforward " (fwd f))) (%get s (lit remotes)))
-          (list (Str8 append "permitremoteopen " (first (%get s (lit remote-open)))))
+          (list (Str8 append "permitremoteopen " (first (%get s (lit remote-open))))
+                (Str8 append "streamlocalbindmask 0" ((prim-ref (lit convert) (lit to)) (%get s (lit bind-mask)) (Type named STRING) 8))
+                (Str8 append "streamlocalbindunlink " (yn (%get s (lit bind-unlink)))))
           (if (null? (%get s (lit proxy-command))) () (list (Str8 append "proxycommand " (%get s (lit proxy-command)))))
           (if (null? (%get s (lit proxy-jump))) () (list (Str8 append "proxyjump " (%jump-text (%get s (lit proxy-jump))))))
           (List map (fn (_ e) (Str8 append "sendenv " e)) (%get s (lit sendenv)))
@@ -844,7 +889,7 @@
                                 (List map (fn (_ d) (list (match ((null? (first d)) (if (%get s (lit gateway)) () "localhost"))
                                                                  ((if (str=? (first d) "*") #t (str=? (first d) "")) ())
                                                                  (#t (first d)))
-                                                          (List ref 1 d) #f #f))
+                                                          (List ref 1 d) #f #f () () ()))
                                   (%get s (lit dynamics)))))
                             (%get s (lit remotes))
                             (if (null? stdio) () (pair (%address (first stdio)) (rest stdio)))
@@ -852,7 +897,8 @@
                             (%environment s)
                             (if tty? (list term (fn (_) (Term window %stdin)) modes (%get s (lit escape))) ())
                             (%get s (lit forward-agent))
-                            (rest (%get s (lit remote-open)))))))
+                            (rest (%get s (lit remote-open)))
+                            (pair (%get s (lit bind-mask)) (%get s (lit bind-unlink)))))))
                     (unless (null? saved) (Term restore! %stdin saved))
                     (guard (e2 ()) (ssh-disconnect! c))
                     (Socket close fd)

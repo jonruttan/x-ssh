@@ -25,6 +25,10 @@
 (def %c-bind (ffi-dlsym %libc "bind"))
 (def %c-connect (ffi-dlsym %libc "connect"))
 (def %c-close (ffi-dlsym %libc "close"))
+(def %c-umask (ffi-dlsym %libc "umask"))
+
+; The file mode creation mask set to mask; answers the one it replaces.
+(def ssh-sys-umask (fn (_ mask) (ptr-call %c-umask mask)))
 
 ; A dotted quad's four numbers.
 (def %quad
@@ -135,4 +139,4 @@
 (def ssh-sys-after-op
   (fn (_ m) (def cut (Str8 index-of ": " m)) (if (null? cut) m (Str8 sub (+ cut 2) (- (Str8 length m) cut 2) m))))
 
-(provide ssh/sys ssh-sys-me ssh-sys-spawn ssh-sys-proxy ssh-sys-connect ssh-sys-output ssh-sys-after-op)
+(provide ssh/sys ssh-sys-me ssh-sys-spawn ssh-sys-proxy ssh-sys-connect ssh-sys-output ssh-sys-umask ssh-sys-after-op)

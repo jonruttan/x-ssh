@@ -1,5 +1,7 @@
 # x-ssh
 
+<p align="center"><img src="docs/bitwise-banner.svg" alt="x-ssh, with Bitwise the owl" width="100%"></p>
+
 SSH on [x-lang](https://github.com/jonruttan/x-lang), as a lang bundle:
 OpenSSH's client, server and key tool, scp, SFTP's client and server, and
 the authentication agent.  It has had no independent review; see

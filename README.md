@@ -80,10 +80,14 @@ nistp521), for host keys and user keys, at either end.
   `%C` expanded) for other clients, OpenSSH's or this one, each
   session or `-W` forward carried on a channel of its own, the
   descriptors the client passes its input and output, ask and autoask
-  confirmed by SSH_ASKPASS; a client finding a master there has it carry
-  its session or `-W`, the exit status the master sends its own, or,
-  with forwards of its own, connects itself; `-O check`, `exit` and
-  `stop` ask the master.  Served keywords: Hostname, Port, User,
+  confirmed by SSH_ASKPASS, and the forwards they ask for listened for
+  or asked of the server; under ControlPersist the master goes on in
+  the background once its own session ends, this client its first
+  passenger, until it has been idle that long.  A client finding a
+  master there has it carry its forwards and then its session, under
+  `-N` too, or its `-W`, the exit status the master sends its own;
+  `-O check`, `exit`, `stop`, `forward` and `cancel` ask the master.
+  Served keywords: Hostname, Port, User,
   IdentityFile (`~/.ssh/id_rsa`, `id_ecdsa` and `id_ed25519` by default;
   OpenSSH's or Dropbear's key files, a key under a passphrase among
   them), IdentityAgent (SSH_AUTH_SOCK by default; the agent's keys
@@ -95,6 +99,7 @@ nistp521), for host keys and user keys, at either end.
   PubkeyAuthentication, NumberOfPasswordPrompts, LocalForward,
   RemoteForward, DynamicForward, PermitRemoteOpen, GatewayPorts, ClearAllForwardings,
   StreamLocalBindMask, StreamLocalBindUnlink, ControlMaster, ControlPath,
+  ControlPersist,
   ServerAliveInterval,
   ServerAliveCountMax, ChannelTimeout (`global=`), SendEnv, SetEnv,
   RemoteCommand, ProxyCommand, ProxyJump, SessionType, StdinNull,
@@ -240,8 +245,7 @@ container or x-os; where a connection has to be relied on, use OpenSSH.
 - **Random bytes** are read from `/dev/urandom`.
 - **Not served:** certificates, security-key (`sk-`) key types,
   keyboard-interactive, hostbased and GSSAPI authentication,
-  compression, IPv6, ControlPersist (read and printed, the master not
-  kept in the background), and `-O forward`, `cancel` and `proxy`.
+  compression, IPv6, and `-O proxy`, `conninfo` and `channels`.
 
 ## Install and test
 

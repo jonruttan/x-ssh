@@ -38,7 +38,9 @@
 (import ssh/mux ssh-mux-hello ssh-mux-new-session ssh-mux-alive-check ssh-mux-terminate ssh-mux-new-stdio-fwd
   ssh-mux-stop-listening ssh-mux-permission-denied ssh-mux-failure ssh-mux-exit-message ssh-mux-alive
   ssh-mux-session-opened ssh-mux-send! ssh-mux-receive ssh-mux-hello-message ssh-mux-reply-ok ssh-mux-reply-error
-  ssh-mux-reply-two ssh-mux-session-request ssh-mux-take-fd)
+  ssh-mux-reply-two ssh-mux-session-request ssh-mux-take-fd ssh-mux-open-fwd ssh-mux-close-fwd ssh-mux-remote-port
+  ssh-mux-fwd-local ssh-mux-fwd-remote ssh-mux-fwd-dynamic ssh-mux-streamlocal ssh-mux-forward-key
+  ssh-mux-forward-text ssh-mux-forward-read)
 (import ssh/bytes ssh-out ssh-put-byte ssh-put-bool ssh-put-uint32 ssh-put-text ssh-put-string ssh-out-run
   ssh-in ssh-get-byte ssh-get-bool ssh-get-uint32 ssh-get-string ssh-get-text ssh-in-buf ssh-copy)
 (import ssh/transport ssh-fd ssh-pending? ssh-send-packet! ssh-take-packet! ssh-msg-disconnect
@@ -99,17 +101,23 @@
 ; The run's state: 1 the channels, 2 the next channel number, 3 the
 ; bytes moved since the last collect, 4 the listeners as (FD HOST PORT CPATH),
 ; 5 the session channel or (), 6 the remote forwards as forwards are,
-; 7 those whose request the server has yet to answer, in
-; the order asked, 8 the agent's socket, or (), 9 the connections on
-; dynamic listeners yet to say where they go, as (FD BYTES GREETED), 10
-; where a remote forward's SOCKS requests may go: () anywhere, none
-; nowhere, or (HOST PORT) each, HOST "*" any host and PORT () any port;
-; 11 the control socket listened on for sharing clients, as (FD PATH
-; ASK HOST), or (); 12 its connections as (FD GREETED); 13 whether a
-; sharing client has asked the run to end.
+; 7 those whose request the server has yet to answer, in the order
+; asked, as (REMOTE . REPLY), REPLY a sharing client's (FD RID) to tell
+; or (), 8 the agent's socket, or (), 9 the connections on dynamic
+; listeners yet to say where they go, as (FD BYTES GREETED), 10 where a
+; remote forward's SOCKS requests may go: () anywhere, none nowhere, or
+; (HOST PORT) each, HOST "*" any host and PORT () any port; 11 the
+; control socket listened on for sharing clients, as (FD PATH ASK HOST
+; GATEWAY PERSIST), or (); 12 its connections as (FD GREETED);
+; 13 whether a sharing client has asked the run to end; 14 the forwards
+; as the wire says them, each (KEY THING), THING its listener or remote
+; forward; 15 whether a run without a session of its own has stopped
+; listening, to end once no channel is open; 16 when ControlPersist's
+; time ends the run, or (); and 17 a socket listener's (MASK . UNLINK).
 (def %CHANNELS 1) (def %NEXT 2) (def %MOVED 3) (def %LISTENERS 4) (def %SESSION 5)
 (def %REMOTES 6) (def %UNANSWERED 7) (def %RUN-AGENT 8) (def %SOCKS 9) (def %OPEN 10)
-(def %CONTROL 11) (def %CONTROLS 12) (def %ENDED 13)
+(def %CONTROL 11) (def %CONTROLS 12) (def %ENDED 13) (def %FWDS 14) (def %STOPPED 15)
+(def %DEADLINE 16) (def %SL 17)
 (def %rn (fn (_ run i) (obj-ref run i)))
 (def %rn! (fn (_ run i v) (obj-set! run i v)))
 
@@ -377,8 +385,9 @@
 ; A remote forward asked of the server: tcpip-forward for its address
 ; and port, the address "" for every interface, as OpenSSH asks; or
 ; streamlocal-forward@openssh.com for a socket at the server's end.
+; reply is a sharing client's (FD RID) to tell of the answer, or ().
 (def %ask-remote!
-  (fn (_ c run remote)
+  (fn (_ c run remote reply)
     (def req (%packet-of ssh-msg-global-request))
     (def path (List ref 5 remote))
     (if (null? path)
@@ -390,7 +399,7 @@
           (ssh-put-bool req #t)
           (ssh-put-text req path)))
     (%send c req)
-    (%rn! run %UNANSWERED (List append (%rn run %UNANSWERED) (list remote)))))
+    (%rn! run %UNANSWERED (List append (%rn run %UNANSWERED) (list (pair remote reply))))))
 
 ; --- RemoteForward without a destination: SOCKS at the server's end --------
 ;
@@ -468,18 +477,42 @@
                                  (Socket send-run fd (%bytes-text after) (List length after))))))))))))))
     ch))
 
-; The server's answer to the oldest request still open: a refusal said
-; as OpenSSH says it.
+; The server's answer, read from in, to the oldest request still open.
+; A port 0 asked for is the port the server allocated, the forward's
+; from then on.  A sharing client that asked is told: OK, the port
+; allocated, or the refusal, the forward dropped; otherwise a refusal,
+; and the port allocated, are said as OpenSSH says them.
 (def %answered!
-  (fn (_ run ok)
+  (fn (_ run ok in)
     (def asked (%rn run %UNANSWERED))
     (unless (null? asked)
-      (do (def r (first asked))
+      (do (def r (first (first asked)))
+          (def reply (rest (first asked)))
           (%rn! run %UNANSWERED (rest asked))
-          (unless ok
-            (%say (if (null? (List ref 5 r))
-                    (Str8 append "Warning: remote port forwarding failed for listen port " (%num (List ref 1 r)) "\n")
-                    (Str8 append "Warning: remote port forwarding failed for listen path " (List ref 5 r) "\n"))))))))
+          (def any? (if (null? (List ref 5 r)) (= (List ref 1 r) 0) #f))
+          (def failed (if (null? (List ref 5 r))
+                        (Str8 append "remote port forwarding failed for listen port " (%num (List ref 1 r)))
+                        (Str8 append "remote port forwarding failed for listen path " (List ref 5 r))))
+          (match
+            ((not ok)
+              (if (null? reply) (%say (Str8 append "Warning: " failed "\n"))
+                (do (%rn! run %REMOTES (List filter (fn (_ x) (not (eq? x r))) (%rn run %REMOTES)))
+                    (%rn! run %FWDS (List filter (fn (_ x) (not (eq? (List ref 1 x) r))) (%rn run %FWDS)))
+                    (ssh-mux-send! (first reply) (ssh-mux-reply-error ssh-mux-failure (List ref 1 reply) failed)))))
+            (any?
+              (do (def port (guard (e 0) (ssh-get-uint32 in)))
+                  (def now (pair (first r) (pair port (rest (rest r)))))
+                  (%rn! run %REMOTES (List map (fn (_ x) (if (eq? x r) now x)) (%rn run %REMOTES)))
+                  (%rn! run %FWDS (List map (fn (_ x) (if (eq? (List ref 1 x) r) (list (first x) now) x)) (%rn run %FWDS)))
+                  (if (null? reply)
+                    (%say (Str8 append "Allocated port " (%num port) " for remote forward to "
+                                       (match ((not (null? (List ref 6 r))) (Str8 append (List ref 6 r) ":-2"))
+                                              ((null? (List ref 2 r)) "(null):0")
+                                              (#t (Str8 append (List ref 2 r) ":" (%num (List ref 3 r)))))
+                                       "\n"))
+                    (ssh-mux-send! (first reply) (ssh-mux-reply-two ssh-mux-remote-port (List ref 1 reply) port)))))
+            ((not (null? reply)) (ssh-mux-send! (first reply) (ssh-mux-reply-ok (List ref 1 reply))))
+            (#t ()))))))
 
 ; A channel the server opens: a forwarded-tcpip for a remote forward's
 ; port, or a forwarded-streamlocal@openssh.com for its socket's path,
@@ -565,13 +598,16 @@
 (def %on-terminals
   (fn (_ run) (List filter (fn (_ ch) (if (%ch ch %CLOSED) #f (not (null? (%ch ch %TTY))))) (%rn run %CHANNELS))))
 
-; How long the poll may wait: the clocks' limit, and with a session on a
-; terminal half a second at most, so a resized window is seen -- a
-; closure cannot be a SIGWINCH handler.
+; How long the poll may wait: the clocks' limit and ControlPersist's,
+; and with a session on a terminal half a second at most, so a resized
+; window is seen -- a closure cannot be a SIGWINCH handler.
 (def %poll-ms
   (fn (_ run limits)
-    (def w (ssh-wait-ms limits))
-    (if (null? (%on-terminals run)) w (if (if (< w 0) #t (< 500 w)) 500 w))))
+    (def least (fn (_ a b) (if (< a 0) b (if (< b a) b a))))
+    (def due (%rn run %DEADLINE))
+    (def w (if (null? due) (ssh-wait-ms limits)
+             (least (ssh-wait-ms limits) (* 1000 (if (< due (Sys now)) 0 (- due (Sys now)))))))
+    (if (null? (%on-terminals run)) w (least w 500))))
 
 ; Each terminal's window as it is now, sent as window-change when it
 ; moved.
@@ -651,13 +687,16 @@
 ; to share its connection, as OpenSSH's master serves them.  Each
 ; control connection is greeted with HELLO and answered request by
 ; request: ALIVE_CHECK with this process's id, TERMINATE by ending the
-; run, STOP_LISTENING by closing the socket, and NEW_SESSION or
-; NEW_STDIO_FWD by a channel whose input, output and error are the
-; descriptors the client passes, its control connection told when it is
-; open and the session's exit status, and closed when the channel is.
-; ControlMaster ask and autoask ask SSH_ASKPASS to confirm each, as
-; OpenSSH's ask_permission does.  A forward asked of the master is not
-; served yet: "unsupported request".
+; run, STOP_LISTENING by closing the socket -- a run without a session
+; of its own then ending once no channel is open -- OPEN_FWD and
+; CLOSE_FWD by a forward listened for or asked of the server, or
+; closed, and NEW_SESSION or NEW_STDIO_FWD by a channel whose input,
+; output and error are the descriptors the client passes, its control
+; connection told when it is open and the session's exit status, and
+; closed when the channel is.  ControlMaster ask and autoask ask
+; SSH_ASKPASS to confirm each, as OpenSSH's ask_permission does.  Under
+; ControlPersist the run has no session of its own, and ends once no
+; channel or control connection has been open for its time.
 
 ; A message to a sharing channel's client.
 (def %mux-tell (fn (_ ch m) (ssh-mux-send! (first (%ch ch %CTL)) m)))
@@ -693,8 +732,10 @@
 ; The control socket made at path, as OpenSSH's muxserver_listen makes
 ; it: under umask 0177 at a name of its own, then linked into place, so
 ; no client finds it before it listens.  The descriptor, or () when path
-; is taken, said as OpenSSH says it.
-(def %control-listen
+; is taken, said as OpenSSH says it.  The client makes it before the
+; run, so that under ControlPersist it can leave the run to a process of
+; its own.
+(def ssh-session-control-listen
   (fn (_ path)
     (def temp (Str8 append path "." (%num (Sys getpid)) "." (%num (Sys now))))
     (def old (ssh-sys-umask 127))
@@ -742,11 +783,111 @@
                     (deny)))
                 ((= (first m) ssh-mux-stop-listening)
                   (if (%allowed? run (Str8 append "Disable further multiplexing on shared connection to " host "? "))
-                    (do (%control-close! run) (ssh-mux-send! fd (ssh-mux-reply-ok rid)))
+                    (do (%control-close! run)
+                        (when (null? (%rn run %SESSION)) (%rn! run %STOPPED #t))
+                        (ssh-mux-send! fd (ssh-mux-reply-ok rid)))
                     (deny)))
+                ((= (first m) ssh-mux-open-fwd) (%mux-open-fwd! c run fd rid (rest m) deny))
+                ((= (first m) ssh-mux-close-fwd) (%mux-close-fwd! c run fd rid (rest m)))
                 ((= (first m) ssh-mux-new-session) (%mux-session! c run fd rid (rest m)))
                 ((= (first m) ssh-mux-new-stdio-fwd) (%mux-stdio! c run fd rid (rest m)))
                 (#t (ssh-mux-send! fd (ssh-mux-reply-error ssh-mux-failure rid "unsupported request")))))))))
+
+; The forward on the wire as the run holds one, (ADDRESS PORT HOST PORT
+; GIVEN LPATH CPATH), as the client's settings would: no address given
+; is localhost, or every interface under GatewayPorts for a listener of
+; the master's own; "*" every interface; a dynamic forward's HOST and
+; PORT #f; a remote one given no destination SOCKS's, HOST ().
+(def %forward-of
+  (fn (_ run key)
+    (def t (first key))
+    (def lhost (List ref 1 key)) (def lport (List ref 2 key))
+    (def chost (List ref 3 key)) (def cport (List ref 4 key))
+    (def lpath (if (= lport ssh-mux-streamlocal) lhost ()))
+    (def cpath (if (= cport ssh-mux-streamlocal) chost ()))
+    (def given (if (if (null? lpath) (not (str=? lhost "")) #f) lhost ()))
+    (def addr (match ((not (null? lpath)) ())
+                     ((null? given) (if (if (List ref 4 (%rn run %CONTROL)) (not (= t ssh-mux-fwd-remote)) #f) () "localhost"))
+                     ((str=? given "*") ())
+                     (#t given)))
+    (list (if (if (null? addr) #t (= t ssh-mux-fwd-remote)) addr (%address addr))
+          (if (null? lpath) lport ())
+          (match ((= t ssh-mux-fwd-dynamic) #f) ((not (null? cpath)) ()) ((str=? chost "") ()) (#t chost))
+          (match ((= t ssh-mux-fwd-dynamic) #f) ((not (null? cpath)) ()) (#t cport))
+          given lpath cpath)))
+
+(def %same-key?
+  (fn (_ a b)
+    (List all? (fn (_ i) ((fn (_ x y) (if (str? x) (if (str? y) (str=? x y) #f) (if (str? y) #f (= x y))))
+                          (List ref i a) (List ref i b)))
+      (list 0 1 2 3 4))))
+
+(def %held (fn (_ run key) (List find (fn (_ x) (%same-key? (first x) key)) (%rn run %FWDS))))
+
+; OPEN_FWD, as OpenSSH's mux_master_process_open_fwd serves it: one
+; asked again answered OK, or with the port allocated for it; a local or
+; dynamic one listened for at once, a remote one answered when the
+; server has answered.  A malformed request drops its client.
+(def %mux-open-fwd!
+  (fn (_ c run fd rid in deny)
+    (def key (ssh-mux-forward-read in))
+    (when (null? key) (Err raise 'value "malformed message" ()))
+    (def t (first key))
+    (def lport (List ref 2 key)) (def chost (List ref 3 key)) (def cport (List ref 4 key))
+    (def invalid (fn (_) (ssh-mux-send! fd (ssh-mux-reply-error ssh-mux-failure rid "Invalid forwarding request"))))
+    (def held (%held run key))
+    (match
+      ((not (List any? (fn (_ x) (= x t)) (list ssh-mux-fwd-local ssh-mux-fwd-remote ssh-mux-fwd-dynamic))) (invalid))
+      ((if (= t ssh-mux-fwd-dynamic) (= lport ssh-mux-streamlocal) #f) (invalid))
+      ((if (= t ssh-mux-fwd-local) (= cport 0) #f) (invalid))
+      ((if (= t ssh-mux-fwd-dynamic) #f (str=? chost "")) (invalid))
+      ((not (null? held))
+        (if (if (= t ssh-mux-fwd-remote) (= lport 0) #f)
+          (ssh-mux-send! fd (ssh-mux-reply-two ssh-mux-remote-port rid (List ref 1 (List ref 1 held))))
+          (ssh-mux-send! fd (ssh-mux-reply-ok rid))))
+      ((not (%allowed? run (Str8 append "Open " (ssh-mux-forward-text key (List ref 4 (%rn run %CONTROL)))
+                                        " on " (List ref 3 (%rn run %CONTROL)) "?")))
+        (deny))
+      ((= t ssh-mux-fwd-remote)
+        (do (def r (%forward-of run key))
+            (%rn! run %REMOTES (List append (%rn run %REMOTES) (list r)))
+            (%rn! run %FWDS (List append (%rn run %FWDS) (list (list key r))))
+            (%ask-remote! c run r (list fd rid))))
+      (#t
+        (do (def l (guard (e ()) (%listen (%forward-of run key) (%rn run %SL))))
+            (if (null? l)
+              (ssh-mux-send! fd (ssh-mux-reply-error ssh-mux-failure rid "Port forwarding failed"))
+              (do (%rn! run %LISTENERS (List append (%rn run %LISTENERS) (list l)))
+                  (%rn! run %FWDS (List append (%rn run %FWDS) (list (list key l))))
+                  (ssh-mux-send! fd (ssh-mux-reply-ok rid)))))))))
+
+; CLOSE_FWD: a forward asked before closed -- a listener's socket, or
+; the server asked to cancel a remote one, as OpenSSH asks it, with no
+; reply wanted -- or "port not forwarded".
+(def %mux-close-fwd!
+  (fn (_ c run fd rid in)
+    (def key (ssh-mux-forward-read in))
+    (when (null? key) (Err raise 'value "malformed message" ()))
+    (def held (%held run key))
+    (if (null? held)
+      (ssh-mux-send! fd (ssh-mux-reply-error ssh-mux-failure rid "port not forwarded"))
+      (do (def thing (List ref 1 held))
+          (%rn! run %FWDS (List filter (fn (_ x) (not (eq? x held))) (%rn run %FWDS)))
+          (if (= (first key) ssh-mux-fwd-remote)
+            (do (def req (%packet-of ssh-msg-global-request))
+                (if (null? (List ref 5 thing))
+                  (do (ssh-put-text req "cancel-tcpip-forward")
+                      (ssh-put-bool req #f)
+                      (ssh-put-text req (if (null? (first thing)) "" (first thing)))
+                      (ssh-put-uint32 req (List ref 1 thing)))
+                  (do (ssh-put-text req "cancel-streamlocal-forward@openssh.com")
+                      (ssh-put-bool req #f)
+                      (ssh-put-text req (List ref 5 thing))))
+                (%send c req)
+                (%rn! run %REMOTES (List filter (fn (_ x) (not (eq? x thing))) (%rn run %REMOTES))))
+            (do (guard (e ()) (Socket close (first thing)))
+                (%rn! run %LISTENERS (List filter (fn (_ x) (not (eq? x thing))) (%rn run %LISTENERS)))))
+          (ssh-mux-send! fd (ssh-mux-reply-ok rid))))))
 
 ; n descriptors a client passes after its request: them, or () when any
 ; fails to come, those that came closed.
@@ -849,8 +990,8 @@
               ()))
     (match
       ((= t ssh-msg-global-request) (%global! c in))
-      ((= t ssh-msg-request-success) (%answered! run #t))
-      ((= t ssh-msg-request-failure) (%answered! run #f))
+      ((= t ssh-msg-request-success) (%answered! run #t in))
+      ((= t ssh-msg-request-failure) (%answered! run #f in))
       ((= t %msg-channel-open) (%opened! c run in))
       ((null? ch) ())
       ((= t %msg-channel-open-confirmation)
@@ -970,6 +1111,33 @@
       ; success needs nothing
       (#t ()))))
 
+; Whether a channel or a control connection is open, as OpenSSH's
+; channel_still_open counts them.
+(def %still-open?
+  (fn (_ run)
+    (if (not (null? (%rn run %CONTROLS))) #t
+      (List any? (fn (_ ch) (not (%ch ch %CLOSED))) (%rn run %CHANNELS)))))
+
+; Whether the run is over: a sharing client has ended it; its session
+; has closed, and every sharing client's channel with it; it has
+; stopped listening, with no session of its own, and nothing is open;
+; or ControlPersist's time has passed since anything was last open,
+; the time begun again each time nothing is.
+(def %over?
+  (fn (_ run)
+    (def persist (if (null? (%rn run %CONTROL)) () (List ref 5 (%rn run %CONTROL))))
+    (def open? (%still-open? run))
+    (when (if (null? persist) #f (> persist 0))
+      (match (open? (%rn! run %DEADLINE ()))
+             ((null? (%rn run %DEADLINE)) (%rn! run %DEADLINE (+ (Sys now) persist)))
+             (#t ())))
+    (match
+      ((%rn run %ENDED) #t)
+      ((if (%rn run %STOPPED) (not open?) #f) #t)
+      ((if (null? (%rn run %DEADLINE)) #f (>= (Sys now) (%rn run %DEADLINE))) #t)
+      ((null? (%rn run %SESSION)) #f)
+      (#t (if (%ch (%rn run %SESSION) %CLOSED) (null? (%shared run)) #f)))))
+
 (def %ready?
   (fn (_ ready fd)
     (List any? (fn (_ r) (if (= (first r) fd) (not (null? (rest r))) #f)) ready)))
@@ -996,35 +1164,42 @@
 ; as a channel's (see %TTY), or (); agent, the agent socket forwarded
 ; to the session, or (); and open, where a remote forward's SOCKS
 ; requests may go; streamlocal, (MASK . UNLINK), StreamLocalBindMask
-; and StreamLocalBindUnlink; and control, (PATH ASK HOST), the control
-; socket sharing clients find the connection at, ASK whether each is
-; confirmed and HOST the name they are asked about, or () for none.
-; Runs until the session channel closes and every sharing client's
-; channel with it, or, with no command, until the connection ends, or
-; until a sharing client asks the run to end.  Answers the exit status,
-; or () when the server gave none.
+; and StreamLocalBindUnlink; and control, (FD PATH ASK HOST GATEWAY
+; PERSIST), the control socket listened on (see
+; ssh-session-control-listen) at PATH for sharing clients, ASK whether
+; each is confirmed, HOST the name they are asked about, GATEWAY
+; GatewayPorts for the forwards they ask for, and PERSIST
+; ControlPersist's seconds, 0 for no end, or () when the run is not
+; persisting; or () for none.  Runs until the session channel closes
+; and every sharing client's channel with it, or, with no command,
+; until the connection ends, or until a sharing client asks the run to
+; end, or one stops its listening and no channel is open, or until
+; ControlPersist's time has passed with nothing open.  Answers the exit
+; status, or () when the server gave none.
 (def ssh-session-run!
   (fn (_ c command input on-out on-err forwards remotes netcat limits env tty agent open streamlocal control)
-    (def run (Vector make 13 ()))
+    (def run (Vector make 17 ()))
     (ssh-clocks-start!)
     (%rn! run %CHANNELS ()) (%rn! run %NEXT 0) (%rn! run %MOVED 0)
     (%rn! run %REMOTES remotes) (%rn! run %UNANSWERED ()) (%rn! run %RUN-AGENT agent)
     (%rn! run %SOCKS ()) (%rn! run %OPEN open) (%rn! run %CONTROLS ()) (%rn! run %ENDED #f)
-    (%rn! run %CONTROL
-      (if (null? control) ()
-        ((fn (_ fd) (if (null? fd) () (pair fd control))) (%control-listen (first control)))))
-    (%rn! run %LISTENERS
-      (List filter (fn (_ l) (not (null? l))) (List map (fn (_ f) (%listen f streamlocal)) forwards)))
-    (List for-each (fn (_ r) (%ask-remote! c run r)) remotes)
+    (%rn! run %CONTROL control) (%rn! run %STOPPED #f) (%rn! run %DEADLINE ()) (%rn! run %SL streamlocal)
+    ; each forward with its listener, and as the wire says it, so that a
+    ; sharing client asking for it again finds it, or closes it
+    (def held (List filter (fn (_ x) (not (null? (List ref 1 x))))
+                (List map (fn (_ f) (list (ssh-mux-forward-key (if (eq? (List ref 2 f) #f) ssh-mux-fwd-dynamic ssh-mux-fwd-local) f)
+                                          (%listen f streamlocal)))
+                  forwards)))
+    (%rn! run %LISTENERS (List map (fn (_ x) (List ref 1 x)) held))
+    (%rn! run %FWDS (List append held (List map (fn (_ r) (list (ssh-mux-forward-key ssh-mux-fwd-remote r) r)) remotes)))
+    (List for-each (fn (_ r) (%ask-remote! c run r ())) remotes)
     (unless (null? command) (%open-session! c run command input on-out on-err tty env agent))
     (unless (null? netcat) (%open-netcat! c run (first netcat) (rest netcat) input on-out))
     (def sock (ssh-fd c))
     (def failed
       (guard (e (guard (e2 "an internal error") (e msg)))
         ((fn (self)
-           (unless (if (%rn run %ENDED) #t
-                     (if (null? (%rn run %SESSION)) #f
-                       (if (%ch (%rn run %SESSION) %CLOSED) (null? (%shared run)) #f)))
+           (unless (%over? run)
              (do (if (ssh-pending? c)
                    (%handle! c run)
                    (do (def inputs (%readable run))
@@ -1099,4 +1274,4 @@
     (ssh-put-text d "")
     (%send c d)))
 
-(provide ssh/session ssh-session-run! ssh-disconnect!)
+(provide ssh/session ssh-session-run! ssh-session-control-listen ssh-disconnect!)

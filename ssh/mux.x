@@ -14,9 +14,10 @@
 ; the request, each a descriptor in a message of its own (SCM_RIGHTS).
 ;
 ; Here are the messages, their reading and writing, and the client's
-; requests: an alive check, a terminate, a stop of the listener, and a
-; session or -W stdio forward the master carries, its exit status the
-; client's.  The master's half is the session loop's (ssh/session).
+; requests: an alive check, a terminate, a stop of the listener, a
+; forward opened or closed, and a session or -W stdio forward the
+; master carries, its exit status the client's.  The master's half is
+; the session loop's (ssh/session).
 
 (module ssh/mux)
 
@@ -44,6 +45,7 @@
 (def ssh-mux-exit-message 2147483652)     ; 0x80000004
 (def ssh-mux-alive 2147483653)            ; 0x80000005
 (def ssh-mux-session-opened 2147483654)   ; 0x80000006
+(def ssh-mux-remote-port 2147483655)      ; 0x80000007
 (def ssh-mux-tty-alloc-fail 2147483656)   ; 0x80000008
 
 ; --- messages --------------------------------------------------------------
@@ -252,6 +254,79 @@
          (#t (self status))))
      ())))
 
+; --- forwards ------------------------------------------------------------------
+;
+; A forward on the wire is (TYPE LHOST LPORT CHOST CPORT), as OpenSSH's
+; mux_client_forward sends it: LHOST "" for no address given, "*" for
+; every interface, or the address; a socket's path in place of a host
+; with its port ssh-mux-streamlocal; a dynamic forward's CHOST "" and
+; CPORT 0.  The same forward asked twice is the same list.
+
+(def ssh-mux-fwd-local 1)
+(def ssh-mux-fwd-remote 2)
+(def ssh-mux-fwd-dynamic 3)
+(def ssh-mux-streamlocal 4294967294)       ; (u_int) -2
+
+; The wire form of a forward of type t as the client's settings hold
+; one, (ADDRESS PORT HOST PORT GIVEN LPATH CPATH), HOST #f or () for a
+; dynamic one's.
+(def ssh-mux-forward-key
+  (fn (_ t f)
+    (def given (List ref 4 f))
+    (def lpath (List ref 5 f))
+    (def cpath (List ref 6 f))
+    (def chost (List ref 2 f))
+    (def cport (List ref 3 f))
+    (list t
+          (match ((not (null? lpath)) lpath) ((null? given) "") ((str=? given "") "*") (#t given))
+          (if (null? lpath) (List ref 1 f) ssh-mux-streamlocal)
+          (match ((not (null? cpath)) cpath) ((if (null? chost) #t (not chost)) "") (#t chost))
+          (match ((not (null? cpath)) ssh-mux-streamlocal) ((if (null? cport) #t (not cport)) 0) (#t cport)))))
+
+; A forward as OpenSSH's format_forward says it, gateway GatewayPorts.
+(def ssh-mux-forward-text
+  (fn (_ key gateway)
+    (def t (first key))
+    (def lhost (List ref 1 key)) (def lport (List ref 2 key))
+    (def chost (List ref 3 key)) (def cport (List ref 4 key))
+    (def port (fn (_ p) (if (= p ssh-mux-streamlocal) "-2" (%num p))))
+    (def listen (if (str=? lhost "") (if (if gateway (not (= t ssh-mux-fwd-remote)) #f) "*" "LOCALHOST") lhost))
+    (match
+      ((= t ssh-mux-fwd-dynamic) (Str8 append "dynamic forward " listen ":" (port lport) " -> *"))
+      (#t (Str8 append (if (= t ssh-mux-fwd-local) "local" "remote") " forward " listen ":" (port lport)
+                       " -> " chost ":" (port cport))))))
+
+; OPEN_FWD read past its id: the forward, or () when it is malformed, a
+; port past 65535 that is no socket's.
+(def ssh-mux-forward-read
+  (fn (_ in)
+    (def t (ssh-get-uint32 in))
+    (def lhost (ssh-get-text in)) (def lport (ssh-get-uint32 in))
+    (def chost (ssh-get-text in)) (def cport (ssh-get-uint32 in))
+    (def bad (fn (_ p) (if (= p ssh-mux-streamlocal) #f (> p 65535))))
+    (if (if (bad lport) #t (bad cport)) () (list t lhost lport chost cport))))
+
+; OPEN_FWD, or CLOSE_FWD when cancel?, of the forward key, its reply
+; read: #t for OK, (port . PORT) for REMOTE_PORT, (denied . REASON),
+; (failed . REASON), or () when the master has gone.
+(def ssh-mux-forward!
+  (fn (_ fd cancel? rid key)
+    (def m (ssh-mux-message (if cancel? ssh-mux-close-fwd ssh-mux-open-fwd)))
+    (ssh-put-uint32 m rid)
+    (ssh-put-uint32 m (first key))
+    (ssh-put-text m (List ref 1 key)) (ssh-put-uint32 m (List ref 2 key))
+    (ssh-put-text m (List ref 3 key)) (ssh-put-uint32 m (List ref 4 key))
+    (if (not (ssh-mux-send! fd m)) ()
+      (do (def r (ssh-mux-receive fd))
+          (if (null? r) ()
+            (do (ssh-get-uint32 (rest r))
+                (match
+                  ((= (first r) ssh-mux-ok) #t)
+                  ((= (first r) ssh-mux-remote-port) (pair (lit port) (ssh-get-uint32 (rest r))))
+                  ((= (first r) ssh-mux-permission-denied) (pair (lit denied) (ssh-get-text (rest r))))
+                  ((= (first r) ssh-mux-failure) (pair (lit failed) (ssh-get-text (rest r))))
+                  (#t ()))))))))
+
 ; --- the master's end --------------------------------------------------------
 
 ; A descriptor the client sends after its request: it, or ().
@@ -260,7 +335,9 @@
 (provide ssh/mux ssh-mux-version ssh-mux-hello ssh-mux-new-session ssh-mux-alive-check ssh-mux-terminate
   ssh-mux-open-fwd ssh-mux-close-fwd ssh-mux-new-stdio-fwd ssh-mux-stop-listening ssh-mux-proxy
   ssh-mux-ok ssh-mux-permission-denied ssh-mux-failure ssh-mux-exit-message ssh-mux-alive
-  ssh-mux-session-opened ssh-mux-tty-alloc-fail
+  ssh-mux-session-opened ssh-mux-remote-port ssh-mux-tty-alloc-fail
+  ssh-mux-fwd-local ssh-mux-fwd-remote ssh-mux-fwd-dynamic ssh-mux-streamlocal
+  ssh-mux-forward-key ssh-mux-forward-text ssh-mux-forward-read ssh-mux-forward!
   ssh-mux-message ssh-mux-send! ssh-mux-receive ssh-mux-hello-message ssh-mux-reply-ok ssh-mux-reply-error
   ssh-mux-reply-two ssh-mux-session-request ssh-mux-connect ssh-mux-greet! ssh-mux-alive? ssh-mux-command
   ssh-mux-open-session ssh-mux-open-stdio ssh-mux-wait ssh-mux-take-fd)

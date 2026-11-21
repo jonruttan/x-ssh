@@ -80,7 +80,7 @@ Run 'x -l ssh -- <program>' with one of these programs:
                                     "-o" "ServerAliveInterval=5" "-v" "you@host")))))
 ```
 ---
-    ('exec "host" () ("User \"me\"" "Port 2222" "IdentityFile \"k\"" "LocalForward 8080:h:80" "RemoteForward 9:h:9" "GatewayPorts yes" "SessionType none" "LogLevel DEBUG1" "ServerAliveInterval=5" "User \"you\"") () () #f () #f)
+    ('exec "host" () ("User \"me\"" "Port 2222" "IdentityFile \"k\"" "LocalForward 8080:h:80" "RemoteForward 9:h:9" "GatewayPorts yes" "SessionType none" "LogLevel DEBUG1" "ServerAliveInterval=5" "User \"you\"") () () #f () #f ())
 
 ### the command is the operands after the destination, joined
 
@@ -96,7 +96,7 @@ Run 'x -l ssh -- <program>' with one of these programs:
 (write (first (rest (ssh-plan (list "ssh" "-F" "none" "-W" "git.example:9418" "-G" "ssh://git@example.org:2200")))))
 ```
 ---
-    ('exec "example.org" () ("User \"git\"" "Port 2200") "none" "git.example:9418" #t () #f)
+    ('exec "example.org" () ("User \"git\"" "Port 2200") "none" "git.example:9418" #t () #f ())
 
 ### no destination is the usage, status 255
 
@@ -112,7 +112,7 @@ Run 'x -l ssh -- <program>' with one of these programs:
 (write (first (rest (ssh-plan (list "ssh" "-s" "h" "sftp")))))
 ```
 ---
-    ('exec "h" "sftp" ("SessionType subsystem") () () #f () #f)
+    ('exec "h" "sftp" ("SessionType subsystem") () () #f () #f ())
 
 ### -A and -a forward the agent and do not
 
@@ -140,13 +140,24 @@ Run 'x -l ssh -- <program>' with one of these programs:
 ---
     (("Only a single -J option is permitted (use commas to separate multiple jump hops)\r\n" 255) ("Cannot specify -J with ProxyCommand\r\n" 255) ("Invalid -J argument\r\n" 255) ("Bad dynamic forwarding specification 'bad'\n" 255))
 
+### -M is ControlMaster yes, -MM ask; -S is ControlPath; -O's command rides along, one OpenSSH knows or refused as it refuses it
+
+```ssh
+(write (list (List ref 3 (first (rest (ssh-plan (list "ssh" "-M" "-S" "/s" "h")))))
+             (List ref 3 (first (rest (ssh-plan (list "ssh" "-MM" "h")))))
+             (List ref 9 (first (rest (ssh-plan (list "ssh" "-O" "check" "h")))))
+             (rest (ssh-plan (list "ssh" "-O" "bogus" "h")))))
+```
+---
+    (("ControlMaster yes" "ControlPath \"/s\"") ("ControlMaster ask") "check" ("Invalid multiplex command.\r\n" 255))
+
 ### -b, -e and -f are BindAddress, EscapeChar and ForkAfterAuthentication, -f with StdinNull; -E's file and -y ride along
 
 ```ssh
 (write (first (rest (ssh-plan (list "ssh" "-b" "127.0.0.1" "-e" "^A" "-f" "-E" "log" "-y" "h" "true")))))
 ```
 ---
-    ('exec "h" "true" ("BindAddress \"127.0.0.1\"" "EscapeChar \"^A\"" "ForkAfterAuthentication yes" "StdinNull yes") () () #f "log" #t)
+    ('exec "h" "true" ("BindAddress \"127.0.0.1\"" "EscapeChar \"^A\"" "ForkAfterAuthentication yes" "StdinNull yes") () () #f "log" #t ())
 
 ### -4 and -6 are AddressFamily inet and inet6, the last given winning
 

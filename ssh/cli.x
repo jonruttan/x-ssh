@@ -71,15 +71,18 @@
             (Opts arg "-J" "destination" "Connect through jump hosts, [user@]host[:port] separated by commas, as ProxyJump")
             (Opts arg "-L" "address" "Local forwarding: [bind_address:]port:host:hostport")
             (Opts arg "-m" "mac_spec" "The MACs, as MACs: a comma-separated list")
+            (Opts flag "-M" "Share the connection: listen on ControlPath for other clients, as ControlMaster yes; -MM as ask")
             (Opts arg "-l" "login_name" "The user to log in as")
             (Opts flag "-N" "Do not run a remote command")
             (Opts flag "-n" "Read standard input from /dev/null")
             (Opts arg "-o" "option" "An option in the configuration file's form, before the files'")
+            (Opts arg "-O" "ctl_cmd" "Ask the master on ControlPath: check, exit or stop")
             (Opts arg "-p" "port" "The port to connect to")
             (Opts arg "-Q" "query_option" "Print the algorithms served of a kind -- cipher, mac, kex, key, sig and the like; help lists them")
             (Opts flag "-q" "Quiet: warnings and diagnostics suppressed")
             (Opts arg "-R" "address" "Remote forwarding: [bind_address:]port:host:hostport")
             (Opts flag "-s" "Ask for a subsystem, the command naming it, as SessionType subsystem")
+            (Opts arg "-S" "ctl_path" "The control socket of a shared connection, as ControlPath")
             (Opts flag "-T" "Do not ask for a terminal")
             (Opts flag "-t" "Ask for a terminal, as RequestTTY yes: for a command too, when standard input is one")
             (Opts flag "-v" "Verbose: trace the connection on standard error")
@@ -297,9 +300,10 @@
       (list (if (str=? (List last given) "-4") "AddressFamily inet" "AddressFamily inet6")))))
 
 ; The client's line: (client (exec HOST COMMAND OPTIONS CONFIG STDIO
-; PRINT LOG SYSLOG) 0), OPTIONS the configuration lines its flags stand
+; PRINT LOG SYSLOG CONTROL) 0), OPTIONS the configuration lines its flags stand
 ; for, then -o's, then the destination's user and port; COMMAND () for
-; none; STDIO -W's host:port or (); LOG -E's file or (); SYSLOG -y's.
+; none; STDIO -W's host:port or (); LOG -E's file or (); SYSLOG -y's;
+; CONTROL -O's command or ().
 ; -Q is (client (query LINES) 0), what it prints.
 (def %client-plan
   (fn (_ o decl args)
@@ -321,6 +325,8 @@
         (list (lit client) "Cannot specify -J with ProxyCommand\r\n" 255))
       ((if (null? jumps) #f (null? (ssh-client-jump (first jumps))))
         (list (lit client) "Invalid -J argument\r\n" 255))
+      ((if (Opts on? o "-O") (not (List any? (fn (_ c) (str=? c (Opts value o "-O"))) (list "check" "forward" "cancel" "exit" "stop" "proxy" "conninfo" "channels"))) #f)
+        (list (lit client) "Invalid multiplex command.\r\n" 255))
       ((not (null? bad-dynamic))
         (list (lit client) (Str8 append "Bad dynamic forwarding specification '" bad-dynamic "'\n") 255))
       (#t
@@ -347,6 +353,9 @@
                         (if (Opts on? o "-t") (list "RequestTTY yes") ())
                         (if (Opts on? o "-T") (list "RequestTTY no") ())
                         (if (Opts on? o "-x") (list "ForwardX11 no") ())
+                        ((fn (_ m) (match ((= m 0) ()) ((= m 1) (list "ControlMaster yes")) (#t (list "ControlMaster ask"))))
+                         (List length (List filter (fn (_ f) (str=? f "-M")) (rest (Assoc entry (lit on) o)))))
+                        (List map (fn (_ p) (Str8 append "ControlPath " (q p))) (Opts values o "-S"))
                         (if (Opts on? o "-C") (list "Compression yes") ())
                         (if (Opts on? o "-A") (list "ForwardAgent yes") ())
                         (if (Opts on? o "-a") (list "ForwardAgent no") ())
@@ -361,7 +370,8 @@
                       (%value o "-W")
                       (Opts on? o "-G")
                       (%value o "-E")
-                      (Opts on? o "-y"))
+                      (Opts on? o "-y")
+                      (%value o "-O"))
                 0))))))
 
 ; Whether a -o ProxyCommand comes before -J on the line, which OpenSSH

@@ -74,7 +74,16 @@ nistp521), for host keys and user keys, at either end.
   be a Unix socket, a field holding `/` its path, as OpenSSH reads
   them (streamlocal); a socket listened on is made under
   StreamLocalBindMask, an old one in its place removed first under
-  StreamLocalBindUnlink.  Served keywords: Hostname, Port, User,
+  StreamLocalBindUnlink.  Connection sharing is OpenSSH's, its
+  multiplexing protocol either end: under ControlMaster (`-M`, `-MM`
+  ask) the connection listens on ControlPath (`-S`; its `%` tokens and
+  `%C` expanded) for other clients, OpenSSH's or this one, each
+  session or `-W` forward carried on a channel of its own, the
+  descriptors the client passes its input and output, ask and autoask
+  confirmed by SSH_ASKPASS; a client finding a master there has it carry
+  its session or `-W`, the exit status the master sends its own, or,
+  with forwards of its own, connects itself; `-O check`, `exit` and
+  `stop` ask the master.  Served keywords: Hostname, Port, User,
   IdentityFile (`~/.ssh/id_rsa`, `id_ecdsa` and `id_ed25519` by default;
   OpenSSH's or Dropbear's key files, a key under a passphrase among
   them), IdentityAgent (SSH_AUTH_SOCK by default; the agent's keys
@@ -85,7 +94,7 @@ nistp521), for host keys and user keys, at either end.
   GlobalKnownHostsFile, HostKeyAlias, BatchMode, PasswordAuthentication,
   PubkeyAuthentication, NumberOfPasswordPrompts, LocalForward,
   RemoteForward, DynamicForward, PermitRemoteOpen, GatewayPorts, ClearAllForwardings,
-  StreamLocalBindMask, StreamLocalBindUnlink,
+  StreamLocalBindMask, StreamLocalBindUnlink, ControlMaster, ControlPath,
   ServerAliveInterval,
   ServerAliveCountMax, ChannelTimeout (`global=`), SendEnv, SetEnv,
   RemoteCommand, ProxyCommand, ProxyJump, SessionType, StdinNull,
@@ -193,13 +202,15 @@ the client against a built Dropbear, `server.sh` drives the server with
 Dropbear's and OpenSSH's clients, `scp.sh` runs scp from either end, and
 `agent.sh` pairs ssh-agent and ssh-add with OpenSSH's and forwards the agent.
 `sshd.sh` drives the client against OpenSSH's server, run unprivileged:
-forwards, and Unix sockets at either end.
-All but `sshd.sh` take a built Dropbear's directory.
+forwards, and Unix sockets at either end; `mux.sh` pairs its connection
+sharing with OpenSSH's, either end the master.
+All but `sshd.sh` and `mux.sh` take a built Dropbear's directory.
 
 `tests/linux/run.sh` is the Linux leg: password logins, which want a
-shadow file and a known password, and a root server's other users, run as
-root in a container built from `tests/linux/Containerfile` at the declared
-release, with Dropbear's and OpenSSH's clients as the oracles.
+shadow file and a known password, a root server's other users, and a
+ControlMaster's descriptors passed on musl, run as root in a container
+built from `tests/linux/Containerfile` at the declared release, with
+Dropbear's and OpenSSH's clients as the oracles.
 
 ## Security
 
@@ -229,7 +240,8 @@ container or x-os; where a connection has to be relied on, use OpenSSH.
 - **Random bytes** are read from `/dev/urandom`.
 - **Not served:** certificates, security-key (`sk-`) key types,
   keyboard-interactive, hostbased and GSSAPI authentication,
-  compression, and IPv6.
+  compression, IPv6, ControlPersist (read and printed, the master not
+  kept in the background), and `-O forward`, `cancel` and `proxy`.
 
 ## Install and test
 

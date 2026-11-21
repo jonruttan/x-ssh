@@ -298,11 +298,11 @@ tests/oracle/client.sh and tests/oracle/server.sh.
 ```ssh
 (import x/type/vector)
 (def %ce-escape (eval (lit %escape) (module ssh/session)))
-(def %ce-run (Vector make 11 ()))
+(def %ce-ch (Vector make 20 ()))
 (def %ce-pass
   (fn (_ text esc)
-    ((prim-ref (lit obj) (lit set!)) %ce-run 11 1)
-    (def r (%ce-escape %ce-run text (Str8 length text) esc))
+    ((prim-ref (lit obj) (lit set!)) %ce-ch 17 1)
+    (def r (%ce-escape %ce-ch text (Str8 length text) esc))
     (Str8 sub 0 (rest r) (first r))))
 (write (list (%ce-pass "~~x" 126) (%ce-pass "a~b" 126) (%ce-pass "~x" 126) (%ce-pass "ab\n~~" 126)
              (guard (e (e msg)) (%ce-pass "ls\n~." 126))
@@ -310,3 +310,54 @@ tests/oracle/client.sh and tests/oracle/server.sh.
 ```
 ---
     ("~x" "a~b" "~x" "ab\n~" "escape" "!x\n~." "escape")
+
+## connection sharing
+
+### ControlMaster, ControlPath and ControlPersist as -G prints them: ControlPath's tokens expanded, none no line, ControlPersist 0 yes; bad ones refused in OpenSSH's words
+
+```ssh
+(import ssh/client ssh-client-settings)
+(import ssh/config ssh-config-options)
+(def %pr (eval (lit %print) (module ssh/client)))
+(def %gc (fn (_ opts) (List filter (fn (_ l) (not (null? (Str8 index-of "control" l))))
+  (Str8 split "\n" (%pr (ssh-client-settings (ssh-config-options opts) "h" "u"))))))
+(write (list (%gc ()) (%gc (list "ControlMaster yes" "ControlPath /s/%r@%h:%p" "ControlPersist 10m"))
+             (%gc (list "ControlMaster autoask" "ControlPath none" "ControlPersist 0"))
+             (%gc (list "ControlMaster ask" "ControlPersist yes"))
+             (guard (e (e msg)) (%gc (list "ControlMaster maybe")))
+             (guard (e (e msg)) (%gc (list "ControlPersist soon")))))
+```
+---
+    (("controlmaster false" "controlpersist no") ("controlmaster true" "controlpath /s/u@h:22" "controlpersist 600") ("controlmaster autoask" "controlpersist yes") ("controlmaster ask" "controlpersist yes") "command-line: line 1: unsupported option \"maybe\"." "command-line: line 1: Bad ControlPersist argument.")
+
+### the multiplexing protocol's messages as bytes: HELLO version 4, a two-field reply, a refusal with its reason
+
+```ssh
+(import ssh/mux ssh-mux-hello-message ssh-mux-reply-two ssh-mux-reply-error ssh-mux-alive ssh-mux-failure)
+(import ssh/bytes ssh-out-run)
+(def %bytes (fn (_ out) (def r (ssh-out-run out))
+  ((fn (self i) (if (= i (rest r)) () (pair ((prim-ref (lit char) (lit ->int)) ((prim-ref (lit str) (lit byte-ref)) (first r) i)) (self (+ i 1))))) 0)))
+(write (list (%bytes (ssh-mux-hello-message)) (%bytes (ssh-mux-reply-two ssh-mux-alive 7 513))
+             (%bytes (ssh-mux-reply-error ssh-mux-failure 1 "no"))))
+```
+---
+    ((0 0 0 1 0 0 0 4) (128 0 0 5 0 0 0 7 0 0 2 1) (128 0 0 3 0 0 0 1 0 0 0 2 110 111))
+
+### a NEW_SESSION request read: terminal, agent and subsystem flags, the escape character (none as 0xffffffff), TERM, the command and the environment
+
+```ssh
+(import ssh/mux ssh-mux-message ssh-mux-new-session ssh-mux-session-request)
+(import ssh/bytes ssh-out-run ssh-in ssh-put-uint32 ssh-put-text ssh-get-uint32)
+(def %req (fn (_ rid tty agent sub esc term command env)
+  (def m (ssh-mux-message ssh-mux-new-session))
+  (ssh-put-uint32 m rid) (ssh-put-text m "") (ssh-put-uint32 m tty) (ssh-put-uint32 m 0) (ssh-put-uint32 m agent) (ssh-put-uint32 m sub)
+  (ssh-put-uint32 m esc) (ssh-put-text m term) (ssh-put-text m command)
+  (List for-each (fn (_ e) (ssh-put-text m e)) env)
+  (def r (ssh-out-run m))
+  (def in (ssh-in (first r) 0 (rest r)))
+  (ssh-get-uint32 in) (ssh-get-uint32 in)
+  (ssh-mux-session-request in)))
+(write (list (%req 1 1 0 1 126 "xterm" "sftp" (list "A=1" "B=2")) (%req 2 0 1 0 4294967295 "" "" ())))
+```
+---
+    ((#t #f #t 126 "xterm" "sftp" ("A=1" "B=2")) (#f #t #f () "" "" ()))

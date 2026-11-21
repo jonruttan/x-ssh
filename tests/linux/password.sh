@@ -29,6 +29,8 @@
 #   root       under PermitRootLogin's default root's password is refused,
 #              logged, and MaxAuthTries ends it; under PasswordAuthentication
 #              no none is asked
+#   share      an x-ssh ControlMaster: descriptors passed to it on musl,
+#              from OpenSSH's passenger and x-ssh's, and -W through it
 #
 # The clients are the oracles.
 set -u
@@ -201,6 +203,25 @@ if [ -z "$out" ] && grep -q 'ROOT LOGIN REFUSED FROM 127.0.0.1 port' "$fx/root.l
 	echo "ok: root -- PermitRootLogin's default refuses root's password, MaxAuthTries ends it; PasswordAuthentication no offers none"
 else
 	fail "root: outputs '$out' and '$out2'"; cat "$fx/root.log" "$fx/nopw.log" >&2
+fi
+
+# share: an x-ssh ControlMaster by root's key, descriptors passed to it on
+# musl: OpenSSH's passenger, x-ssh's, and -W through it
+cm=/tmp/share.cm
+cp "$fx/userkey.pub" /root/.ssh/authorized_keys
+xk() { HOME="$fx/home" "$X" -l ssh -- ssh -F none -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i "$fx/userkey" -p 2222 -l root "$@"; }
+xk -M -S "$cm" -N 127.0.0.1 < /dev/null 2> "$fx/master.err" &
+mpid=$!
+i=0; while ! [ -S "$cm" ] && [ $i -lt 600 ]; do i=$((i + 1)); sleep 1; done
+theirs=$(ssh -S "$cm" -p 2222 -l root 127.0.0.1 'echo theirs; exit 6' < /dev/null 2> "$fx/client.err"; echo "status $?")
+ours=$(xk -S "$cm" 127.0.0.1 'echo ours; exit 7' < /dev/null 2>> "$fx/client.err"; echo "status $?")
+banner=$(xk -S "$cm" -W 127.0.0.1:2222 127.0.0.1 < /dev/null 2>> "$fx/client.err" | head -c 8)
+xk -S "$cm" -O exit 127.0.0.1 2>> "$fx/client.err"
+wait $mpid
+if [ "$theirs" = "$(printf 'theirs\nstatus 6')" ] && [ "$ours" = "$(printf 'ours\nstatus 7')" ] && [ "$banner" = "SSH-2.0-" ] && ! [ -e "$cm" ]; then
+	echo "ok: share -- an x-ssh master's descriptors passed on musl: OpenSSH's passenger, x-ssh's, -W, and -O exit"
+else
+	fail "share: '$theirs' '$ours' '$banner'"; cat "$fx/master.err" >&2
 fi
 
 exit $failed

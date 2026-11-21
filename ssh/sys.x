@@ -15,7 +15,7 @@
 (import x/sys/file)
 (import x/sys/posix)
 (import x/platform/syscall os-darwin?)
-(import x/core/doors ffi-dlopen ffi-dlsym ptr-call ptr-ref ptr-set! str-make str->ptr str-byte-ref char->int int/ int%)
+(import x/core/doors ffi-dlopen ffi-dlsym ptr-call ptr-ref ptr-set! ptr->int str-make str->ptr str-byte-ref char->int int/ int%)
 
 (def %num (fn (_ n) ((prim-ref (lit convert) (lit to)) n (Type named STRING) 10)))
 
@@ -26,9 +26,78 @@
 (def %c-connect (ffi-dlsym %libc "connect"))
 (def %c-close (ffi-dlsym %libc "close"))
 (def %c-umask (ffi-dlsym %libc "umask"))
+(def %c-sendmsg (ffi-dlsym %libc "sendmsg"))
+(def %c-recvmsg (ffi-dlsym %libc "recvmsg"))
+(def %c-gethostname (ffi-dlsym %libc "gethostname"))
 
 ; The file mode creation mask set to mask; answers the one it replaces.
 (def ssh-sys-umask (fn (_ mask) (ptr-call %c-umask mask)))
+
+; This machine's name, as gethostname says it.
+(def ssh-sys-hostname
+  (fn (_)
+    (def s (str-make 256))
+    (def p (str->ptr s))
+    ((fn (self i) (when (< i 256) (ptr-set! p i 0 1) (self (+ i 1)))) 0)
+    (ptr-call %c-gethostname p 255)
+    ((fn (self i) (if (= (ptr-ref p i 1) 0) (Str8 sub 0 i s) (self (+ i 1)))) 0)))
+
+; --- descriptors over a Unix socket (SCM_RIGHTS) ----------------------------
+;
+; A descriptor passed as OpenSSH's mm_send_fd passes one: a message of a
+; single byte carrying it in its control part.  The system lays the
+; message header out at 64 bits as Darwin and Linux do: Darwin's is 48
+; bytes, its iovec count and control length 4 bytes wide; Linux's 56,
+; both 8; a control header's data at 12 on Darwin, 16 on Linux;
+; SOL_SOCKET 0xffff on Darwin, 1 on Linux; SCM_RIGHTS 1 on both.
+(def %mh (if os-darwin? 48 56))
+(def %wide (if os-darwin? 4 8))
+(def %cdata (if os-darwin? 12 16))
+(def %cspace (if os-darwin? 16 24))
+(def %sol (if os-darwin? 65535 1))
+
+(def %zeroed
+  (fn (_ n)
+    (def s (str-make n))
+    (def p (str->ptr s))
+    ((fn (self i) (when (< i n) (ptr-set! p i 0 1) (self (+ i 1)))) 0)
+    s))
+
+; A message header over the one byte in byte and the control region ctl:
+; (HEADER IOVEC), the iovec kept with it while the call runs.
+(def %message
+  (fn (_ byte ctl)
+    (def iov (%zeroed 16))
+    (ptr-set! (str->ptr iov) 0 (ptr->int (str->ptr byte)) 8)
+    (ptr-set! (str->ptr iov) 8 1 8)
+    (def m (%zeroed %mh))
+    (def mp (str->ptr m))
+    (ptr-set! mp 16 (ptr->int (str->ptr iov)) 8) (ptr-set! mp 24 1 %wide)
+    (ptr-set! mp 32 (ptr->int (str->ptr ctl)) 8) (ptr-set! mp 40 %cspace %wide)
+    (list m iov)))
+
+; fd sent over the Unix socket sock: #t, or #f when the system refuses.
+(def ssh-sys-send-fd
+  (fn (_ sock fd)
+    (def byte (%zeroed 1))
+    (def ctl (%zeroed %cspace))
+    (def cp (str->ptr ctl))
+    (ptr-set! cp 0 (+ %cdata 4) %wide) (ptr-set! cp %wide %sol 4) (ptr-set! cp (+ %wide 4) 1 4)
+    (ptr-set! cp %cdata fd 4)
+    (def m (%message byte ctl))
+    (= (Sys %sign-fold (ptr-call %c-sendmsg sock (str->ptr (first m)) 0)) 1)))
+
+; A descriptor received over the Unix socket sock, or () for a message
+; without one or none at all.
+(def ssh-sys-recv-fd
+  (fn (_ sock)
+    (def byte (%zeroed 1))
+    (def ctl (%zeroed %cspace))
+    (def cp (str->ptr ctl))
+    (def m (%message byte ctl))
+    (def r (Sys %sign-fold (ptr-call %c-recvmsg sock (str->ptr (first m)) 0)))
+    (if (if (< r 1) #t (not (if (= (ptr-ref cp %wide 4) %sol) (= (ptr-ref cp (+ %wide 4) 4) 1) #f))) ()
+      (ptr-ref cp %cdata 4))))
 
 ; A dotted quad's four numbers.
 (def %quad
@@ -139,4 +208,5 @@
 (def ssh-sys-after-op
   (fn (_ m) (def cut (Str8 index-of ": " m)) (if (null? cut) m (Str8 sub (+ cut 2) (- (Str8 length m) cut 2) m))))
 
-(provide ssh/sys ssh-sys-me ssh-sys-spawn ssh-sys-proxy ssh-sys-connect ssh-sys-output ssh-sys-umask ssh-sys-after-op)
+(provide ssh/sys ssh-sys-me ssh-sys-spawn ssh-sys-proxy ssh-sys-connect ssh-sys-output ssh-sys-umask ssh-sys-after-op
+  ssh-sys-hostname ssh-sys-send-fd ssh-sys-recv-fd)

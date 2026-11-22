@@ -361,3 +361,31 @@ tests/oracle/client.sh and tests/oracle/server.sh.
 ```
 ---
     ((#t #f #t 126 "xterm" "sftp" ("A=1" "B=2")) (#f #t #f () "" "" ()))
+
+### a forward as the wire says it: no address given "", every interface "*", a socket's path with port -2, a dynamic one's destination "" 0; said as OpenSSH's format_forward says it; one read back, a port past 65535 malformed
+
+```ssh
+(import ssh/mux ssh-mux-forward-key ssh-mux-forward-text ssh-mux-forward-read ssh-mux-fwd-local ssh-mux-fwd-remote
+  ssh-mux-fwd-dynamic ssh-mux-message ssh-mux-open-fwd)
+(import ssh/bytes ssh-out-run ssh-in ssh-put-uint32 ssh-put-text ssh-get-uint32)
+(def keys (list (ssh-mux-forward-key ssh-mux-fwd-local (list "localhost" 8080 "h" 80 () () ()))
+                (ssh-mux-forward-key ssh-mux-fwd-local (list () 8080 "h" 80 "*" () ()))
+                (ssh-mux-forward-key ssh-mux-fwd-local (list () () "h" 80 () "/s" ()))
+                (ssh-mux-forward-key ssh-mux-fwd-dynamic (list "localhost" 1080 #f #f () () ()))
+                (ssh-mux-forward-key ssh-mux-fwd-remote (list "localhost" 9 () () () () "/r"))))
+(def %read (fn (_ t lhost lport chost cport)
+  (def m (ssh-mux-message ssh-mux-open-fwd))
+  (ssh-put-uint32 m 1) (ssh-put-uint32 m t) (ssh-put-text m lhost) (ssh-put-uint32 m lport)
+  (ssh-put-text m chost) (ssh-put-uint32 m cport)
+  (def r (ssh-out-run m))
+  (def in (ssh-in (first r) 0 (rest r)))
+  (ssh-get-uint32 in) (ssh-get-uint32 in)
+  (ssh-mux-forward-read in)))
+(write (list keys
+             (List map (fn (_ k) (ssh-mux-forward-text k #f)) keys)
+             (ssh-mux-forward-text (first keys) #t)
+             (ssh-mux-forward-text (List ref 4 keys) #t)
+             (%read 1 "" 8080 "h" 80) (%read 1 "" 70000 "h" 80)))
+```
+---
+    (((1 "" 8080 "h" 80) (1 "*" 8080 "h" 80) (1 "/s" 4294967294 "h" 80) (3 "" 1080 "" 0) (2 "" 9 "/r" 4294967294)) ("local forward LOCALHOST:8080 -> h:80" "local forward *:8080 -> h:80" "local forward /s:-2 -> h:80" "dynamic forward LOCALHOST:1080 -> *" "remote forward LOCALHOST:9 -> /r:-2") "local forward *:8080 -> h:80" "remote forward LOCALHOST:9 -> /r:-2" (1 "" 8080 "h" 80) ())

@@ -6,6 +6,6 @@
 ; @copyright 2026 Jon Ruttan
 ; @license MIT No Attribution (MIT-0)
 ;
-; The lang kit's generator writes tests/lib/harness.gen.x: the dialect
-; lang.xon declares, the bundle's root on the import path, then this file.
+; The bundle kit's generator writes tests/lib/harness.gen.x: the dialect
+; bundle.xon declares, the bundle's lib/ on the import path, then this file.
 (import ssh/base)

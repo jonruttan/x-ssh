@@ -1,6 +1,6 @@
 ; # x-ssh -- SSH on x-lang
 ;
-; ## ssh/session.x -- the connection protocol: the client's channels
+; ## lib/ssh/session.x -- the connection protocol: the client's channels
 ;
 ; @author [Jon Ruttan](jonruttan@gmail.com)
 ; @copyright 2026 Jon Ruttan

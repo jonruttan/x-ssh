@@ -1,6 +1,6 @@
 ; # x-ssh -- SSH on x-lang
 ;
-; ## ssh/config.x -- configuration files, as OpenSSH reads them
+; ## lib/ssh/config.x -- configuration files, as OpenSSH reads them
 ;
 ; @author [Jon Ruttan](jonruttan@gmail.com)
 ; @copyright 2026 Jon Ruttan

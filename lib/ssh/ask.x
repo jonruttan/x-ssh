@@ -1,6 +1,6 @@
 ; # x-ssh -- SSH on x-lang
 ;
-; ## ssh/ask.x -- secrets and answers asked of the user
+; ## lib/ssh/ask.x -- secrets and answers asked of the user
 ;
 ; @author [Jon Ruttan](jonruttan@gmail.com)
 ; @copyright 2026 Jon Ruttan

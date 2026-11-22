@@ -34,9 +34,9 @@
 #
 # The clients are the oracles.
 set -u
-# x finds the mounted bundle as the lang "ssh"
-mkdir -p /langs && ln -sfn /x-ssh /langs/ssh
-export X_LANG_DIR=/langs/
+# x finds the mounted bundle as the bundle "ssh"
+mkdir -p /bundles && ln -sfn /x-ssh /bundles/ssh
+export X_BUNDLE_DIR=/bundles/
 X=${X:-x}
 port=
 fx=$(mktemp -d)

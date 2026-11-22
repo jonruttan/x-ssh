@@ -1,6 +1,6 @@
 ; # x-ssh -- SSH on x-lang
 ;
-; ## ssh/sftp.x -- SFTP, the server's end
+; ## lib/ssh/sftp.x -- SFTP, the server's end
 ;
 ; @author [Jon Ruttan](jonruttan@gmail.com)
 ; @copyright 2026 Jon Ruttan

@@ -1,6 +1,6 @@
 ; # x-ssh -- SSH on x-lang
 ;
-; ## ssh/server.x -- the server: commands run for authenticated users
+; ## lib/ssh/server.x -- the server: commands run for authenticated users
 ;
 ; @author [Jon Ruttan](jonruttan@gmail.com)
 ; @copyright 2026 Jon Ruttan

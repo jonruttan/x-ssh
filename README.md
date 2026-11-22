@@ -246,9 +246,9 @@ container or x-os; where a connection has to be relied on, use OpenSSH.
 ## Install and test
 
 It needs [x-lang](https://github.com/jonruttan/x-lang) at the release
-`lang.xon` declares.
+`bundle.xon` declares.
 
-    make install          # into <share>/langs/ssh
+    make install          # into <share>/bundles/ssh
     make test             # the spec suite
     make check            # the suite against tests/contract/known-failures.txt
 
@@ -256,26 +256,29 @@ Set `X=/path/to/x` to use a particular x.
 
 ## Layout
 
-    lang.xon          what the bundle is: lang, dialect, required release, entry
-    run.x             the entry
-    ssh/base.x        the parts, assembled
-    ssh/bytes.x       the wire's encodings
-    ssh/transport.x   the transport layer, from either end: kex, the ciphers
-    ssh/session.x     the connection protocol, the client's side
-    ssh/tty.x         a terminal's modes on the wire
-    ssh/config.x      ssh_config and sshd_config, as OpenSSH reads them
-    ssh/client.x      the client: settings, host keys, authentication, one command
-    ssh/server.x      the server: settings, authentication, commands, forwards
-    ssh/keys.x        key files, OpenSSH's (sealed or not) and Dropbear's
-    ssh/ask.x         secrets asked at the terminal or of SSH_ASKPASS
-    ssh/known.x       known_hosts
-    ssh/keygen.x      ssh-keygen
-    ssh/scp.x         scp, either end
-    ssh/sftp.x        SFTP, the server's end
-    ssh/sftp-client.x SFTP, the client's end
-    ssh/agent.x       ssh-agent and ssh-add, and the agent's protocol from the client's end
-    ssh/cli.x         the command line: ssh-programs, ssh-plan, ssh-main
-    tests/            the spec suite and its runner, gate, harness and oracles
+    bundle.xon            what the bundle is: name, dialect, required release, entry
+    lib/ssh/run.x         the entry, ssh/run
+    lib/ssh/base.x        the parts, assembled
+    lib/ssh/bytes.x       the wire's encodings
+    lib/ssh/transport.x   the transport layer, from either end: kex, the ciphers
+    lib/ssh/session.x     the connection protocol, the client's side
+    lib/ssh/mux.x         connection sharing: OpenSSH's multiplexing protocol
+    lib/ssh/tty.x         a terminal's modes on the wire
+    lib/ssh/config.x      ssh_config and sshd_config, as OpenSSH reads them
+    lib/ssh/client.x      the client: settings, host keys, authentication, one command
+    lib/ssh/server.x      the server: settings, authentication, commands, forwards
+    lib/ssh/keys.x        key files, OpenSSH's (sealed or not) and Dropbear's
+    lib/ssh/pubkey.x      public keys and their signatures
+    lib/ssh/ask.x         secrets asked at the terminal or of SSH_ASKPASS
+    lib/ssh/known.x       known_hosts
+    lib/ssh/keygen.x      ssh-keygen
+    lib/ssh/scp.x         scp, either end
+    lib/ssh/sftp.x        SFTP, the server's end
+    lib/ssh/sftp-client.x SFTP, the client's end
+    lib/ssh/agent.x       ssh-agent and ssh-add, and the agent's protocol from the client's end
+    lib/ssh/sys.x         the process: who it runs as, its children, its errors
+    lib/ssh/cli.x         the command line: ssh-programs, ssh-plan, ssh-main
+    tests/                the spec suite and its runner, gate, harness and oracles
 
 ## Licence
 

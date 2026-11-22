@@ -1,6 +1,6 @@
 ; # x-ssh -- SSH on x-lang
 ;
-; ## ssh/tty.x -- a terminal's modes on the wire
+; ## lib/ssh/tty.x -- a terminal's modes on the wire
 ;
 ; @author [Jon Ruttan](jonruttan@gmail.com)
 ; @copyright 2026 Jon Ruttan

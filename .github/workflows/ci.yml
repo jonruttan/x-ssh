@@ -2,7 +2,7 @@ name: CI
 
 # The bundle CI the platform ships, in x-lang's .github/workflows/bundle.yml:
 # the suite on every operating system x-lang is tested on, against the release
-# lang.xon declares and against main.
+# bundle.xon declares and against main.
 
 on:
   push:

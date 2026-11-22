@@ -1,6 +1,6 @@
 ; # x-ssh -- SSH on x-lang
 ;
-; ## ssh/mux.x -- connection sharing: OpenSSH's multiplexing protocol
+; ## lib/ssh/mux.x -- connection sharing: OpenSSH's multiplexing protocol
 ;
 ; @author [Jon Ruttan](jonruttan@gmail.com)
 ; @copyright 2026 Jon Ruttan

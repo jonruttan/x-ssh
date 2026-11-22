@@ -1,6 +1,6 @@
 ; # x-ssh -- SSH on x-lang
 ;
-; ## ssh/pubkey.x -- public keys and their signatures
+; ## lib/ssh/pubkey.x -- public keys and their signatures
 ;
 ; @author [Jon Ruttan](jonruttan@gmail.com)
 ; @copyright 2026 Jon Ruttan

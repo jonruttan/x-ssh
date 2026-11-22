@@ -1,6 +1,6 @@
 ; # x-ssh -- SSH on x-lang
 ;
-; ## ssh/agent.x -- the authentication agent: ssh-agent, ssh-add, and its
+; ## lib/ssh/agent.x -- the authentication agent: ssh-agent, ssh-add, and its
 ; ## protocol from the client's end
 ;
 ; @author [Jon Ruttan](jonruttan@gmail.com)

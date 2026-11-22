@@ -1,6 +1,6 @@
 ; # x-ssh -- SSH on x-lang
 ;
-; ## ssh/sys.x -- the process: who it runs as, its children, its errors
+; ## lib/ssh/sys.x -- the process: who it runs as, its children, its errors
 ;
 ; @author [Jon Ruttan](jonruttan@gmail.com)
 ; @copyright 2026 Jon Ruttan

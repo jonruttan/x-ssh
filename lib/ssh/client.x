@@ -38,7 +38,7 @@
   ssh-config-line ssh-config-bad ssh-config-arg ssh-config-one ssh-config-choice ssh-config-yes? ssh-config-int-or-nil
   ssh-config-count ssh-config-seconds ssh-config-channel-timeout ssh-config-algorithms)
 (import ssh/sys ssh-sys-me ssh-sys-proxy ssh-sys-connect ssh-sys-output ssh-sys-after-op ssh-sys-hostname)
-(import ssh/mux ssh-mux-connect ssh-mux-greet! ssh-mux-alive? ssh-mux-command ssh-mux-terminate ssh-mux-stop-listening
+(import ssh/mux ssh-mux-connect ssh-mux-greet! ssh-mux-info ssh-mux-alive? ssh-mux-command ssh-mux-terminate ssh-mux-stop-listening
   ssh-mux-open-session ssh-mux-open-stdio ssh-mux-wait ssh-mux-forward! ssh-mux-forward-key
   ssh-mux-fwd-local ssh-mux-fwd-remote ssh-mux-fwd-dynamic ssh-mux-proxy!)
 (import x/codec/sha1)
@@ -911,6 +911,11 @@
 ; none to reach -- for -O's command (command?) a fault, raised.
 (def %mux-reach
   (fn (_ s command?)
+    ((fn (_ r) (if (null? r) () (first r))) (%mux-greeted s command?))))
+
+; As %mux-reach, the master's extensions kept: (FD . NAMES), or ().
+(def %mux-greeted
+  (fn (_ s command?)
     (def path (%get s (lit control-path)))
     (def fd (ssh-mux-connect path))
     (if (pair? fd)
@@ -922,18 +927,19 @@
               (do (guard (e ()) (File unlink path)) ()))
             ((str=? words "No such file or directory") ())
             (#t (do (%log said) ()))))
-      ((fn (_ g) (if (eq? g #t) fd
+      ((fn (_ g) (if (pair? g) (pair fd (rest g))
                    (do (%log (Str8 append "muxclient: " g))
                        (guard (e ()) (Socket close fd))
                        ())))
        (ssh-mux-greet! fd)))))
 
 ; -O's command asked of the master: check, exit, stop, forward or
-; cancel of the forwards given, or proxy; the others are not asked yet.
-; A forward refused fails the command; a cancel refused is said, and the
-; command still succeeds, as OpenSSH's does.  With ControlMaster yes or
-; ask there is no master to ask, and the connection is made, as OpenSSH
-; makes it.
+; cancel of the forwards given, proxy, or conninfo or channels, the
+; master's words on its connection or its channels printed as it gives
+; them, CR LF and all, as OpenSSH's are.  A forward refused fails the
+; command; a cancel refused is said, and the command still succeeds, as
+; OpenSSH's does.  With ControlMaster yes or ask there is no master to
+; ask, and the connection is made, as OpenSSH makes it.
 (def %control-command
   (fn (_ s cmd command stdio)
     (def done (fn (_ r what refused)
@@ -942,14 +948,23 @@
                        ((eq? (first r) (lit denied)) (Err raise 'value (Str8 append "Master refused " refused " request: " (rest r)) ()))
                        (#t (Err raise 'value (Str8 append what ": " (rest r)) ())))))
     (match
+      ((not (List any? (fn (_ c) (str=? c cmd)) (list "check" "exit" "stop" "forward" "cancel" "proxy" "conninfo" "channels")))
+        (Err raise 'value "Invalid multiplex command." ()))
       ((null? (%get s (lit control-path))) (Err raise 'value "No ControlPath specified for \"-O\" command" ()))
       ((not (%shares? s)) (%run s command stdio))
-      ((not (List any? (fn (_ c) (str=? c cmd)) (list "check" "exit" "stop" "forward" "cancel" "proxy")))
-        (Err raise 'value (Str8 append "-O " cmd ": not served yet") ()))
       (#t
-        (do (def fd (%mux-reach s #t))
+        (do (def greeted (%mux-greeted s #t))
+            (def fd (if (null? greeted) () (first greeted)))
             (match
               ((null? fd) 255)
+              ((if (str=? cmd "conninfo") #t (str=? cmd "channels"))
+                (do (unless (List any? (fn (_ n) (str=? n "info")) (rest greeted))
+                      (Err raise 'value "mux server does not support info request" ()))
+                    (def r (ssh-mux-info fd 0 (if (str=? cmd "conninfo") "connection" "channels")))
+                    (match
+                      ((null? r) (Err raise 'value "muxclient: info request failed" ()))
+                      ((pair? r) (Err raise 'value (Str8 append "mux_client_request_info: master returned error: " (rest r)) ()))
+                      (#t (do (%say 1 r) 0)))))
               ((str=? cmd "check")
                 ((fn (_ pid) (if (null? pid) (Err raise 'value "muxclient: master alive check failed" ())
                                (do (%say 2 (Str8 append "Master running (pid=" (%num pid) ")\n")) 0)))

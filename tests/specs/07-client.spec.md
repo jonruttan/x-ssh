@@ -343,6 +343,29 @@ tests/oracle/client.sh and tests/oracle/server.sh.
 ---
     ((0 0 0 1 0 0 0 4) (128 0 0 5 0 0 0 7 0 0 2 1) (128 0 0 3 0 0 0 1 0 0 0 2 110 111))
 
+### the master's HELLO names the "info" extension, its value "0"; EXT_INFO's reply its id, status and words
+
+```ssh
+(import ssh/mux ssh-mux-master-hello ssh-mux-reply-info)
+(import ssh/bytes ssh-out-run)
+(def %bytes (fn (_ out) (def r (ssh-out-run out))
+  ((fn (self i) (if (= i (rest r)) () (pair ((prim-ref (lit char) (lit ->int)) ((prim-ref (lit str) (lit byte-ref)) (first r) i)) (self (+ i 1))))) 0)))
+(write (list (%bytes (ssh-mux-master-hello)) (%bytes (ssh-mux-reply-info 2 0 "no"))))
+```
+---
+    ((0 0 0 1 0 0 0 4 0 0 0 4 105 110 102 111 0 0 0 1 48) (144 0 0 1 0 0 0 2 0 0 0 0 0 0 0 2 110 111))
+
+### -O conninfo's spans and counts as OpenSSH's fmt_timeframe and fmt_scaled say them
+
+```ssh
+(def %tf (eval (lit %timeframe) (module ssh/session)))
+(def %sc (eval (lit %scaled) (module ssh/session)))
+(write (list (List map %tf (list 0 3725 90061 1213200))
+             (List map %sc (list 0 512 1023 1024 3584 102400 1048575 10485760))))
+```
+---
+    (("00:00:00" "01:02:05" "1d01h01m" "02w0d01h") ("0B" "512B" "1023B" "1.0K" "3.5K" "100K" "1024K" "10.0M"))
+
 ### a NEW_SESSION request read: terminal, agent and subsystem flags, the escape character (none as 0xffffffff), TERM, the command and the environment
 
 ```ssh

@@ -76,7 +76,7 @@
             (Opts flag "-N" "Do not run a remote command")
             (Opts flag "-n" "Read standard input from /dev/null")
             (Opts arg "-o" "option" "An option in the configuration file's form, before the files'")
-            (Opts arg "-O" "ctl_cmd" "Ask the master on ControlPath: check, exit or stop")
+            (Opts arg "-O" "ctl_cmd" "Ask the master on ControlPath: check, forward, cancel, proxy, conninfo, channels, exit or stop")
             (Opts arg "-p" "port" "The port to connect to")
             (Opts arg "-Q" "query_option" "Print the algorithms served of a kind -- cipher, mac, kex, key, sig and the like; help lists them")
             (Opts flag "-q" "Quiet: warnings and diagnostics suppressed")

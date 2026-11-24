@@ -47,7 +47,7 @@
 (import ssh/pubkey ssh-pubkey-of ssh-pubkey-verify? ssh-pubkey-type ssh-pubkey-base64 ssh-pubkey-blob ssh-pubkey-algorithms
   ssh-identity-pubkey ssh-identity-sign)
 
-(import x/core/doors obj-ref obj-set! str-byte-ref char->int str-make str->ptr ptr-set!)
+(import x/core/doors obj-ref obj-set! str-byte-ref char->int str-make str->ptr ptr-set! int/)
 
 (def %byte (fn (_ s i) (char->int (str-byte-ref s i))))
 
@@ -76,19 +76,24 @@
 ;        12 the server's server-sig-algs (RFC 8308), or () until it says
 ;        13 the ciphers and MACs offered, as (CIPHERS . MACS)
 ;        14 whether it is a control socket's in proxy mode (see ssh-open-mux)
+;        15 the algorithms agreed, as ssh-agreed answers them, or ()
+;        16 when the connection was opened, in seconds
+;        17 its traffic, as ssh-traffic answers it
 
 (def %slot (fn (_ c i) (obj-ref c i)))
 (def %slot! (fn (_ c i v) (obj-set! c i v)))
 
 (def ssh-open
   (fn (_ fd trace)
-    (def c (Vector make 14 ()))
+    (def c (Vector make 17 ()))
     (%slot! c 1 fd)
     (%slot! c 2 (pair (str-make 0) 0))
     (%slot! c 3 0)
     (%slot! c 4 0)
     (%slot! c 10 trace)
     (%slot! c 13 (pair ssh-cipher-names ssh-mac-names))
+    (%slot! c 16 (Sys now))
+    (%slot! c 17 (Vector make 6 0))
     c))
 
 ; A control socket in proxy mode as a connection, as PROTOCOL.mux frames
@@ -106,6 +111,35 @@
 (def ssh-session-id (fn (_ c) (%slot c 7)))
 (def ssh-host-key (fn (_ c) (%slot c 9)))
 (def ssh-server-sig-algs (fn (_ c) (%slot c 12)))
+(def ssh-peer-version (fn (_ c) (%slot c 8)))
+(def ssh-started (fn (_ c) (%slot c 16)))
+
+; The algorithms the key exchange agreed, from this end: (KEX HOSTKEY
+; CIPHER-IN CIPHER-OUT MAC-IN MAC-OUT), a MAC () under a cipher that
+; authenticates itself; or () before the exchange.
+(def ssh-agreed (fn (_ c) (%slot c 15)))
+
+; The packets, cipher blocks and bytes sent and received, as OpenSSH
+; counts them: a vector, 1-3 sent and 4-6 received, the packets and
+; blocks since the keys last changed, the bytes since the start; a
+; packet's bytes its length field, padding-length byte, payload and
+; padding, its MAC or tag left out.
+(def ssh-traffic (fn (_ c) (%slot c 17)))
+
+(def %count!
+  (fn (_ c at total block)
+    (def t (%slot c 17))
+    (obj-set! t at (+ (obj-ref t at) 1))
+    (obj-set! t (+ at 1) (+ (obj-ref t (+ at 1)) (int/ total block)))
+    (obj-set! t (+ at 2) (+ (obj-ref t (+ at 2)) total))))
+
+; The keys in place: the algorithms kept, each way's packets and blocks
+; counted afresh.
+(def %keyed!
+  (fn (_ c agreed)
+    (%slot! c 15 agreed)
+    (def t (%slot c 17))
+    (List for-each (fn (_ i) (obj-set! t i 0)) (list 1 2 4 5))))
 
 ; Whether received bytes are waiting to be read as a packet: a caller
 ; that waits on the socket must not, while they are.
@@ -386,6 +420,7 @@
               (list (list enc 0 total) (list mac 0 (%trailer key)))))))
     (def whole (ssh-join wire))
     (%send! c (first whole) (rest whole))
+    (%count! c 1 total block)
     (%slot! c 3 (+ seq 1))))
 
 ; A packet received: its payload as (BUF . LEN).  Under the keys, the
@@ -433,6 +468,7 @@
               (unless (%tags-match? (%mac key seq plain 0 total) 0 w total t) (forged))
               (ssh-copy plain 4 len)))))
     (%slot! c 4 (+ seq 1))
+    (%count! c 4 total (if (null? key) 8 (if (eq? (%k-cipher key) 'chacha) 8 16)))
     (def pad (%byte body 0))
     (pair (ssh-copy body 1 (- len 1 pad)) (- len 1 pad))))
 
@@ -759,6 +795,7 @@
     (def kmp (ssh-out-run kout))
     (%slot! c 5 (%keys c kmp h (List ref 2 chosen) (List ref 4 chosen) 65))
     (%slot! c 6 (%keys c kmp h (List ref 3 chosen) (List ref 5 chosen) 66))
+    (%keyed! c (List map (fn (_ i) (List ref i chosen)) (list 0 1 3 2 5 4)))
     (ssh-trace c "keys in place")
     c))
 
@@ -822,6 +859,7 @@
     (def kmp (ssh-out-run kout))
     (%slot! c 5 (%keys c kmp h (List ref 3 (List ref 1 agreed)) (List ref 5 (List ref 1 agreed)) 66))
     (%slot! c 6 (%keys c kmp h (List ref 2 (List ref 1 agreed)) (List ref 4 (List ref 1 agreed)) 65))
+    (%keyed! c (List ref 1 agreed))
     (ssh-trace c "keys in place")
     ; a client that asked for extensions is told the signature algorithms
     ; its key may sign with (RFC 8308 3.1): OpenSSH's signs with an RSA key
@@ -926,7 +964,8 @@
     (ssh-send-packet! c (first rr) (rest rr))
     (%auth-answer c)))
 
-(provide ssh/transport ssh-version-string ssh-open ssh-open-mux ssh-fill! ssh-fd ssh-session-id ssh-host-key ssh-server-sig-algs ssh-hostkey-names ssh-pending? ssh-random ssh-engines!
+(provide ssh/transport ssh-version-string ssh-open ssh-open-mux ssh-fill! ssh-fd ssh-session-id ssh-host-key ssh-server-sig-algs
+  ssh-peer-version ssh-started ssh-agreed ssh-traffic ssh-hostkey-names ssh-pending? ssh-random ssh-engines!
   ssh-kex-names ssh-cipher-names ssh-mac-names ssh-algorithms!
   ssh-exchange-versions! ssh-send-packet! ssh-recv-packet! ssh-next-packet! ssh-take-packet! ssh-expect! ssh-kex! ssh-kex-server! ssh-auth-service! ssh-auth-publickey-query! ssh-auth-publickey! ssh-auth-password!
   ssh-msg-disconnect ssh-msg-global-request ssh-msg-request-success ssh-msg-request-failure ssh-msg-service-request ssh-msg-service-accept

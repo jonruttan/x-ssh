@@ -33,21 +33,23 @@
 (import x/sys/socket)
 (import x/sys/gc)
 (import ssh/tty ssh-tty-modes-encode)
-(import ssh/sys ssh-sys-umask)
+(import ssh/sys ssh-sys-umask ssh-sys-hostname ssh-sys-local)
 (import ssh/ask ssh-askpass)
 (import ssh/mux ssh-mux-hello ssh-mux-new-session ssh-mux-alive-check ssh-mux-terminate ssh-mux-new-stdio-fwd
   ssh-mux-stop-listening ssh-mux-permission-denied ssh-mux-failure ssh-mux-exit-message ssh-mux-alive
-  ssh-mux-session-opened ssh-mux-send! ssh-mux-receive ssh-mux-hello-message ssh-mux-reply-ok ssh-mux-reply-error
+  ssh-mux-session-opened ssh-mux-send! ssh-mux-receive ssh-mux-reply-ok ssh-mux-reply-error
   ssh-mux-reply-two ssh-mux-session-request ssh-mux-take-fd ssh-mux-open-fwd ssh-mux-close-fwd ssh-mux-remote-port
   ssh-mux-fwd-local ssh-mux-fwd-remote ssh-mux-fwd-dynamic ssh-mux-streamlocal ssh-mux-forward-key
-  ssh-mux-forward-text ssh-mux-forward-read ssh-mux-proxy ssh-mux-s-proxy ssh-mux-message)
+  ssh-mux-forward-text ssh-mux-forward-read ssh-mux-proxy ssh-mux-s-proxy ssh-mux-message
+  ssh-mux-master-hello ssh-mux-ext-info ssh-mux-reply-info)
 (import ssh/bytes ssh-out ssh-put-byte ssh-put-bool ssh-put-uint32 ssh-put-bytes ssh-put-text ssh-put-string ssh-out-run
   ssh-in ssh-in-left ssh-get-byte ssh-get-bool ssh-get-uint32 ssh-get-string ssh-get-text ssh-in-buf ssh-copy)
 (import ssh/transport ssh-fd ssh-pending? ssh-send-packet! ssh-take-packet! ssh-msg-disconnect ssh-open-mux ssh-fill!
   ssh-msg-global-request ssh-msg-request-success ssh-msg-request-failure
-  ssh-clock-sent ssh-clock-recv ssh-clock-data ssh-clock-mark! ssh-clocks-start! ssh-wait-ms ssh-clocks!)
+  ssh-clock-sent ssh-clock-recv ssh-clock-data ssh-clock-mark! ssh-clocks-start! ssh-wait-ms ssh-clocks!
+  ssh-version-string ssh-peer-version ssh-started ssh-agreed ssh-traffic)
 
-(import x/core/doors str-byte-ref char->int str-byte-len obj-ref obj-set! str-make str->ptr ptr-set!)
+(import x/core/doors str-byte-ref char->int str-byte-len obj-ref obj-set! str-make str->ptr ptr-set! int/ int%)
 (def %byte (fn (_ s i) (char->int (str-byte-ref s i))))
 (def %num (fn (_ n) ((prim-ref (lit convert) (lit to)) n (Type named STRING) 10)))
 
@@ -88,13 +90,14 @@
 ; the escape character's number or () for none; or (), 16 the window
 ; last sent, 17 where the escape character stands: 1 at a line's start,
 ; 2 just after the escape character there, 0 elsewhere, 18 the
-; environment sent, 19 the agent's socket forwarded, or (); and 20, for
+; environment sent, 19 the agent's socket forwarded, or (); 20, for
 ; a channel a sharing client asked for, its control connection as
-; (FD RID FDS), FDS the descriptors it passed, or ().
+; (FD RID FDS), FDS the descriptors it passed, or (); and 21 its name,
+; as -O channels says it.
 (def %OURS 1) (def %SERVER 2) (def %WINDOW 3) (def %MAX 4) (def %INPUT 5) (def %STATUS 6)
 (def %CLOSED 7) (def %OUT 8) (def %ERR 9) (def %KIND 10) (def %FD 11) (def %COMMAND 12)
 (def %OWED 13) (def %SHUT 14) (def %TTY 15) (def %SIZE 16) (def %ESC 17) (def %ENV 18)
-(def %AGENT 19) (def %CTL 20)
+(def %AGENT 19) (def %CTL 20) (def %NAME 21)
 (def %ch (fn (_ ch i) (obj-ref ch i)))
 (def %ch! (fn (_ ch i v) (obj-set! ch i v)))
 
@@ -147,7 +150,7 @@
 ; A channel added to the table, numbered next.
 (def %channel!
   (fn (_ run kind input out err fd command)
-    (def ch (Vector make 20 ()))
+    (def ch (Vector make 21 ()))
     (%ch! ch %OURS (%rn run %NEXT))
     (%rn! run %NEXT (+ (%rn run %NEXT) 1))
     (%ch! ch %WINDOW 0) (%ch! ch %MAX 32768) (%ch! ch %INPUT input) (%ch! ch %CLOSED #f) (%ch! ch %OWED 0) (%ch! ch %SHUT #f)
@@ -171,9 +174,11 @@
   (fn (_ run ch)
     (%rn! run %CHANNELS (List filter (fn (_ x) (not (= (%ch x %OURS) (%ch ch %OURS)))) (%rn run %CHANNELS)))))
 
-; The open of a channel, its kind's fields put by the caller after.
+; The open of a channel, its kind's fields put by the caller after; a
+; channel not yet named is named its type.
 (def %open-packet
   (fn (_ ch type)
+    (when (null? (%ch ch %NAME)) (%ch! ch %NAME type))
     (def open (%packet-of %msg-channel-open))
     (ssh-put-text open type)
     (ssh-put-uint32 open (%ch ch %OURS))
@@ -187,7 +192,7 @@
   (fn (_ c run command input on-out on-err tty env agent)
     (def ch (%channel! run (lit session) input on-out on-err () command))
     (%ch! ch %TTY tty) (%ch! ch %SIZE (if (null? tty) () ((List ref 1 tty)))) (%ch! ch %ESC 1)
-    (%ch! ch %ENV env) (%ch! ch %AGENT agent)
+    (%ch! ch %ENV env) (%ch! ch %AGENT agent) (%ch! ch %NAME "client-session")
     (%send c (%open-packet ch "session"))
     ch))
 
@@ -199,11 +204,17 @@
 ; A connection accepted on a listener opened as a direct-tcpip channel
 ; to the forward's host and port, the connection its input and output.
 ; One on a Unix socket has no address (the system says port 0): it says
-; 127.0.0.1 port 65535, as OpenSSH says it for servers that check.
+; 127.0.0.1 port 65535, as OpenSSH says it for servers that check.  The
+; channel is named as OpenSSH names one.
 (def %open-forward!
   (fn (_ c run fd host port)
     (def peer ((fn (_ p) (if (= (rest p) 0) (pair "127.0.0.1" 65535) p)) (Socket peer fd)))
     (def ch (%forward-channel! run fd))
+    (def here (ssh-sys-local fd))
+    (unless (null? here)
+      (%ch! ch %NAME (Str8 append "direct-tcpip: listening port " (%num (rest here)) " for " host " port " (%num port)
+                                  ", connect from " (first peer) " port " (%num (rest peer))
+                                  " to " (first here) " port " (%num (rest here)))))
     (def open (%open-packet ch "direct-tcpip"))
     (ssh-put-text open host)
     (ssh-put-uint32 open port)
@@ -378,6 +389,7 @@
 (def %open-netcat!
   (fn (_ c run host port input on-out)
     (def ch (%channel! run (lit netcat) input on-out () () ()))
+    (%ch! ch %NAME "stdio-forward")
     (%rn! run %SESSION ch)
     (def open (%open-packet ch "direct-tcpip"))
     (ssh-put-text open host)
@@ -572,6 +584,7 @@
           (ssh-put-text no "")
           (%send c no))
       (do (def ch (if socks? (%socks-channel! c run) (%forward-channel! run fd)))
+          (%ch! ch %NAME (if agent? "authentication agent connection" type))
           (%ch! ch %SERVER sender) (%ch! ch %WINDOW window) (%ch! ch %MAX max)
           (def ok (%packet-of %msg-channel-open-confirmation))
           (ssh-put-uint32 ok sender)
@@ -790,6 +803,127 @@
   (fn (_ c run k)
     (if (eq? (List ref 1 k) (lit proxy)) (%proxy-read! c run k) (%control-request! c run k))))
 
+; --- the "info" extension: -O conninfo and channels --------------------------
+;
+; The master's words on its connection and its channels, as OpenSSH's
+; connection_info_message and channel_open_message word them, each line
+; ending CR LF.  The connection's: this machine and process, the two
+; versions, the TCP ends when the connection is a TCP socket's, how long
+; it has been open, the algorithms agreed, a MAC <implicit> under a
+; cipher that authenticates itself and a pair said "IN in, OUT out" when
+; the two ways differ, no rekeying asked, and the traffic each way.  The
+; channels': each open channel's number, its name, and its state -- its
+; kind, the server's number for it (nr before it has one), the window
+; the server gives it, and whether its input and the server's side are
+; open.  Names and the server's version may carry what the peer chose:
+; their control characters are said as ?.
+
+(def %pad2 (fn (_ n) (if (< n 10) (Str8 append "0" (%num n)) (%num n))))
+
+; A span of seconds as OpenSSH's fmt_timeframe says it.
+(def %timeframe
+  (fn (_ t)
+    (def sec (int% t 60)) (def m (int/ t 60))
+    (def min (int% m 60)) (def h (int/ m 60))
+    (def hrs (int% h 24)) (def d (int/ h 24))
+    (def day (int% d 7)) (def week (int/ d 7))
+    (match
+      ((> week 0) (Str8 append (%pad2 week) "w" (%num day) "d" (%pad2 hrs) "h"))
+      ((> day 0) (Str8 append (%num day) "d" (%pad2 hrs) "h" (%pad2 min) "m"))
+      (#t (Str8 append (%pad2 hrs) ":" (%pad2 min) ":" (%pad2 sec))))))
+
+; A count of bytes as fmt_scaled says it: under 1024 whole, then one
+; decimal of K, M, G, T, P or E, rounded, from 100 on whole.
+(def %scaled
+  (fn (_ n)
+    ((fn (self i f prev)
+       (if (if (< (int/ n 1024) f) #t (= i 6))
+         (do (def unit (Str8 sub i 1 "BKMGTPE"))
+             (def whole (int/ n f))
+             (def fract (if (= i 0) 0 (int/ (+ (* 10 (int/ (int% n f) prev)) 512) 1024)))
+             (def w (if (>= fract 10) (+ whole 1) whole))
+             (def fr (if (>= fract 10) 0 fract))
+             (match
+               ((= w 0) "0B")
+               ((if (= i 0) #t (>= w 100)) (Str8 append (%num (if (>= fr 5) (+ w 1) w)) unit))
+               (#t (Str8 append (%num w) "." (%num fr) unit))))
+         (self (+ i 1) (* f 1024) f)))
+     0 1 1)))
+
+(def %printable
+  (fn (_ s)
+    (def n (str-byte-len s))
+    ((fn (self i acc)
+       (if (= i n) (Str8 join "" (List reverse acc))
+         (self (+ i 1) (pair ((fn (_ b) (if (if (< b 32) #t (= b 127)) "?" (Str8 sub i 1 s))) (%byte s i)) acc))))
+     0 ())))
+
+(def %software
+  (fn (_ v) (if (%starts? "SSH-2.0-" v) (Str8 sub 8 (- (Str8 length v) 8) v) v)))
+
+(def %starts?
+  (fn (_ p s) (if (>= (Str8 length s) (Str8 length p)) (str=? (Str8 sub 0 (Str8 length p) s) p) #f)))
+
+(def %both-ways
+  (fn (_ in out)
+    (def i (if (null? in) "<implicit>" in))
+    (def o (if (null? out) "<implicit>" out))
+    (if (str=? i o) i (Str8 append i " in, " o " out"))))
+
+(def %connection-info
+  (fn (_ c)
+    (def fd (ssh-fd c))
+    (def here (ssh-sys-local fd))
+    (def there (if (null? here) () (guard (e ()) (Socket peer fd))))
+    (def a (ssh-agreed c))
+    (def t (ssh-traffic c))
+    (def way (fn (_ i) (Str8 append (%num (obj-ref t i)) " pkts " (%num (obj-ref t (+ i 1))) " blks "
+                                    (%scaled (obj-ref t (+ i 2))) "B")))
+    (Str8 append
+      "Connection information for " (ssh-sys-hostname) " pid " (%num (Sys getpid)) "\r\n"
+      "  versions " (%software ssh-version-string) " -> " (%printable (%software (ssh-peer-version c))) "\r\n"
+      (if (null? there) ""
+        (Str8 append "  tcp " (first here) ":" (%num (rest here)) " -> " (first there) ":" (%num (rest there)) "\r\n"))
+      "  duration " (%timeframe (- (Sys now) (ssh-started c))) "\r\n"
+      "  kexalgorithm " (first a) "\r\n"
+      "  hostkeyalgorithm " (List ref 1 a) "\r\n"
+      "  cipher " (%both-ways (List ref 2 a) (List ref 3 a)) "\r\n"
+      "  mac " (%both-ways (List ref 4 a) (List ref 5 a)) "\r\n"
+      "  compression none\r\n"
+      "  rekey limit none interval none\r\n"
+      "  traffic " (way 4) " in, " (way 1) " out\r\n")))
+
+(def %kind-text
+  (fn (_ k)
+    (match ((eq? k (lit session)) "session") ((eq? k (lit forward)) "forward")
+           ((eq? k (lit proxy)) "mux-proxy") (#t "stdio"))))
+
+(def %channels-info
+  (fn (_ run)
+    (Str8 join ""
+      (pair "The following connections are open:\r\n"
+        (List map
+          (fn (_ ch)
+            (def name (%printable (if (null? (%ch ch %NAME)) (%kind-text (%ch ch %KIND)) (%ch ch %NAME))))
+            (Str8 append "  #" (%num (%ch ch %OURS)) " "
+                         (if (> (Str8 length name) 300) (Str8 sub 0 300 name) name)
+                         " ([" (%kind-text (%ch ch %KIND)) "] "
+                         (if (null? (%ch ch %SERVER)) "nr" (Str8 append "r" (%num (%ch ch %SERVER))))
+                         " w" (%num (%ch ch %WINDOW))
+                         " i" (if (null? (%ch ch %INPUT)) "closed" "open")
+                         " o" (if (%ch ch %CLOSED) "closed" "open") ")\r\n"))
+          (%rn run %CHANNELS))))))
+
+; EXT_INFO, as OpenSSH's mux_master_process_ext_info answers it.
+(def %mux-info!
+  (fn (_ c run fd rid in)
+    (def name (ssh-get-text in))
+    (ssh-mux-send! fd
+      (match
+        ((str=? name "connection") (ssh-mux-reply-info rid 1 (%connection-info c)))
+        ((str=? name "channels") (ssh-mux-reply-info rid 1 (%channels-info run)))
+        (#t (ssh-mux-reply-info rid 0 "info request type not supported"))))))
+
 (def %control-request!
   (fn (_ c run k)
     (def fd (first k))
@@ -820,6 +954,7 @@
                 ((= (first m) ssh-mux-close-fwd) (%mux-close-fwd! c run fd rid (rest m)))
                 ((= (first m) ssh-mux-new-session) (%mux-session! c run fd rid (rest m)))
                 ((= (first m) ssh-mux-new-stdio-fwd) (%mux-stdio! c run fd rid (rest m)))
+                ((= (first m) ssh-mux-ext-info) (%mux-info! c run fd rid (rest m)))
                 ((= (first m) ssh-mux-proxy)
                   (if (%allowed? run "Allow multiplex proxy connection?")
                     (do (def r (ssh-mux-message ssh-mux-s-proxy))
@@ -983,6 +1118,7 @@
             (ssh-mux-send! fd (ssh-mux-reply-error ssh-mux-permission-denied rid "Permission denied"))))
       (#t
         (do (def ch (%channel! run (lit stdio) (first fds) (%writer (List ref 1 fds)) () () ()))
+            (%ch! ch %NAME "stdio-forward")
             (%ch! ch %CTL (list fd rid fds))
             (def open (%open-packet ch "direct-tcpip"))
             (ssh-put-text open host)
@@ -1029,7 +1165,10 @@
 
 ; A proxy channel for client dc's channel number down.
 (def %proxy-channel!
-  (fn (_ run dc down) (%channel! run (lit proxy) () () () dc down)))
+  (fn (_ run dc down)
+    (def ch (%channel! run (lit proxy) () () () dc down))
+    (%ch! ch %NAME "mux-proxy")
+    ch))
 
 (def %proxy-of
   (fn (_ run dc server)
@@ -1048,6 +1187,7 @@
       ((= t %msg-channel-open)
         (do (def type (ssh-get-text in))
             (def ch (%proxy-channel! run dc (ssh-get-uint32 in)))
+            (%ch! ch %NAME type)
             (def out (%packet-of t))
             (ssh-put-text out type)
             (ssh-put-uint32 out (%ch ch %OURS))
@@ -1425,7 +1565,7 @@
                        (List for-each
                          (fn (_ fd) (when (%ready? ready fd)
                                       ((fn (_ k) (unless (null? k)
-                                                   (if (ssh-mux-send! k (ssh-mux-hello-message))
+                                                   (if (ssh-mux-send! k (ssh-mux-master-hello))
                                                      (%rn! run %CONTROLS (List append (%rn run %CONTROLS) (list (list k #f))))
                                                      (guard (e ()) (Socket close k)))))
                                        (guard (e ()) (Socket accept fd)))))

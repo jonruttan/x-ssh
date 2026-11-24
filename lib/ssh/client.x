@@ -1041,7 +1041,7 @@
       (do (Socket close lfd)
           (Sys exit
             (if (if (null? command) (null? stdio) #f) 0
-              (guard (e (do (%log (%message e)) 255))
+              (guard (e (do (%log (Err text e)) 255))
                 ((fn (_ status) (if (null? status) (do (%log "Failed to connect to new control master") 255) status))
                  (%passenger (pair (pair (lit control-master) "false") s) command stdio)))))))))
 

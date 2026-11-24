@@ -113,7 +113,7 @@ tests/oracle/client.sh and tests/oracle/server.sh.
 ---
     (((() 1080) ("*" 1081) ("::1" 1082) ("localhost" 1083)) "command-line: line 1: Bad forwarding specification." "command-line: line 1: Invalid ProxyJump \"a:x\"")
 
-### RemoteForward given only [bind_address:]port is SOCKS at the server's end, no host and port 0
+### RemoteForward given only [bind_address:]port is SOCKS at the server's end, no host and port 0; with no address it is localhost under GatewayPorts too
 
 ```ssh
 (import ssh/client ssh-client-settings)
@@ -123,7 +123,7 @@ tests/oracle/client.sh and tests/oracle/server.sh.
              (%rm (list "GatewayPorts yes" "RemoteForward 1080"))))
 ```
 ---
-    ((("localhost" 1080 () 0 () () ()) (() 1081 () 0 "*" () ()) ("10.0.0.1" 1082 () 0 "10.0.0.1" () ()) ("::1" 1083 () 0 "::1" () ()) ("localhost" 1084 "h" 22 () () ())) ((() 1080 () 0 () () ())))
+    ((("localhost" 1080 () 0 () () ()) (() 1081 () 0 "*" () ()) ("10.0.0.1" 1082 () 0 "10.0.0.1" () ()) ("::1" 1083 () 0 "::1" () ()) ("localhost" 1084 "h" 22 () () ())) (("localhost" 1080 () 0 () () ())))
 
 ### -G prints forwards as OpenSSH does: dynamic, local, then remote; an address as written in brackets, a destination bracketed
 

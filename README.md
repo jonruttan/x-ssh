@@ -1,5 +1,7 @@
 # x-ssh
 
+<p align="center"><img src="docs/bitwise-banner.svg" alt="x-ssh, with Bitwise the owl" width="100%"></p>
+
 SSH on [x-lang](https://github.com/jonruttan/x-lang), as a lang bundle:
 OpenSSH's client, server and key tool, scp, SFTP's client and server, and
 the authentication agent.  It has had no independent review; see
@@ -65,7 +67,27 @@ nistp521), for host keys and user keys, at either end.
   command OpenSSH makes of it, `ssh` run to the last hop with `-W`, the
   hops before it its `-J`, `-F`'s file passed on.  DynamicForward is a
   SOCKS proxy, SOCKS 4, 4a and 5 without authentication, each connection
-  a channel to where it asks.  Served keywords: Hostname, Port, User,
+  a channel to where it asks; a RemoteForward (or `-R`) given only
+  `[bind_address:]port` is the same proxy at the server's end, each
+  connection the server opens asking by SOCKS where it goes, where
+  PermitRemoteOpen allows.  Either end of a local or remote forward may
+  be a Unix socket, a field holding `/` its path, as OpenSSH reads
+  them (streamlocal); a socket listened on is made under
+  StreamLocalBindMask, an old one in its place removed first under
+  StreamLocalBindUnlink.  Connection sharing is OpenSSH's, its
+  multiplexing protocol either end: under ControlMaster (`-M`, `-MM`
+  ask) the connection listens on ControlPath (`-S`; its `%` tokens and
+  `%C` expanded) for other clients, OpenSSH's or this one, each
+  session or `-W` forward carried on a channel of its own, the
+  descriptors the client passes its input and output, ask and autoask
+  confirmed by SSH_ASKPASS, and the forwards they ask for listened for
+  or asked of the server; under ControlPersist the master goes on in
+  the background once its own session ends, this client its first
+  passenger, until it has been idle that long.  A client finding a
+  master there has it carry its forwards and then its session, under
+  `-N` too, or its `-W`, the exit status the master sends its own;
+  `-O check`, `exit`, `stop`, `forward` and `cancel` ask the master.
+  Served keywords: Hostname, Port, User,
   IdentityFile (`~/.ssh/id_rsa`, `id_ecdsa` and `id_ed25519` by default;
   OpenSSH's or Dropbear's key files, a key under a passphrase among
   them), IdentityAgent (SSH_AUTH_SOCK by default; the agent's keys
@@ -75,7 +97,9 @@ nistp521), for host keys and user keys, at either end.
   UserKnownHostsFile,
   GlobalKnownHostsFile, HostKeyAlias, BatchMode, PasswordAuthentication,
   PubkeyAuthentication, NumberOfPasswordPrompts, LocalForward,
-  RemoteForward, DynamicForward, GatewayPorts, ClearAllForwardings,
+  RemoteForward, DynamicForward, PermitRemoteOpen, GatewayPorts, ClearAllForwardings,
+  StreamLocalBindMask, StreamLocalBindUnlink, ControlMaster, ControlPath,
+  ControlPersist,
   ServerAliveInterval,
   ServerAliveCountMax, ChannelTimeout (`global=`), SendEnv, SetEnv,
   RemoteCommand, ProxyCommand, ProxyJump, SessionType, StdinNull,
@@ -182,12 +206,16 @@ The oracles in `tests/oracle/` are the live tests: `client.sh` drives
 the client against a built Dropbear, `server.sh` drives the server with
 Dropbear's and OpenSSH's clients, `scp.sh` runs scp from either end, and
 `agent.sh` pairs ssh-agent and ssh-add with OpenSSH's and forwards the agent.
-Each takes a built Dropbear's directory.
+`sshd.sh` drives the client against OpenSSH's server, run unprivileged:
+forwards, and Unix sockets at either end; `mux.sh` pairs its connection
+sharing with OpenSSH's, either end the master.
+All but `sshd.sh` and `mux.sh` take a built Dropbear's directory.
 
 `tests/linux/run.sh` is the Linux leg: password logins, which want a
-shadow file and a known password, and a root server's other users, run as
-root in a container built from `tests/linux/Containerfile` at the declared
-release, with Dropbear's and OpenSSH's clients as the oracles.
+shadow file and a known password, a root server's other users, and a
+ControlMaster's descriptors passed on musl, run as root in a container
+built from `tests/linux/Containerfile` at the declared release, with
+Dropbear's and OpenSSH's clients as the oracles.
 
 ## Security
 
@@ -217,14 +245,14 @@ container or x-os; where a connection has to be relied on, use OpenSSH.
 - **Random bytes** are read from `/dev/urandom`.
 - **Not served:** certificates, security-key (`sk-`) key types,
   keyboard-interactive, hostbased and GSSAPI authentication,
-  compression, and IPv6.
+  compression, IPv6, and `-O proxy`, `conninfo` and `channels`.
 
 ## Install and test
 
 It needs [x-lang](https://github.com/jonruttan/x-lang) at the release
-`lang.xon` declares.
+`bundle.xon` declares.
 
-    make install          # into <share>/langs/ssh
+    make install          # into <share>/bundles/ssh
     make test             # the spec suite
     make check            # the suite against tests/contract/known-failures.txt
 
@@ -232,26 +260,29 @@ Set `X=/path/to/x` to use a particular x.
 
 ## Layout
 
-    lang.xon          what the bundle is: lang, dialect, required release, entry
-    run.x             the entry
-    ssh/base.x        the parts, assembled
-    ssh/bytes.x       the wire's encodings
-    ssh/transport.x   the transport layer, from either end: kex, the ciphers
-    ssh/session.x     the connection protocol, the client's side
-    ssh/tty.x         a terminal's modes on the wire
-    ssh/config.x      ssh_config and sshd_config, as OpenSSH reads them
-    ssh/client.x      the client: settings, host keys, authentication, one command
-    ssh/server.x      the server: settings, authentication, commands, forwards
-    ssh/keys.x        key files, OpenSSH's (sealed or not) and Dropbear's
-    ssh/ask.x         secrets asked at the terminal or of SSH_ASKPASS
-    ssh/known.x       known_hosts
-    ssh/keygen.x      ssh-keygen
-    ssh/scp.x         scp, either end
-    ssh/sftp.x        SFTP, the server's end
-    ssh/sftp-client.x SFTP, the client's end
-    ssh/agent.x       ssh-agent and ssh-add, and the agent's protocol from the client's end
-    ssh/cli.x         the command line: ssh-programs, ssh-plan, ssh-main
-    tests/            the spec suite and its runner, gate, harness and oracles
+    bundle.xon            what the bundle is: name, dialect, required release, entry
+    lib/ssh/run.x         the entry, ssh/run
+    lib/ssh/base.x        the parts, assembled
+    lib/ssh/bytes.x       the wire's encodings
+    lib/ssh/transport.x   the transport layer, from either end: kex, the ciphers
+    lib/ssh/session.x     the connection protocol, the client's side
+    lib/ssh/mux.x         connection sharing: OpenSSH's multiplexing protocol
+    lib/ssh/tty.x         a terminal's modes on the wire
+    lib/ssh/config.x      ssh_config and sshd_config, as OpenSSH reads them
+    lib/ssh/client.x      the client: settings, host keys, authentication, one command
+    lib/ssh/server.x      the server: settings, authentication, commands, forwards
+    lib/ssh/keys.x        key files, OpenSSH's (sealed or not) and Dropbear's
+    lib/ssh/pubkey.x      public keys and their signatures
+    lib/ssh/ask.x         secrets asked at the terminal or of SSH_ASKPASS
+    lib/ssh/known.x       known_hosts
+    lib/ssh/keygen.x      ssh-keygen
+    lib/ssh/scp.x         scp, either end
+    lib/ssh/sftp.x        SFTP, the server's end
+    lib/ssh/sftp-client.x SFTP, the client's end
+    lib/ssh/agent.x       ssh-agent and ssh-add, and the agent's protocol from the client's end
+    lib/ssh/sys.x         the process: who it runs as, its children, its errors
+    lib/ssh/cli.x         the command line: ssh-programs, ssh-plan, ssh-main
+    tests/                the spec suite and its runner, gate, harness and oracles
 
 ## Licence
 

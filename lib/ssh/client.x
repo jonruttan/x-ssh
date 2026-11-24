@@ -1,6 +1,6 @@
 ; # x-ssh -- SSH on x-lang
 ;
-; ## ssh/client.x -- the client: one command on a host
+; ## lib/ssh/client.x -- the client: one command on a host
 ;
 ; @author [Jon Ruttan](jonruttan@gmail.com)
 ; @copyright 2026 Jon Ruttan
@@ -27,7 +27,7 @@
 (import ssh/transport ssh-open ssh-host-key ssh-engines! ssh-exchange-versions! ssh-kex!
   ssh-auth-service! ssh-auth-publickey-query! ssh-auth-publickey! ssh-auth-password! ssh-hostkey-names ssh-server-sig-algs
   ssh-kex-names ssh-cipher-names ssh-mac-names ssh-algorithms!)
-(import ssh/session ssh-session-run! ssh-disconnect!)
+(import ssh/session ssh-session-run! ssh-session-control-listen ssh-disconnect!)
 (import ssh/keys ssh-key-file-sealed? ssh-key-wrong-passphrase ssh-identity-read-file ssh-pubkey-of-key-file)
 (import ssh/known ssh-known-name ssh-known-check ssh-known-types ssh-known-add!)
 (import ssh/keygen ssh-blob-fingerprint)
@@ -37,7 +37,11 @@
   ssh-config-tilde ssh-config-time ssh-config-patterns? ssh-config-ssh-keywords
   ssh-config-line ssh-config-bad ssh-config-arg ssh-config-one ssh-config-choice ssh-config-yes? ssh-config-int-or-nil
   ssh-config-count ssh-config-seconds ssh-config-channel-timeout ssh-config-algorithms)
-(import ssh/sys ssh-sys-me ssh-sys-proxy ssh-sys-connect ssh-sys-output ssh-sys-after-op)
+(import ssh/sys ssh-sys-me ssh-sys-proxy ssh-sys-connect ssh-sys-output ssh-sys-after-op ssh-sys-hostname)
+(import ssh/mux ssh-mux-connect ssh-mux-greet! ssh-mux-alive? ssh-mux-command ssh-mux-terminate ssh-mux-stop-listening
+  ssh-mux-open-session ssh-mux-open-stdio ssh-mux-wait ssh-mux-forward! ssh-mux-forward-key
+  ssh-mux-fwd-local ssh-mux-fwd-remote ssh-mux-fwd-dynamic)
+(import x/codec/sha1)
 
 (import x/core/doors str-byte-len str-byte-ref str-make str->ptr ptr-set! char->int)
 (def %cvt (prim-ref (lit convert) (lit to)))
@@ -90,7 +94,7 @@
 ; What ssh_config may say that this client does not do: refused unless
 ; given the value that leaves it off, or one of the values served.
 (def %refused
-  (list (pair "tunnel" "no") (pair "permitremoteopen" "any") (pair "addressfamily" (list "any" "inet"))))
+  (list (pair "tunnel" "no") (pair "addressfamily" (list "any" "inet"))))
 
 ; An escape character, -e's or EscapeChar's: a character, ^X for its
 ; control character, or none -- as the character's number, none, or ()
@@ -153,23 +157,85 @@
          (#t (self (+ i 1) (pair (Str8 sub i 1 s) acc)))))
      0 ())))
 
-; A LocalForward or RemoteForward line as (ADDRESS PORT HOST PORT):
-; [bind_address:]port:host:hostport, the command line's -L shape, or the
-; file's `[bind_address:]port host:hostport`.  No address is localhost,
-; or every interface under GatewayPorts; `*` or an empty one is every
-; interface, ().
+; A LocalForward or RemoteForward line as (ADDRESS PORT HOST PORT GIVEN
+; LPATH CPATH): [bind_address:]port:host:hostport, the command line's -L
+; shape, or the file's `[bind_address:]port host:hostport`.  No address
+; is localhost, or every interface under GatewayPorts; `*` or an empty
+; one is every interface, (); GIVEN is the address as written, () for
+; none, for -G.  Either end may be a Unix socket instead, a field
+; holding a `/` as OpenSSH tells one: `socket:host:hostport`,
+; `[bind_address:]port:socket` or `socket:socket`; LPATH is the
+; listening one, ADDRESS and PORT () beside it, and CPATH the one
+; connected to, HOST and PORT () beside it, each () when not a socket.
+; A RemoteForward given only `[bind_address:]port` (socks? true) is a
+; remote dynamic one, (ADDRESS PORT () 0 GIVEN () ()): its connections
+; say where they go by SOCKS.
 (def %forward
-  (fn (_ l gateway what)
+  (fn (_ l gateway what socks?)
     (def spec (Str8 join ":" (first (rest l))))
     (def parts (Str8 split ":" spec))
     (def n (List length parts))
-    (def lport (if (if (= n 3) #t (= n 4)) (ssh-config-int-or-nil (List ref (- n 3) parts)) ()))
-    (def rport (if (if (= n 3) #t (= n 4)) (ssh-config-int-or-nil (List ref (- n 1) parts)) ()))
-    (def given (if (= n 4) (first parts) #f))
-    (if (if (null? lport) #t (null? rport))
-      (ssh-config-bad l (Str8 append what " '" spec "'"))
-      (list (match ((not given) (if gateway () "localhost")) ((if (str=? given "*") #t (str=? given "")) ()) (#t given))
-            lport (List ref (- n 2) parts) rport))))
+    (def part (fn (_ i) (List ref i parts)))
+    (def path? (fn (_ t) (not (null? (Str8 index-of "/" t)))))
+    (def port ssh-config-int-or-nil)
+    (def dynamic (if (if socks? (= (List length (first (rest l))) 1) #f) (ssh-client-dynamic spec) ()))
+    (def bind (fn (_ given) (match ((not given) (if gateway () "localhost")) ((if (str=? given "*") #t (str=? given "")) ()) (#t given))))
+    ; the listener as (GIVEN PORT LPATH) and the destination as (HOST
+    ; PORT CPATH), GIVEN #f for no address; () for a shape not read
+    (def shape
+      (match
+        ((= n 2) (if (path? (part 1))
+                   (list (if (path? (part 0)) (list #f () (part 0)) (list #f (port (part 0)) ())) (list () () (part 1)))
+                   ()))
+        ((= n 3) (match ((path? (part 0)) (list (list #f () (part 0)) (list (part 1) (port (part 2)) ())))
+                        ((path? (part 2)) (list (list (part 0) (port (part 1)) ()) (list () () (part 2))))
+                        (#t (list (list #f (port (part 0)) ()) (list (part 1) (port (part 2)) ())))))
+        ((= n 4) (list (list (part 0) (port (part 1)) ()) (list (part 2) (port (part 3)) ())))
+        (#t ())))
+    (def from (if (null? shape) () (first shape)))
+    (def to (if (null? shape) () (List ref 1 shape)))
+    (match
+      ((not (null? dynamic)) (list (bind (if (null? (first dynamic)) #f (first dynamic))) (List ref 1 dynamic) () 0 (first dynamic) () ()))
+      ((if (null? shape) #t
+         (if (if (null? (List ref 1 from)) (null? (List ref 2 from)) #f) #t
+           (if (null? (List ref 1 to)) (null? (List ref 2 to)) #f)))
+        (ssh-config-bad l (Str8 append what " '" spec "'")))
+      (#t (do (def given (first from))
+              (def lpath (List ref 2 from))
+              (list (if (null? lpath) (bind given) ()) (List ref 1 from) (first to) (List ref 1 to)
+                    (if given given ()) lpath (List ref 2 to)))))))
+
+; StreamLocalBindMask's value: octal, 0777 at most, 0177 by default.
+(def %bind-mask
+  (fn (_ l)
+    (def t (if (null? l) "0177" (ssh-config-arg l)))
+    (def n (Str8 length t))
+    (def octal? (if (> n 0) ((fn (self i) (if (= i n) #t (if (if (>= (str-byte-ref t i) #\0) (<= (str-byte-ref t i) #\7) #f) (self (+ i 1)) #f))) 0) #f))
+    (def v (if octal? ((prim-ref (lit convert) (lit to)) t (Type named INTEGER) 8) ()))
+    (if (if (null? v) #t (> v 511)) (ssh-config-bad l "Bad mask.") v)))
+
+; PermitRemoteOpen as (TEXT . OPEN): TEXT as written, for -G, and OPEN
+; () for any, none, or (HOST PORT) each, PORT () for `*`; any and none
+; stand alone.
+(def %remote-open
+  (fn (_ l)
+    (def bad (fn (_) (ssh-config-bad l "bad port number in permitremoteopen")))
+    (if (null? l) (pair "any" ())
+      (do (def args (first (rest l)))
+          (def word (List find (fn (_ a) (if (str=? (Str8 downcase a) "any") #t (str=? (Str8 downcase a) "none"))) args))
+          (match
+            ((if (null? word) #f (> (List length args) 1))
+              (ssh-config-bad l (Str8 append "keyword permitremoteopen \"" word "\" argument must appear alone.")))
+            ((not (null? word)) (pair (Str8 join " " args) (if (str=? (Str8 downcase word) "any") () (lit none))))
+            (#t (pair (Str8 join " " args)
+                      (List map (fn (_ a)
+                                  (def hp (%host-port a))
+                                  (def p (if (null? hp) () (List ref 1 hp)))
+                                  (match ((null? p) (bad))
+                                         ((str=? p "*") (list (first hp) ()))
+                                         ((null? (%port-of p)) (bad))
+                                         (#t (list (first hp) (%port-of p)))))
+                        args))))))))
 
 ; A port's digits as a number from 1 to 65535, or ().
 (def %port-of
@@ -247,6 +313,28 @@
            ((if (> (Str8 length v) 1) (= (str-byte-ref v 0) #\$) #f) (env (Str8 sub 1 (- (Str8 length v) 1) v)))
            (#t (path v)))))
 
+; ControlMaster as -G prints it: true, false, ask, auto or autoask.
+(def %control-master
+  (fn (_ l)
+    (if (null? l) "false"
+      ((fn (_ v) (match ((if (str=? v "yes") #t (str=? v "true")) "true")
+                        ((if (str=? v "no") #t (str=? v "false")) "false")
+                        ((List any? (fn (_ c) (str=? c v)) (list "ask" "auto" "autoask")) v)
+                        (#t (ssh-config-bad l (Str8 append "unsupported option \"" v "\".")))))
+       (Str8 downcase (ssh-config-arg l))))))
+
+; ControlPersist: no, yes, or a time in seconds, 0 being yes.
+(def %control-persist
+  (fn (_ l)
+    (if (null? l) "no"
+      ((fn (_ v) (match ((if (str=? v "yes") #t (str=? v "true")) "yes")
+                        ((if (str=? v "no") #t (str=? v "false")) "no")
+                        (#t ((fn (_ n) (match ((null? n) (ssh-config-bad l "Bad ControlPersist argument."))
+                                              ((= n 0) "yes")
+                                              (#t n)))
+                             (ssh-config-time v)))))
+       (Str8 downcase (ssh-config-arg l))))))
+
 ; The settings in force, from the lines in order, for host as named on
 ; the command line: an alist.  Raises a label 'value Err whose message is
 ; OpenSSH's for a value it would refuse.
@@ -269,7 +357,7 @@
         (if (if (= (List length l) 1) (str=? (Str8 downcase (first l)) "none") #f) () (List map path l))))
     (def gateway (ssh-config-yes? lines "gatewayports" #f))
     (def clear (ssh-config-yes? lines "clearallforwardings" #f))
-    (def forwards (fn (_ kw what) (if clear () (List map (fn (_ l) (%forward l gateway what)) (List filter (fn (_ l) (str=? (first l) kw)) lines)))))
+    (def forwards (fn (_ kw what) (if clear () (List map (fn (_ l) (%forward l gateway what (str=? kw "remoteforward"))) (List filter (fn (_ l) (str=? (first l) kw)) lines)))))
     (def session (ssh-config-choice lines "sessiontype" (list "default" "none" "subsystem") "default"))
     ; ProxyCommand or ProxyJump, whichever is met first holding, `none`
     ; for neither
@@ -292,6 +380,21 @@
         (List map (fn (_ l) ((fn (_ d) (if (null? d) (ssh-config-bad l "Bad forwarding specification.") d)) (ssh-client-dynamic (ssh-config-arg l))))
           (List filter (fn (_ l) (str=? (first l) "dynamicforward")) lines))))
     ; EscapeChar: the character's number, () for none
+    ; ControlPath's tokens besides the common ones: this machine's name in
+    ; full and to its first dot, the uid, ProxyJump's hops, HostKeyAlias or
+    ; the host, and %C, the SHA-1 of %l%h%p%r%j in hex
+    (def control-path
+      ((fn (_ v) (if (if (null? v) #t (str=? (Str8 downcase v) "none")) ()
+                   (do (def me (ssh-sys-hostname))
+                       (def dot (Str8 index-of "." me))
+                       (def j (if (null? proxy-value) "" (if jump? proxy-value "")))
+                       (%expand (ssh-config-tilde v)
+                         (List append tokens
+                           (list (pair "l" me) (pair "L" (if (null? dot) me (Str8 sub 0 dot me)))
+                                 (pair "i" (%num (Sys getuid))) (pair "j" j)
+                                 (pair "k" (ssh-config-one lines "hostkeyalias" host))
+                                 (pair "C" (Sha1 hex (Str8 append me hostname (%num port) user j)))))))))
+       (ssh-config-one lines "controlpath" ())))
     (def escape
       ((fn (_ l) (if (null? l) 126
                    ((fn (_ e) (match ((null? e) (ssh-config-bad l "Bad escape character.")) ((eq? e (lit none)) ()) (#t e)))
@@ -330,6 +433,9 @@
           (pair (lit gateway) gateway)
           (pair (lit forwards) (forwards "localforward" "Bad local forwarding specification"))
           (pair (lit remotes) (forwards "remoteforward" "Bad remote forwarding specification"))
+          (pair (lit remote-open) (%remote-open (ssh-config-line lines "permitremoteopen")))
+          (pair (lit bind-mask) (%bind-mask (ssh-config-line lines "streamlocalbindmask")))
+          (pair (lit bind-unlink) (ssh-config-yes? lines "streamlocalbindunlink" #f))
           (pair (lit sendenv) (List flat-map (fn (_ a) a) (ssh-config-all lines "sendenv")))
           (pair (lit setenv) (List flat-map (fn (_ a) a) (ssh-config-all lines "setenv")))
           (pair (lit level) (ssh-config-choice lines "loglevel" (list "quiet" "fatal" "error" "info" "verbose" "debug" "debug1" "debug2" "debug3") "info"))
@@ -338,14 +444,24 @@
           (pair (lit stdin-null) (ssh-config-yes? lines "stdinnull" #f))
           (pair (lit tty) (ssh-config-choice lines "requesttty" (list "no" "yes" "force" "auto") "auto"))
           (pair (lit ciphers) (ssh-config-algorithms lines "ciphers" ssh-cipher-names))
-          (pair (lit macs) (ssh-config-algorithms lines "macs" ssh-mac-names)))))
+          (pair (lit macs) (ssh-config-algorithms lines "macs" ssh-mac-names))
+          (pair (lit control-master) (%control-master (ssh-config-line lines "controlmaster")))
+          (pair (lit control-path) control-path)
+          (pair (lit control-persist) (%control-persist (ssh-config-line lines "controlpersist"))))))
 
 ; The settings as -G prints them, a keyword and its value a line.
 (def %print
   (fn (_ s)
     (def yn (fn (_ b) (if b "yes" "no")))
-    (def fwd (fn (_ f) (Str8 append (if (null? (first f)) "*" (first f)) ":" (%num (List ref 1 f)) " "
-                                     (List ref 2 f) ":" (%num (List ref 3 f)))))
+    ; a listener as OpenSSH prints it: the port alone, or the address as
+    ; written in brackets before it; a destination always bracketed, a
+    ; SOCKS one [socks]:0; a Unix socket at either end its path, bare
+    (def listen (fn (_ given port) (if (null? given) (%num port) (Str8 append "[" given "]:" (%num port)))))
+    (def from (fn (_ f) (if (null? (List ref 5 f)) (listen (List ref 4 f) (List ref 1 f)) (List ref 5 f))))
+    (def fwd (fn (_ f) (Str8 append (from f) " "
+                                     (if (null? (List ref 6 f))
+                                       (Str8 append "[" (if (null? (List ref 2 f)) "socks" (List ref 2 f)) "]:" (%num (List ref 3 f)))
+                                       (List ref 6 f)))))
     (def limits (%get s (lit limits)))
     (Str8 join ""
       (List map (fn (_ l) (Str8 append l "\n"))
@@ -366,10 +482,17 @@
                 (Str8 append "ciphers " (Str8 join "," (%get s (lit ciphers))))
                 (Str8 append "macs " (Str8 join "," (%get s (lit macs))))
                 (Str8 append "gatewayports " (yn (%get s (lit gateway)))))
+          ; dynamic, local, then remote, as OpenSSH orders them
+          (List map (fn (_ d) (Str8 append "dynamicforward " (listen (first d) (List ref 1 d)))) (%get s (lit dynamics)))
+          ; OpenSSH's -G takes a local forward to a socket, which has no
+          ; destination host, for a dynamic one too, and prints it so
+          (List map (fn (_ f) (Str8 append "dynamicforward " (from f)))
+            (List filter (fn (_ f) (not (null? (List ref 6 f)))) (%get s (lit forwards))))
           (List map (fn (_ f) (Str8 append "localforward " (fwd f))) (%get s (lit forwards)))
           (List map (fn (_ f) (Str8 append "remoteforward " (fwd f))) (%get s (lit remotes)))
-          (List map (fn (_ d) (Str8 append "dynamicforward " (if (null? (first d)) "" (Str8 append "[" (first d) "]:")) (%num (List ref 1 d))))
-            (%get s (lit dynamics)))
+          (list (Str8 append "permitremoteopen " (first (%get s (lit remote-open))))
+                (Str8 append "streamlocalbindmask 0" ((prim-ref (lit convert) (lit to)) (%get s (lit bind-mask)) (Type named STRING) 8))
+                (Str8 append "streamlocalbindunlink " (yn (%get s (lit bind-unlink)))))
           (if (null? (%get s (lit proxy-command))) () (list (Str8 append "proxycommand " (%get s (lit proxy-command)))))
           (if (null? (%get s (lit proxy-jump))) () (list (Str8 append "proxyjump " (%jump-text (%get s (lit proxy-jump))))))
           (List map (fn (_ e) (Str8 append "sendenv " e)) (%get s (lit sendenv)))
@@ -385,7 +508,10 @@
           (list (Str8 append "escapechar " (%escape-text (%get s (lit escape))))
                 (Str8 append "forkafterauthentication " (yn (%get s (lit fork)))))
           (if (null? (%get s (lit known-command))) () (list (Str8 append "knownhostscommand " (%get s (lit known-command)))))
-          (list (Str8 append "syslogfacility " (Str8 upcase (%get s (lit facility))))))))))
+          (list (Str8 append "syslogfacility " (Str8 upcase (%get s (lit facility))))
+                (Str8 append "controlmaster " (%get s (lit control-master))))
+          (if (null? (%get s (lit control-path))) () (list (Str8 append "controlpath " (%get s (lit control-path)))))
+          (list (Str8 append "controlpersist " ((fn (_ p) (if (str? p) p (%num p))) (%get s (lit control-persist))))))))))
 
 ; --- the terminal ----------------------------------------------------------
 
@@ -698,15 +824,226 @@
     (guard (e ()) (Sys kill pid hup))
     (guard (e ()) (Sys wait pid))))
 
+; A terminal as RequestTTY says: force always, yes when standard input
+; is one, auto for a shell on one; yes without one said, as OpenSSH
+; says it.
+(def %tty?
+  (fn (_ s command stdio quiet)
+    (def local-tty (Sys isatty %stdin))
+    (def want (%get s (lit tty)))
+    (when (if (str=? want "yes") (if (not local-tty) (not quiet) #f) #f)
+      (%log "Pseudo-terminal will not be allocated because stdin is not a terminal.\r"))
+    (match ((str=? want "force") #t)
+           ((str=? want "no") #f)
+           ((not (null? stdio)) #f)
+           ((str=? want "yes") local-tty)
+           (#t (if (eq? command (lit shell)) local-tty #f)))))
+
+(def %quiet? (fn (_ s) (List any? (fn (_ l) (str=? l (%get s (lit level)))) (list "quiet" "fatal" "error"))))
+
 ; The connection made and the command run under settings s: its exit
-; status, or 255.
+; status, or 255.  With ControlPath, a master there carries the session
+; or -W's forward, and the client's forwards, when ControlMaster is no,
+; auto or autoask; and with ControlMaster yes, ask, auto or autoask, the
+; connection made listens there for others.
 (def %run
   (fn (_ s command stdio)
-    (def proxy (%proxy-command s))
-    (def spawned (if (null? proxy) () (ssh-sys-proxy proxy)))
-    (def status (%connected s command stdio proxy spawned))
-    (unless (null? spawned) (%end-proxy (first spawned)))
-    status))
+    (def shared (if (%passenger? s command stdio) (%passenger s command stdio) ()))
+    (if (not (null? shared)) shared
+      (do (def proxy (%proxy-command s))
+          (def spawned (if (null? proxy) () (ssh-sys-proxy proxy)))
+          (def status (%connected s command stdio proxy spawned))
+          (unless (null? spawned) (%end-proxy (first spawned)))
+          status))))
+
+; --- connection sharing: the client's end (ssh/mux) -------------------------
+;
+; OpenSSH's muxclient: the master at ControlPath reached and greeted,
+; then -O's command asked of it, or the client's forwards and then a
+; session -- under -N too, a shell, as OpenSSH's asks for one -- or
+; -W's forward, its descriptors passed to the master, the exit status
+; the master sends this client's own.  A connection refused at a path
+; ControlMaster may take over is a stale socket, removed; a path with no
+; socket is no master; either way, as a master refusing a forward or a
+; session, the client makes its own connection.
+
+(def %master (fn (_ s) (%get s (lit control-master))))
+(def %masters? (fn (_ s) (List any? (fn (_ m) (str=? m (%master s))) (list "true" "ask" "auto" "autoask"))))
+(def %shares? (fn (_ s) (List any? (fn (_ m) (str=? m (%master s))) (list "false" "auto" "autoask"))))
+
+(def %passenger? (fn (_ s command stdio) (if (null? (%get s (lit control-path))) #f (%shares? s))))
+
+; The client's local and dynamic forwards as the session takes them,
+; (ADDRESS PORT HOST PORT GIVEN LPATH CPATH), a dynamic one's HOST and
+; PORT #f; ADDRESS a name, () for every interface.
+(def %local-forwards
+  (fn (_ s)
+    (List append (%get s (lit forwards))
+      ; DynamicForward: a listener whose connections say where they go, by SOCKS
+      (List map (fn (_ d) (list (match ((null? (first d)) (if (%get s (lit gateway)) () "localhost"))
+                                       ((if (str=? (first d) "*") #t (str=? (first d) "")) ())
+                                       (#t (first d)))
+                                (List ref 1 d) #f #f (first d) () ()))
+        (%get s (lit dynamics))))))
+
+; Each of the client's forwards asked of the master, or its close when
+; cancel?, as OpenSSH's mux_client_forwards asks them: #t when every one
+; is served.  A port the server allocates is printed under -O forward
+; (print?); a refusal is said as OpenSSH says it.
+(def %mux-forwards
+  (fn (_ fd s cancel? print?)
+    (def keys (List append
+                (List map (fn (_ f) (ssh-mux-forward-key (if (eq? (List ref 2 f) #f) ssh-mux-fwd-dynamic ssh-mux-fwd-local) f))
+                  (%local-forwards s))
+                (List map (fn (_ r) (ssh-mux-forward-key ssh-mux-fwd-remote r)) (%get s (lit remotes)))))
+    (List fold
+      (fn (_ ok key)
+        (def r (ssh-mux-forward! fd cancel? 1 key))
+        (match
+          ((eq? r #t) ok)
+          ((null? r) #f)
+          ((eq? (first r) (lit port)) (do (when print? (%say 1 (Str8 append (%num (rest r)) "\n"))) ok))
+          ((eq? (first r) (lit denied)) (do (%log (Str8 append "Master refused forwarding request: " (rest r))) #f))
+          (#t (do (%log (Str8 append "mux_client_forward: forwarding request failed: " (rest r))) #f))))
+      #t keys)))
+
+; The master reached and greeted: the descriptor, or () when there is
+; none to reach -- for -O's command (command?) a fault, raised.
+(def %mux-reach
+  (fn (_ s command?)
+    (def path (%get s (lit control-path)))
+    (def fd (ssh-mux-connect path))
+    (if (pair? fd)
+      (do (def words (ssh-sys-after-op (rest fd)))
+          (def said (Str8 append "Control socket connect(" path "): " words))
+          (match
+            (command? (Err raise 'value said ()))
+            ((if (str=? words "Connection refused") (not (str=? (%master s) "false")) #f)
+              (do (guard (e ()) (File unlink path)) ()))
+            ((str=? words "No such file or directory") ())
+            (#t (do (%log said) ()))))
+      ((fn (_ g) (if (eq? g #t) fd
+                   (do (%log (Str8 append "muxclient: " g))
+                       (guard (e ()) (Socket close fd))
+                       ())))
+       (ssh-mux-greet! fd)))))
+
+; -O's command asked of the master: check, exit, stop, or forward or
+; cancel of the forwards given; the others are not asked yet.  A
+; forward refused fails the command; a cancel refused is said, and the
+; command still succeeds, as OpenSSH's does.  With ControlMaster yes or
+; ask there is no master to ask, and the connection is made, as OpenSSH
+; makes it.
+(def %control-command
+  (fn (_ s cmd command stdio)
+    (def done (fn (_ r what refused)
+                (match ((eq? r #t) #t)
+                       ((null? r) #t)
+                       ((eq? (first r) (lit denied)) (Err raise 'value (Str8 append "Master refused " refused " request: " (rest r)) ()))
+                       (#t (Err raise 'value (Str8 append what ": " (rest r)) ())))))
+    (match
+      ((null? (%get s (lit control-path))) (Err raise 'value "No ControlPath specified for \"-O\" command" ()))
+      ((not (%shares? s)) (%run s command stdio))
+      ((not (List any? (fn (_ c) (str=? c cmd)) (list "check" "exit" "stop" "forward" "cancel")))
+        (Err raise 'value (Str8 append "-O " cmd ": not served yet") ()))
+      (#t
+        (do (def fd (%mux-reach s #t))
+            (match
+              ((null? fd) 255)
+              ((str=? cmd "check")
+                ((fn (_ pid) (if (null? pid) (Err raise 'value "muxclient: master alive check failed" ())
+                               (do (%say 2 (Str8 append "Master running (pid=" (%num pid) ")\n")) 0)))
+                 (ssh-mux-alive? fd 0)))
+              ((str=? cmd "exit")
+                (do (done (ssh-mux-command fd ssh-mux-terminate 0) "mux_client_request_terminate: termination request failed" "termination")
+                    (unless (str=? (%get s (lit level)) "quiet") (%say 2 "Exit request sent.\n"))
+                    0))
+              ((str=? cmd "forward")
+                (if (%mux-forwards fd s #f #t) 0 (Err raise 'value "muxclient: master forward request failed" ())))
+              ((str=? cmd "cancel")
+                (do (unless (%mux-forwards fd s #t #f) (%log "muxclient: master cancel forward request failed"))
+                    0))
+              (#t
+                (do (done (ssh-mux-command fd ssh-mux-stop-listening 0) "mux_client_request_stop_listening: stop listening request failed" "stop listening")
+                    (unless (str=? (%get s (lit level)) "quiet") (%say 2 "Stop listening request sent.\n"))
+                    0))))))))
+
+; A session, or -W's forward, carried by the master: the exit status,
+; or () when there is no master to carry it, or it refuses the
+; session, and the client makes its own connection.
+(def %passenger
+  (fn (_ s command stdio)
+    (def fd (%mux-reach s #f))
+    (def host (%get s (lit hostname)))
+    (match
+      ((null? fd) ())
+      ((null? (ssh-mux-alive? fd 0))
+        (do (%log (Str8 append (if (null? stdio) "mux_client_request_session" "mux_client_request_stdio_fwd")
+                               ": master alive request failed"))
+            (Socket close fd)
+            ()))
+      ((if (null? stdio) (not (%mux-forwards fd s #f #f)) #f)
+        (do (%log "muxclient: master forward request failed") (Socket close fd) ()))
+      (#t
+        (do (def input (if (%get s (lit stdin-null)) (File open "/dev/null" (lit rdonly)) %stdin))
+            (if (null? stdio)
+              (do (def tty? (if (null? command) #f (%tty? s command stdio (%quiet? s))))
+                  (def sub? (pair? command))
+                  (def r (ssh-mux-open-session fd 1 tty? (not (null? (%get s (lit forward-agent)))) sub?
+                           (%get s (lit escape)) ((fn (_ t) (if (null? t) "" t)) (Sys getenv "TERM"))
+                           (match (sub? (rest command)) ((if (null? command) #t (eq? command (lit shell))) "") (#t command))
+                           (List map (fn (_ v) (Str8 append (first v) "=" (rest v))) (%environment s))
+                           input 1 2))
+                  (match
+                    ((null? r) (do (Socket close fd) ()))
+                    ((eq? (first r) (lit denied))
+                      (do (%log (Str8 append "Master refused session request: " (rest r))) (Socket close fd) ()))
+                    ((eq? (first r) (lit failed))
+                      (do (%log (Str8 append "mux_client_request_session: session request failed: " (rest r))) (Socket close fd) ()))
+                    (#t
+                      (do (when (%get s (lit fork))
+                            (do (def pid (Sys fork))
+                                (unless (= pid 0) (Sys exit 0))
+                                (Sys setsid)))
+                          (def saved (Vector make 1 ()))
+                          (when (if tty? (Sys isatty %stdin) #f) (obj-set! saved 1 (Term raw! %stdin)))
+                          (def restore! (fn (_) (unless (null? (obj-ref saved 1))
+                                                  (do (Term restore! %stdin (obj-ref saved 1)) (obj-set! saved 1 ())))))
+                          (def status (ssh-mux-wait fd (rest r) restore!))
+                          (restore!)
+                          (Socket close fd)
+                          (when (if tty? (not (%quiet? s)) #f) (%say 2 (Str8 append "Shared connection to " host " closed.\n")))
+                          (if (null? status) 255 status)))))
+              (do (def r (ssh-mux-open-stdio fd 1 (first stdio) (rest stdio) input 1))
+                  (match
+                    ((null? r) (do (Socket close fd) ()))
+                    ((eq? (first r) (lit denied)) (Err raise 'value (Str8 append "Master refused stdio forwarding request: " (rest r)) ()))
+                    ((eq? (first r) (lit failed)) (Err raise 'value (Str8 append "Stdio forwarding request failed: " (rest r)) ()))
+                    (#t (do (ssh-mux-wait fd (rest r) (fn (_) ())) (Socket close fd) 0)))))))))))
+
+; ControlPersist, as OpenSSH's control_persist_detach: the connection,
+; authenticated and listening on lfd, goes on in a child of a session of
+; its own, its standard descriptors on /dev/null -- standard error kept
+; under -v -- and returns there.  This process closes its copy of the
+; socket and is the master's passenger for the session or -W's forward,
+; leaving with its exit status, or, under -N, with 0 at once.  Neither
+; end of the connection is this process's to close.
+(def %persist!
+  (fn (_ s lfd command stdio)
+    (def pid (Sys fork))
+    (if (= pid 0)
+      (do (Sys setsid)
+          (def null (File open "/dev/null" (lit rdwr)))
+          (unless (< null 0)
+            (do (Sys dup2 null 0) (Sys dup2 null 1) (Sys dup2 null %stdin)
+                (unless (List any? (fn (_ l) (str=? l (%get s (lit level)))) %debug-levels) (Sys dup2 null 2))
+                (when (> null %stdin) (File close null)))))
+      (do (Socket close lfd)
+          (Sys exit
+            (if (if (null? command) (null? stdio) #f) 0
+              (guard (e (do (%log (%message e)) 255))
+                ((fn (_ status) (if (null? status) (do (%log "Failed to connect to new control master") 255) status))
+                 (%passenger (pair (pair (lit control-master) "false") s) command stdio)))))))))
 
 (def %connected
   (fn (_ s command stdio proxy spawned)
@@ -769,24 +1106,25 @@
                     255)
                 (do (unless (null? tr)
                       (tr (Str8 append "Authenticated to " host (if (null? addr) " (via proxy)" (Str8 append " ([" addr "]:" (%num port) ")")) ".")))
+                    ; ControlMaster: the socket others find the connection at;
+                    ; under ControlPersist the connection then goes on in a
+                    ; master of its own, without a session, this process its
+                    ; passenger
+                    (def path (%get s (lit control-path)))
+                    (def lfd (if (if (%masters? s) (not (null? path)) #f) (ssh-session-control-listen path) ()))
+                    (def persist (if (null? lfd) () (%get s (lit control-persist))))
+                    (def persisting (if (null? persist) #f (if (str? persist) (not (str=? persist "no")) #t)))
+                    (when persisting (%persist! s lfd command stdio))
+                    (def run-command (if persisting () command))
+                    (def run-stdio (if persisting () stdio))
                     ; ForkAfterAuthentication: the connection goes on in a
                     ; child of its own session, this process leaving with 0
-                    (when (%get s (lit fork))
+                    (when (if (%get s (lit fork)) (not persisting) #f)
                       (do (def pid (Sys fork))
                           (unless (= pid 0) (Sys exit 0))
                           (Sys setsid)))
-                    ; a terminal as RequestTTY says: force always, yes
-                    ; when standard input is one, auto for a shell on one
                     (def local-tty (Sys isatty %stdin))
-                    (def want (%get s (lit tty)))
-                    (def tty?
-                      (match ((str=? want "force") #t)
-                             ((str=? want "no") #f)
-                             ((not (null? stdio)) #f)
-                             ((str=? want "yes") local-tty)
-                             (#t (if (eq? command (lit shell)) local-tty #f))))
-                    (when (if (str=? want "yes") (if (not local-tty) (not quiet) #f) #f)
-                      (%log "Pseudo-terminal will not be allocated because stdin is not a terminal.\r"))
+                    (def tty? (if persisting #f (%tty? s command stdio quiet)))
                     (def term ((fn (_ t) (if (null? t) "" t)) (Sys getenv "TERM")))
                     ; the modes as they are before raw mode, for the server's terminal
                     (def modes (if tty? (Term modes %stdin) ()))
@@ -794,24 +1132,22 @@
                     (def outcome
                       (guard (e (pair (lit failed) (Err text e)))
                         (pair (lit status)
-                          (ssh-session-run! c command
-                            (if (if (%get s (lit stdin-null)) #t (if (null? command) (null? stdio) #f)) () %stdin)
+                          (ssh-session-run! c run-command
+                            (if (if (%get s (lit stdin-null)) #t (if (null? run-command) (null? run-stdio) #f)) () %stdin)
                             (fn (_ buf start len) (File write 1 (ssh-copy buf start len) len))
                             (fn (_ buf start len) (File write 2 (ssh-copy buf start len) len))
-                            (List map (fn (_ f) (pair (if (null? (first f)) () (%address (first f))) (rest f)))
-                              (List append (%get s (lit forwards))
-                                ; DynamicForward: a listener whose connections say where they go, by SOCKS
-                                (List map (fn (_ d) (list (match ((null? (first d)) (if (%get s (lit gateway)) () "localhost"))
-                                                                 ((if (str=? (first d) "*") #t (str=? (first d) "")) ())
-                                                                 (#t (first d)))
-                                                          (List ref 1 d) #f #f))
-                                  (%get s (lit dynamics)))))
+                            (List map (fn (_ f) (pair (if (null? (first f)) () (%address (first f))) (rest f))) (%local-forwards s))
                             (%get s (lit remotes))
-                            (if (null? stdio) () (pair (%address (first stdio)) (rest stdio)))
+                            (if (null? run-stdio) () (pair (%address (first run-stdio)) (rest run-stdio)))
                             (%get s (lit limits))
                             (%environment s)
                             (if tty? (list term (fn (_) (Term window %stdin)) modes (%get s (lit escape))) ())
-                            (%get s (lit forward-agent))))))
+                            (%get s (lit forward-agent))
+                            (rest (%get s (lit remote-open)))
+                            (pair (%get s (lit bind-mask)) (%get s (lit bind-unlink)))
+                            (if (null? lfd) ()
+                              (list lfd path (List any? (fn (_ m) (str=? m (%master s))) (list "ask" "autoask")) host
+                                    (%get s (lit gateway)) (match ((not persisting) ()) ((str? persist) 0) (#t persist))))))))
                     (unless (null? saved) (Term restore! %stdin saved))
                     (guard (e2 ()) (ssh-disconnect! c))
                     (Socket close fd)
@@ -828,10 +1164,12 @@
                       (#t (do (%log (rest outcome)) 255))))))))))))
 
 ; The client's plan done: (HOST COMMAND OPTIONS CONFIG STDIO PRINT LOG
-; SYSLOG).  The log sent where -E and -y say; the configuration settled
+; SYSLOG CONTROL), CONTROL -O's command or ().  The log sent where -E and
+; -y say; the configuration settled
 ; -- the options, the user's file (-F's, or ~/.ssh/config) and the
 ; system's, which -F leaves out -- and the connection made, or the
-; settings printed.  The exit status.
+; settings printed, or -O's command asked of the master.  The exit
+; status.
 (def ssh-client-main
   (fn (_ plan)
     (def host (first plan))
@@ -894,6 +1232,7 @@
               (Err raise 'value "Cannot fork into background without a command to execute.\r" ()))
             (if (List ref 5 plan)
               (do (%say 1 (%print s)) 0)
-              (%run s command stdio)))))))
+              (if (null? (List ref 8 plan)) (%run s command stdio)
+                (%control-command s (List ref 8 plan) command stdio))))))))
 
 (provide ssh/client ssh-client-main ssh-client-settings ssh-client-jump ssh-client-dynamic ssh-client-escape ssh-client-query)

@@ -1,4 +1,4 @@
-# The Linux leg: x built at the release lang.xon declares, with Dropbear's
+# The Linux leg: x built at the release bundle.xon declares, with Dropbear's
 # and OpenSSH's clients, in a container the server runs in as root.  That
 # is what password logins need: a shadow file the server can read and a
 # user whose password is known.

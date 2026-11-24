@@ -1,6 +1,6 @@
 ; # x-ssh -- SSH on x-lang
 ;
-; ## ssh/keygen.x -- ssh-keygen: keys made, shown and rewritten
+; ## lib/ssh/keygen.x -- ssh-keygen: keys made, shown and rewritten
 ;
 ; @author [Jon Ruttan](jonruttan@gmail.com)
 ; @copyright 2026 Jon Ruttan

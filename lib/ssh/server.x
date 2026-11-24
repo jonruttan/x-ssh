@@ -1,6 +1,6 @@
 ; # x-ssh -- SSH on x-lang
 ;
-; ## ssh/server.x -- the server: commands run for authenticated users
+; ## lib/ssh/server.x -- the server: commands run for authenticated users
 ;
 ; @author [Jon Ruttan](jonruttan@gmail.com)
 ; @copyright 2026 Jon Ruttan
@@ -35,7 +35,7 @@
   ssh-in ssh-in-buf ssh-get-byte ssh-get-bool ssh-get-uint32 ssh-get-string ssh-get-bytes ssh-get-text ssh-copy)
 (import ssh/transport ssh-open ssh-fd ssh-session-id ssh-pending? ssh-engines! ssh-exchange-versions! ssh-kex-server! ssh-random
   ssh-cipher-names ssh-mac-names ssh-algorithms!
-  ssh-send-packet! ssh-next-packet! ssh-expect! ssh-msg-service-request ssh-msg-service-accept
+  ssh-send-packet! ssh-take-packet! ssh-expect! ssh-msg-service-request ssh-msg-service-accept
   ssh-msg-userauth-request ssh-msg-userauth-failure ssh-msg-userauth-success ssh-msg-disconnect
   ssh-msg-global-request ssh-msg-request-success ssh-msg-request-failure
   ssh-clock-sent ssh-clock-recv ssh-clock-data ssh-clock-mark! ssh-clocks-start! ssh-wait-ms ssh-clocks!)
@@ -831,11 +831,16 @@
     status))
 
 ; One packet from the client handled: a channel message is for the
-; channel it names, ours.
+; channel it names, ours; one the transport keeps (IGNORE, as an OpenSSH
+; client sends to hide its keystrokes' timing) is only a packet received.
 (def %handle!
   (fn (_ c run sock)
-    (def p (ssh-next-packet! c))
+    (def p (ssh-take-packet! c))
     (ssh-clock-mark! ssh-clock-recv)
+    (unless (null? p) (%packet! c run sock p))))
+
+(def %packet!
+  (fn (_ c run sock p)
     (def t (%byte (first p) 0))
     (when (if (= t %msg-channel-data) #t (= t %msg-channel-extended-data)) (ssh-clock-mark! ssh-clock-data))
     (def in (ssh-in (first p) 1 (- (rest p) 1)))

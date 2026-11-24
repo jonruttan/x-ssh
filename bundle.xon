@@ -1,6 +1,6 @@
-; lang.xon -- what this bundle is.
+; bundle.xon -- what this bundle is.
 
-(lang "ssh")
+(name "ssh")
 
 ; Self-contained: this bundle depends on nothing but the platform.
 ;
@@ -8,6 +8,6 @@
 ; ambient: a connection is bytes, digests and keys, none of the tower.
 (dialect he)
 
-(requires-release "v0.48.0")
+(requires-release "v0.60.0")
 
-(entry "run.x")
+(entry run)

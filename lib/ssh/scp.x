@@ -1,6 +1,6 @@
 ; # x-ssh -- SSH on x-lang
 ;
-; ## ssh/scp.x -- scp: files copied over the ssh program's pipes
+; ## lib/ssh/scp.x -- scp: files copied over the ssh program's pipes
 ;
 ; @author [Jon Ruttan](jonruttan@gmail.com)
 ; @copyright 2026 Jon Ruttan

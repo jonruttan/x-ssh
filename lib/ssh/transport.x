@@ -1,6 +1,6 @@
 ; # x-ssh -- SSH on x-lang
 ;
-; ## ssh/transport.x -- the transport layer, from either end
+; ## lib/ssh/transport.x -- the transport layer, from either end
 ;
 ; @author [Jon Ruttan](jonruttan@gmail.com)
 ; @copyright 2026 Jon Ruttan
@@ -415,14 +415,13 @@
 ; The next packet that is the transport's business handled here, any
 ; other handed back: IGNORE, DEBUG and EXT_INFO dropped, a DISCONNECT
 ; raised with its message; a GLOBAL_REQUEST is the channel layer's to
-; answer.
-(def ssh-next-packet!
-  (fn (self c)
-    (def p (ssh-recv-packet! c))
+; answer.  #t for a packet handled here.
+(def %transport-packet!
+  (fn (_ c p)
     (def t (%byte (first p) 0))
     (match
-      ((= t ssh-msg-ignore) (self c))
-      ((= t ssh-msg-debug) (self c))
+      ((= t ssh-msg-ignore) #t)
+      ((= t ssh-msg-debug) #t)
       ; extensions (RFC 8308): server-sig-algs kept, the rest passed over
       ((= t ssh-msg-ext-info)
         (do (def in (ssh-in (first p) 1 (- (rest p) 1)))
@@ -433,13 +432,27 @@
                      (when (str=? name "server-sig-algs") (%slot! c 12 (Str8 split "," value)))
                      (self (- n 1)))))
              (ssh-get-uint32 in))
-            (self c)))
+            #t))
       ((= t ssh-msg-disconnect)
         (do (def in (ssh-in (first p) 1 (- (rest p) 1)))
             (def code (ssh-get-uint32 in))
             (def text (ssh-get-text in))
             (Err raise 'io (Str8 append "ssh: the server disconnected: " text) ())))
-      (#t p))))
+      (#t #f))))
+
+(def ssh-next-packet!
+  (fn (self c)
+    (def p (ssh-recv-packet! c))
+    (if (%transport-packet! c p) (self c) p)))
+
+; One packet read, handed back, or () when it was the transport's: a
+; loop that read it because one was whole waits on its sockets again,
+; not on the next.  EXT_INFO comes again once a user is in, and may be
+; the last the server sends for a while.
+(def ssh-take-packet!
+  (fn (_ c)
+    (def p (ssh-recv-packet! c))
+    (if (%transport-packet! c p) () p)))
 
 ; The next packet, which must be of type t.
 (def ssh-expect!
@@ -887,7 +900,7 @@
 
 (provide ssh/transport ssh-version-string ssh-open ssh-fd ssh-session-id ssh-host-key ssh-server-sig-algs ssh-hostkey-names ssh-pending? ssh-random ssh-engines!
   ssh-kex-names ssh-cipher-names ssh-mac-names ssh-algorithms!
-  ssh-exchange-versions! ssh-send-packet! ssh-recv-packet! ssh-next-packet! ssh-expect! ssh-kex! ssh-kex-server! ssh-auth-service! ssh-auth-publickey-query! ssh-auth-publickey! ssh-auth-password!
+  ssh-exchange-versions! ssh-send-packet! ssh-recv-packet! ssh-next-packet! ssh-take-packet! ssh-expect! ssh-kex! ssh-kex-server! ssh-auth-service! ssh-auth-publickey-query! ssh-auth-publickey! ssh-auth-password!
   ssh-msg-disconnect ssh-msg-global-request ssh-msg-request-success ssh-msg-request-failure ssh-msg-service-request ssh-msg-service-accept
   ssh-msg-userauth-request ssh-msg-userauth-failure ssh-msg-userauth-success ssh-trace
   ssh-clock-sent ssh-clock-recv ssh-clock-data ssh-clock-mark! ssh-clocks-start! ssh-wait-ms ssh-clocks!)

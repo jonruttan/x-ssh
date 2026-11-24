@@ -40,10 +40,10 @@
   ssh-mux-session-opened ssh-mux-send! ssh-mux-receive ssh-mux-hello-message ssh-mux-reply-ok ssh-mux-reply-error
   ssh-mux-reply-two ssh-mux-session-request ssh-mux-take-fd ssh-mux-open-fwd ssh-mux-close-fwd ssh-mux-remote-port
   ssh-mux-fwd-local ssh-mux-fwd-remote ssh-mux-fwd-dynamic ssh-mux-streamlocal ssh-mux-forward-key
-  ssh-mux-forward-text ssh-mux-forward-read)
-(import ssh/bytes ssh-out ssh-put-byte ssh-put-bool ssh-put-uint32 ssh-put-text ssh-put-string ssh-out-run
-  ssh-in ssh-get-byte ssh-get-bool ssh-get-uint32 ssh-get-string ssh-get-text ssh-in-buf ssh-copy)
-(import ssh/transport ssh-fd ssh-pending? ssh-send-packet! ssh-take-packet! ssh-msg-disconnect
+  ssh-mux-forward-text ssh-mux-forward-read ssh-mux-proxy ssh-mux-s-proxy ssh-mux-message)
+(import ssh/bytes ssh-out ssh-put-byte ssh-put-bool ssh-put-uint32 ssh-put-bytes ssh-put-text ssh-put-string ssh-out-run
+  ssh-in ssh-in-left ssh-get-byte ssh-get-bool ssh-get-uint32 ssh-get-string ssh-get-text ssh-in-buf ssh-copy)
+(import ssh/transport ssh-fd ssh-pending? ssh-send-packet! ssh-take-packet! ssh-msg-disconnect ssh-open-mux ssh-fill!
   ssh-msg-global-request ssh-msg-request-success ssh-msg-request-failure
   ssh-clock-sent ssh-clock-recv ssh-clock-data ssh-clock-mark! ssh-clocks-start! ssh-wait-ms ssh-clocks!)
 
@@ -103,7 +103,9 @@
 ; 5 the session channel or (), 6 the remote forwards as forwards are,
 ; 7 those whose request the server has yet to answer, in the order
 ; asked, as (REMOTE . REPLY), REPLY a sharing client's (FD RID) to tell
-; or (), 8 the agent's socket, or (), 9 the connections on dynamic
+; or (); a keepalive's (() . keepalive); a proxy client's (FORWARD .
+; proxy), FORWARD its entry in 18 or (); 8 the agent's socket, or (), 9
+; the connections on dynamic
 ; listeners yet to say where they go, as (FD BYTES GREETED), 10 where a
 ; remote forward's SOCKS requests may go: () anywhere, none nowhere, or
 ; (HOST PORT) each, HOST "*" any host and PORT () any port; 11 the
@@ -113,11 +115,13 @@
 ; as the wire says them, each (KEY THING), THING its listener or remote
 ; forward; 15 whether a run without a session of its own has stopped
 ; listening, to end once no channel is open; 16 when ControlPersist's
-; time ends the run, or (); and 17 a socket listener's (MASK . UNLINK).
+; time ends the run, or (); 17 a socket listener's (MASK . UNLINK); and
+; 18 the remote forwards proxy clients have asked for, each a vector
+; (CLIENT ADDRESS PORT), CLIENT the client's connection.
 (def %CHANNELS 1) (def %NEXT 2) (def %MOVED 3) (def %LISTENERS 4) (def %SESSION 5)
 (def %REMOTES 6) (def %UNANSWERED 7) (def %RUN-AGENT 8) (def %SOCKS 9) (def %OPEN 10)
 (def %CONTROL 11) (def %CONTROLS 12) (def %ENDED 13) (def %FWDS 14) (def %STOPPED 15)
-(def %DEADLINE 16) (def %SL 17)
+(def %DEADLINE 16) (def %SL 17) (def %PROXIED 18)
 (def %rn (fn (_ run i) (obj-ref run i)))
 (def %rn! (fn (_ run i v) (obj-set! run i v)))
 
@@ -481,38 +485,55 @@
 ; A port 0 asked for is the port the server allocated, the forward's
 ; from then on.  A sharing client that asked is told: OK, the port
 ; allocated, or the refusal, the forward dropped; otherwise a refusal,
-; and the port allocated, are said as OpenSSH says them.
+; and the port allocated, are said as OpenSSH says them.  A keepalive's
+; answer is passed over.  A proxy client's is taken here, as OpenSSH's
+; master takes it -- its proxy client reads no packet so short -- a
+; refusal dropping the forward, the port allocated its forward's.
 (def %answered!
   (fn (_ run ok in)
     (def asked (%rn run %UNANSWERED))
-    (unless (null? asked)
-      (do (def r (first (first asked)))
-          (def reply (rest (first asked)))
-          (%rn! run %UNANSWERED (rest asked))
-          (def any? (if (null? (List ref 5 r)) (= (List ref 1 r) 0) #f))
-          (def failed (if (null? (List ref 5 r))
-                        (Str8 append "remote port forwarding failed for listen port " (%num (List ref 1 r)))
-                        (Str8 append "remote port forwarding failed for listen path " (List ref 5 r))))
-          (match
-            ((not ok)
-              (if (null? reply) (%say (Str8 append "Warning: " failed "\n"))
-                (do (%rn! run %REMOTES (List filter (fn (_ x) (not (eq? x r))) (%rn run %REMOTES)))
-                    (%rn! run %FWDS (List filter (fn (_ x) (not (eq? (List ref 1 x) r))) (%rn run %FWDS)))
-                    (ssh-mux-send! (first reply) (ssh-mux-reply-error ssh-mux-failure (List ref 1 reply) failed)))))
-            (any?
-              (do (def port (guard (e 0) (ssh-get-uint32 in)))
-                  (def now (pair (first r) (pair port (rest (rest r)))))
-                  (%rn! run %REMOTES (List map (fn (_ x) (if (eq? x r) now x)) (%rn run %REMOTES)))
-                  (%rn! run %FWDS (List map (fn (_ x) (if (eq? (List ref 1 x) r) (list (first x) now) x)) (%rn run %FWDS)))
-                  (if (null? reply)
-                    (%say (Str8 append "Allocated port " (%num port) " for remote forward to "
-                                       (match ((not (null? (List ref 6 r))) (Str8 append (List ref 6 r) ":-2"))
-                                              ((null? (List ref 2 r)) "(null):0")
-                                              (#t (Str8 append (List ref 2 r) ":" (%num (List ref 3 r)))))
-                                       "\n"))
-                    (ssh-mux-send! (first reply) (ssh-mux-reply-two ssh-mux-remote-port (List ref 1 reply) port)))))
-            ((not (null? reply)) (ssh-mux-send! (first reply) (ssh-mux-reply-ok (List ref 1 reply))))
-            (#t ()))))))
+    (match
+      ((null? asked) ())
+      ((eq? (rest (first asked)) (lit keepalive)) (%rn! run %UNANSWERED (rest asked)))
+      ((eq? (rest (first asked)) (lit proxy))
+        (do (def px (first (first asked)))
+            (%rn! run %UNANSWERED (rest asked))
+            (unless (null? px)
+              (match ((not ok) (%rn! run %PROXIED (List filter (fn (_ x) (not (eq? x px))) (%rn run %PROXIED))))
+                     ((= (obj-ref px 3) 0) (obj-set! px 3 (guard (e 0) (ssh-get-uint32 in))))
+                     (#t ())))))
+      (#t (%answered-remote! run ok in)))))
+
+(def %answered-remote!
+  (fn (_ run ok in)
+    (def asked (%rn run %UNANSWERED))
+    (def r (first (first asked)))
+    (def reply (rest (first asked)))
+    (%rn! run %UNANSWERED (rest asked))
+    (def any? (if (null? (List ref 5 r)) (= (List ref 1 r) 0) #f))
+    (def failed (if (null? (List ref 5 r))
+                  (Str8 append "remote port forwarding failed for listen port " (%num (List ref 1 r)))
+                  (Str8 append "remote port forwarding failed for listen path " (List ref 5 r))))
+    (match
+      ((not ok)
+        (if (null? reply) (%say (Str8 append "Warning: " failed "\n"))
+          (do (%rn! run %REMOTES (List filter (fn (_ x) (not (eq? x r))) (%rn run %REMOTES)))
+              (%rn! run %FWDS (List filter (fn (_ x) (not (eq? (List ref 1 x) r))) (%rn run %FWDS)))
+              (ssh-mux-send! (first reply) (ssh-mux-reply-error ssh-mux-failure (List ref 1 reply) failed)))))
+      (any?
+        (do (def port (guard (e 0) (ssh-get-uint32 in)))
+            (def now (pair (first r) (pair port (rest (rest r)))))
+            (%rn! run %REMOTES (List map (fn (_ x) (if (eq? x r) now x)) (%rn run %REMOTES)))
+            (%rn! run %FWDS (List map (fn (_ x) (if (eq? (List ref 1 x) r) (list (first x) now) x)) (%rn run %FWDS)))
+            (if (null? reply)
+              (%say (Str8 append "Allocated port " (%num port) " for remote forward to "
+                                 (match ((not (null? (List ref 6 r))) (Str8 append (List ref 6 r) ":-2"))
+                                        ((null? (List ref 2 r)) "(null):0")
+                                        (#t (Str8 append (List ref 2 r) ":" (%num (List ref 3 r)))))
+                                 "\n"))
+              (ssh-mux-send! (first reply) (ssh-mux-reply-two ssh-mux-remote-port (List ref 1 reply) port)))))
+      ((not (null? reply)) (ssh-mux-send! (first reply) (ssh-mux-reply-ok (List ref 1 reply))))
+      (#t ()))))
 
 ; A channel the server opens: a forwarded-tcpip for a remote forward's
 ; port, or a forwarded-streamlocal@openssh.com for its socket's path,
@@ -693,7 +714,8 @@
 ; closed, and NEW_SESSION or NEW_STDIO_FWD by a channel whose input,
 ; output and error are the descriptors the client passes, its control
 ; connection told when it is open and the session's exit status, and
-; closed when the channel is.  ControlMaster ask and autoask ask
+; closed when the channel is, and PROXY by the connection protocol
+; itself (see proxy mode below).  ControlMaster ask and autoask ask
 ; SSH_ASKPASS to confirm each, as OpenSSH's ask_permission does.  Under
 ; ControlPersist the run has no session of its own, and ends once no
 ; channel or control connection has been open for its time.
@@ -750,18 +772,25 @@
 
 ; A control connection ended: closed, or, when it asked for a channel,
 ; that channel closed, the connection closed with it once the server
-; has closed it.
+; has closed it; a proxy client's channels closed and its forwards
+; cancelled.
 (def %control-drop!
   (fn (_ c run k)
     (def fd (first k))
     (def owner (List find (fn (_ ch) (= (first (%ch ch %CTL)) fd)) (%shared run)))
     (%rn! run %CONTROLS (List filter (fn (_ x) (not (= (first x) fd))) (%rn run %CONTROLS)))
+    (when (eq? (List ref 1 k) (lit proxy)) (%proxy-gone! c run (List ref 2 k)))
     (if (null? owner) (guard (e ()) (Socket close fd))
       (do (unless (null? (%ch owner %SERVER)) (%shut! c owner))
           (%ch! owner %INPUT ())))))
 
-; A control connection's next request read and answered.
+; A control connection's next request read and answered; a proxy
+; client's packets read.
 (def %control-read!
+  (fn (_ c run k)
+    (if (eq? (List ref 1 k) (lit proxy)) (%proxy-read! c run k) (%control-request! c run k))))
+
+(def %control-request!
   (fn (_ c run k)
     (def fd (first k))
     (def m (ssh-mux-receive fd))
@@ -791,6 +820,14 @@
                 ((= (first m) ssh-mux-close-fwd) (%mux-close-fwd! c run fd rid (rest m)))
                 ((= (first m) ssh-mux-new-session) (%mux-session! c run fd rid (rest m)))
                 ((= (first m) ssh-mux-new-stdio-fwd) (%mux-stdio! c run fd rid (rest m)))
+                ((= (first m) ssh-mux-proxy)
+                  (if (%allowed? run "Allow multiplex proxy connection?")
+                    (do (def r (ssh-mux-message ssh-mux-s-proxy))
+                        (ssh-put-uint32 r rid)
+                        (ssh-mux-send! fd r)
+                        (%rn! run %CONTROLS (List map (fn (_ x) (if (= (first x) fd) (list fd (lit proxy) (ssh-open-mux fd ())) x))
+                                              (%rn run %CONTROLS))))
+                    (deny)))
                 (#t (ssh-mux-send! fd (ssh-mux-reply-error ssh-mux-failure rid "unsupported request")))))))))
 
 ; The forward on the wire as the run holds one, (ADDRESS PORT HOST PORT
@@ -964,6 +1001,161 @@
           (guard (e ()) (File unlink (List ref 1 ctl)))
           (%rn! run %CONTROL (pair () (rest ctl)))))))
 
+; --- proxy mode: PROTOCOL.mux's proxy clients ----------------------------------
+;
+; A control connection granted PROXY carries the connection protocol
+; itself from then on, unpadded and in the clear (ssh-open-mux), as
+; OpenSSH's channel_proxy_downstream and channel_proxy_upstream relay
+; it.  A channel the client opens, or confirms, is a proxy channel here,
+; numbered as the run's own, so that no two clients' numbers meet at the
+; server: its messages go to the server with the number changed, and
+; the server's come back with the client's own.  A message for a channel
+; that is the client's goes on as it is; one for another's is dropped.
+; tcpip-forward and cancel-tcpip-forward go to the server, its answer
+; taken here as OpenSSH's master takes it, and the connections the
+; server opens for the port go to the client as they come; any other
+; global request is dropped, and nothing
+; but the connection protocol is passed on.  A client gone has its
+; channels closed and its forwards cancelled.
+
+(def %to-down
+  (fn (_ dc buf n) (guard (e ()) (ssh-send-packet! dc buf n))))
+
+(def %down-packet!
+  (fn (_ dc out) (def r (ssh-out-run out)) (%to-down dc (first r) (rest r))))
+
+(def %up!
+  (fn (_ c p) (ssh-send-packet! c (first p) (rest p)) (ssh-clock-mark! ssh-clock-sent)))
+
+; A proxy channel for client dc's channel number down.
+(def %proxy-channel!
+  (fn (_ run dc down) (%channel! run (lit proxy) () () () dc down)))
+
+(def %proxy-of
+  (fn (_ run dc server)
+    (List find (fn (_ ch) (if (eq? (%ch ch %KIND) (lit proxy))
+                            (if (eq? (%ch ch %FD) dc) (if (null? (%ch ch %SERVER)) #f (= (%ch ch %SERVER) server)) #f)
+                            #f))
+      (%rn run %CHANNELS))))
+
+; A packet from proxy client dc handled.
+(def %downstream!
+  (fn (_ c run dc p)
+    (def t (%byte (first p) 0))
+    (def in (ssh-in (first p) 1 (- (rest p) 1)))
+    (def tail (fn (_ out) (ssh-put-bytes out (first p) (- (rest p) (ssh-in-left in)) (ssh-in-left in)) out))
+    (match
+      ((= t %msg-channel-open)
+        (do (def type (ssh-get-text in))
+            (def ch (%proxy-channel! run dc (ssh-get-uint32 in)))
+            (def out (%packet-of t))
+            (ssh-put-text out type)
+            (ssh-put-uint32 out (%ch ch %OURS))
+            (%send c (tail out))))
+      ((= t %msg-channel-open-confirmation)
+        (do (def server (ssh-get-uint32 in))
+            (def ch (%proxy-channel! run dc (ssh-get-uint32 in)))
+            (%ch! ch %SERVER server)
+            (def out (%packet-of t))
+            (ssh-put-uint32 out server)
+            (ssh-put-uint32 out (%ch ch %OURS))
+            (%send c (tail out))))
+      ; a refusal of a channel the server opened for the client's forward
+      ((= t %msg-channel-open-failure) (%up! c p))
+      ((= t ssh-msg-global-request)
+        (do (def name (ssh-get-text in))
+            (def want (ssh-get-bool in))
+            (match
+              ((str=? name "tcpip-forward")
+                (do (def px (Vector make 3 ()))
+                    (obj-set! px 1 dc) (obj-set! px 2 (ssh-get-text in)) (obj-set! px 3 (ssh-get-uint32 in))
+                    (%rn! run %PROXIED (List append (%rn run %PROXIED) (list px)))
+                    (%up! c p)
+                    (when want (%rn! run %UNANSWERED (List append (%rn run %UNANSWERED) (list (pair px (lit proxy))))))))
+              ((str=? name "cancel-tcpip-forward")
+                (do (ssh-get-text in)
+                    (def port (ssh-get-uint32 in))
+                    (%rn! run %PROXIED (List filter (fn (_ x) (not (if (eq? (obj-ref x 1) dc) (= (obj-ref x 3) port) #f))) (%rn run %PROXIED)))
+                    (%up! c p)
+                    (when want (%rn! run %UNANSWERED (List append (%rn run %UNANSWERED) (list (pair () (lit proxy))))))))
+              (#t ()))))
+      ((if (> t %msg-channel-open-failure) (<= t %msg-channel-failure) #f)
+        (do (def ch (%proxy-of run dc (ssh-get-uint32 in)))
+            (unless (null? ch)
+              (do (%up! c p)
+                  (when (= t %msg-channel-close)
+                    (if (%ch ch %CLOSED) (%drop! run ch) (%ch! ch %SHUT #t)))))))
+      (#t ()))))
+
+; What a proxy client has sent: read, and each whole packet handled; a
+; client whose socket has closed dropped.
+(def %proxy-read!
+  (fn (_ c run k)
+    (def dc (List ref 2 k))
+    (if (not (ssh-fill! dc)) (%control-drop! c run k)
+      ((fn (self)
+         (when (ssh-pending? dc)
+           (do ((fn (_ p) (unless (null? p) (%downstream! c run dc p))) (ssh-take-packet! dc))
+               (self))))))))
+
+; A proxy client gone: its channels closed at the server's end, those
+; the server has closed dropped, and its forwards cancelled.
+(def %proxy-gone!
+  (fn (_ c run dc)
+    (List for-each
+      (fn (_ ch)
+        (when (if (eq? (%ch ch %KIND) (lit proxy)) (eq? (%ch ch %FD) dc) #f)
+          (do (%ch! ch %FD ())
+              (match ((%ch ch %CLOSED) (%drop! run ch))
+                     ((null? (%ch ch %SERVER)) ())
+                     (#t (%shut! c ch))))))
+      (%rn run %CHANNELS))
+    (List for-each
+      (fn (_ px)
+        (when (eq? (obj-ref px 1) dc)
+          (do (def req (%packet-of ssh-msg-global-request))
+              (ssh-put-text req "cancel-tcpip-forward")
+              (ssh-put-bool req #f)
+              (ssh-put-text req (obj-ref px 2))
+              (ssh-put-uint32 req (obj-ref px 3))
+              (%send c req))))
+      (%rn run %PROXIED))
+    (%rn! run %PROXIED (List filter (fn (_ px) (not (eq? (obj-ref px 1) dc))) (%rn run %PROXIED)))))
+
+; A channel the server opens for a proxy client's forward passed to the
+; client as it is: #t, or #f when the open is not for one.
+(def %proxied-open!
+  (fn (_ c run p)
+    (def in (ssh-in (first p) 1 (- (rest p) 1)))
+    (if (not (str=? (ssh-get-text in) "forwarded-tcpip")) #f
+      (do (ssh-get-uint32 in) (ssh-get-uint32 in) (ssh-get-uint32 in) (ssh-get-text in)
+          (def port (ssh-get-uint32 in))
+          (def px (List find (fn (_ x) (= (obj-ref x 3) port)) (%rn run %PROXIED)))
+          (if (null? px) #f (do (%to-down (obj-ref px 1) (first p) (rest p)) #t))))))
+
+; A message from the server for a proxy channel passed to its client,
+; the client's own number in place of ours: confirmed, it holds the
+; server's; refused, it is dropped; closed, it is dropped once both
+; ends have closed.  One whose client has gone is closed.
+(def %relay-down!
+  (fn (_ c run ch t p)
+    (def dc (%ch ch %FD))
+    (when (= t %msg-channel-open-confirmation)
+      (%ch! ch %SERVER (ssh-get-uint32 (ssh-in (first p) 5 4))))
+    (unless (null? dc)
+      (do (def out (%packet-of t))
+          (ssh-put-uint32 out (%ch ch %COMMAND))
+          (ssh-put-bytes out (first p) 5 (- (rest p) 5))
+          (%down-packet! dc out)))
+    (match
+      ((= t %msg-channel-open-confirmation) (when (null? dc) (%shut! c ch)))
+      ((= t %msg-channel-open-failure) (%drop! run ch))
+      ((= t %msg-channel-close)
+        (if (if (%ch ch %SHUT) #t (null? dc))
+          (do (%shut! c ch) (%drop! run ch))
+          (%ch! ch %CLOSED #t)))
+      (#t ()))))
+
 ; A global request from the server: none is served; answered when it
 ; wants an answer.
 (def %global!
@@ -992,7 +1184,8 @@
       ((= t ssh-msg-global-request) (%global! c in))
       ((= t ssh-msg-request-success) (%answered! run #t in))
       ((= t ssh-msg-request-failure) (%answered! run #f in))
-      ((= t %msg-channel-open) (%opened! c run in))
+      ((= t %msg-channel-open) (unless (%proxied-open! c run p) (%opened! c run in)))
+      ((if (null? ch) #f (eq? (%ch ch %KIND) (lit proxy))) (%relay-down! c run ch t p))
       ((null? ch) ())
       ((= t %msg-channel-open-confirmation)
         (do (%ch! ch %SERVER (ssh-get-uint32 in))
@@ -1119,7 +1312,8 @@
       (List any? (fn (_ ch) (not (%ch ch %CLOSED))) (%rn run %CHANNELS)))))
 
 ; Whether the run is over: a sharing client has ended it; its session
-; has closed, and every sharing client's channel with it; it has
+; has closed, and every sharing client's channel with it, and every
+; proxy client has gone; it has
 ; stopped listening, with no session of its own, and nothing is open;
 ; or ControlPersist's time has passed since anything was last open,
 ; the time begun again each time nothing is.
@@ -1136,7 +1330,9 @@
       ((if (%rn run %STOPPED) (not open?) #f) #t)
       ((if (null? (%rn run %DEADLINE)) #f (>= (Sys now) (%rn run %DEADLINE))) #t)
       ((null? (%rn run %SESSION)) #f)
-      (#t (if (%ch (%rn run %SESSION) %CLOSED) (null? (%shared run)) #f)))))
+      (#t (if (%ch (%rn run %SESSION) %CLOSED)
+              (if (null? (%shared run)) (not (List any? (fn (_ k) (eq? (List ref 1 k) (lit proxy))) (%rn run %CONTROLS))) #f)
+              #f)))))
 
 (def %ready?
   (fn (_ ready fd)
@@ -1178,12 +1374,12 @@
 ; status, or () when the server gave none.
 (def ssh-session-run!
   (fn (_ c command input on-out on-err forwards remotes netcat limits env tty agent open streamlocal control)
-    (def run (Vector make 17 ()))
+    (def run (Vector make 18 ()))
     (ssh-clocks-start!)
     (%rn! run %CHANNELS ()) (%rn! run %NEXT 0) (%rn! run %MOVED 0)
     (%rn! run %REMOTES remotes) (%rn! run %UNANSWERED ()) (%rn! run %RUN-AGENT agent)
     (%rn! run %SOCKS ()) (%rn! run %OPEN open) (%rn! run %CONTROLS ()) (%rn! run %ENDED #f)
-    (%rn! run %CONTROL control) (%rn! run %STOPPED #f) (%rn! run %DEADLINE ()) (%rn! run %SL streamlocal)
+    (%rn! run %CONTROL control) (%rn! run %STOPPED #f) (%rn! run %DEADLINE ()) (%rn! run %SL streamlocal) (%rn! run %PROXIED ())
     ; each forward with its listener, and as the wire says it, so that a
     ; sharing client asking for it again finds it, or closes it
     (def held (List filter (fn (_ x) (not (null? (List ref 1 x))))
@@ -1239,7 +1435,9 @@
                                                   (guard (e (%control-drop! c run k)) (%control-read! c run k))))
                          (%rn run %CONTROLS))
                        (when (%ready? ready sock) (%handle! c run))
-                       (ssh-clocks! c limits)
+                       ; a keepalive's answer is the next to a request: none of ours
+                       (when (ssh-clocks! c limits)
+                         (%rn! run %UNANSWERED (List append (%rn run %UNANSWERED) (list (pair () (lit keepalive))))))
                        (%resized! c run)))
                  (when (> (%rn run %MOVED) %collect-every)
                    (do (Heap collect) (%rn! run %MOVED 0)))

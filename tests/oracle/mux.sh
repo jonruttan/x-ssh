@@ -16,15 +16,18 @@
 #   taken    a second master at a path taken, said as OpenSSH says it
 #   ask      ControlMaster ask: SSH_ASKPASS asked to confirm, a no
 #            refusing the session, OpenSSH's passenger then connecting
-#            itself
+#            itself; -O proxy refused as OpenSSH's master refuses it
 #   forward  -O forward and cancel, from OpenSSH's client and x-ssh's:
 #            -L listened for and closed, -R 0's port printed, a refusal
 #            said as OpenSSH says it; a passenger's -L, under -N too
+#   proxy    -O proxy, from OpenSSH's client and x-ssh's: a session, its
+#            input, output, error and status; -L and -R through it; two
+#            at once, beside a passenger
 #   persist  ControlPersist: the session the master's own, the master
 #            then in the background serving passengers, and gone once
 #            idle; under -N the shell given back at once, -O stop ending it
 #   openssh  OpenSSH's ControlMaster: x-ssh's -O check, passenger, -W,
-#            -O forward and cancel, and -O exit
+#            -O proxy and its -R, -O forward and cancel, and -O exit
 #   auto     ControlMaster auto: the first a master, the second its
 #            passenger
 #   none     -O with no master, or no ControlPath: OpenSSH's words
@@ -59,8 +62,9 @@ xssh() { HOME="$home" "$X" -l ssh -- ssh $opts "$@"; }
 ossh() { ssh $opts -o LogLevel=INFO "$@"; }
 # what a client said, without the host key added to /dev/null, the
 # launcher's note of a state image written for the fixture's home,
-# OpenSSH's \r, or the master's process id
-said() { grep -v -e "^Warning: Permanently added" -e "^x: no current state image" | tr -d "\r" | sed -e "s/pid=[0-9]*/pid=N/" -e "s|$fx|FX|g"; }
+# OpenSSH's \r and its TCP_NODELAY warning on a control socket in
+# proxy mode, or the master's process id
+said() { grep -v -e "^Warning: Permanently added" -e "^x: no current state image" -e "^setsockopt TCP_NODELAY" | tr -d "\r" | sed -e "s/pid=[0-9]*/pid=N/" -e "s|$fx|FX|g"; }
 failed=0
 
 fail() {
@@ -135,6 +139,11 @@ waitsock "$cm"
 check "ask -- refused, the passenger connects itself" \
 	"$(ossh -S "$cm" 127.0.0.1 'echo itself' < /dev/null 2>&1 | said)" "$(printf 'Master refused session request: Permission denied\nitself')"
 check "ask -- SSH_ASKPASS asked to confirm" "$(cat "$fx/asked" 2>/dev/null)" "confirm|Allow shared connection to 127.0.0.1? "
+rm -f "$fx/asked"
+ours=$(status xssh -S "$cm" -O proxy 127.0.0.1 'echo ran' < /dev/null 2>&1 | said)
+theirs=$(status ossh -S "$cm" -O proxy 127.0.0.1 'echo ran' < /dev/null 2>&1 | said)
+check "ask -- -O proxy refused, said as OpenSSH says it" "$ours" "$theirs"
+check "ask -- -O proxy asked about" "$(sort -u "$fx/asked" 2>/dev/null)" "confirm|Allow multiplex proxy connection?"
 done_with
 
 # forward: -O forward and cancel asked of x-ssh's master, by both clients;
@@ -171,6 +180,35 @@ check "forward -- an x-ssh passenger under -N, its -L the master's" \
 	"$(status xssh -S "$cm" -N -L "$p5:127.0.0.1:$port" 127.0.0.1 < /dev/null 2>&1 | said) $(banner $p5)" "status 0 SSH-2.0-"
 done_with
 
+# proxy: -O proxy, the control connection carrying the connection
+# protocol, from OpenSSH's client and x-ssh's; forwards through it, the
+# server's end reaching back through -L and -R; two at once
+xssh -M -S "$cm" -N 127.0.0.1 < /dev/null 2> "$fx/master.err" &
+cpid=$!
+waitsock "$cm"
+for who in ossh xssh; do
+	check "proxy -- $who's output, error and status" \
+		"$(status $who -S "$cm" -O proxy 127.0.0.1 'echo out; echo err >&2; exit 7' < /dev/null 2>&1 | said)" "$(printf 'out\nerr\nstatus 7')"
+	check "proxy -- $who's input" "$(echo in | $who -S "$cm" -O proxy 127.0.0.1 cat 2>&1 | said)" "in"
+done
+check "proxy -- OpenSSH's -L, the server's end through it" \
+	"$(ossh -S "$cm" -O proxy -L "$p1:127.0.0.1:$port" 127.0.0.1 "nc -w 2 127.0.0.1 $p1 < /dev/null | head -c 8" < /dev/null 2>&1 | said)" "SSH-2.0-"
+check "proxy -- x-ssh's -L, the server's end through it" \
+	"$(xssh -S "$cm" -O proxy -L "$p2:127.0.0.1:$port" 127.0.0.1 "nc -w 2 127.0.0.1 $p2 < /dev/null | head -c 8" < /dev/null 2>&1 | said)" "SSH-2.0-"
+check "proxy -- OpenSSH's -R, the server's end through it" \
+	"$(ossh -S "$cm" -O proxy -R "$p3:127.0.0.1:$port" 127.0.0.1 "nc -w 2 127.0.0.1 $p3 < /dev/null | head -c 8" < /dev/null 2>&1 | said)" "SSH-2.0-"
+check "proxy -- x-ssh's -R, the server's end through it" \
+	"$(xssh -S "$cm" -O proxy -R "$p4:127.0.0.1:$port" 127.0.0.1 "nc -w 2 127.0.0.1 $p4 < /dev/null | head -c 8" < /dev/null 2>&1 | said)" "SSH-2.0-"
+ossh -S "$cm" -O proxy 127.0.0.1 'sleep 2; echo first' < /dev/null > "$fx/first" 2>&1 &
+fpid=$!
+sleep 1
+second=$(xssh -S "$cm" -O proxy 127.0.0.1 'echo second' < /dev/null 2>&1 | said)
+wait $fpid
+check "proxy -- two at once, each its own channel" "$second $(said < "$fx/first")" "second first"
+check "proxy -- the master's own passengers beside them" \
+	"$(status ossh -S "$cm" 127.0.0.1 'echo shared' < /dev/null 2>&1 | said)" "$(printf 'shared\nstatus 0')"
+done_with
+
 # persist: ControlPersist, the master going on without its session
 pm="$fx/pm"
 check "persist -- the session's output and status, the master's own" \
@@ -199,6 +237,11 @@ check "openssh -- an x-ssh passenger's output and status" \
 echo in > "$fx/in"
 check "openssh -- an x-ssh passenger's input" "$(xssh -S "$om" 127.0.0.1 cat < "$fx/in" 2>&1 | said)" "in"
 check "openssh -- x-ssh's -W through it" "$(xssh -S "$om" -W "127.0.0.1:$port" 127.0.0.1 < /dev/null 2>/dev/null | head -c 16)" "SSH-2.0-OpenSSH_"
+check "openssh -- x-ssh's -O proxy, its output, error and status" \
+	"$(status xssh -S "$om" -O proxy 127.0.0.1 'echo out; echo err >&2; exit 6' < /dev/null 2>&1 | said)" "$(printf 'out\nerr\nstatus 6')"
+check "openssh -- x-ssh's -O proxy, its input" "$(xssh -S "$om" -O proxy 127.0.0.1 cat < "$fx/in" 2>&1 | said)" "in"
+check "openssh -- x-ssh's -O proxy -R, the server's end through it" \
+	"$(xssh -S "$om" -O proxy -R "$p2:127.0.0.1:$port" 127.0.0.1 "nc -w 2 127.0.0.1 $p2 < /dev/null | head -c 8" < /dev/null 2>&1 | said)" "SSH-2.0-"
 check "openssh -- x-ssh's -O forward -L, through it, then -O cancel" \
 	"$(status xssh -S "$om" -O forward -L "$p1:127.0.0.1:$port" 127.0.0.1 2>&1 | said) $(banner $p1) $(status xssh -S "$om" -O cancel -L "$p1:127.0.0.1:$port" 127.0.0.1 2>&1 | said) $(banner $p1)" \
 	"status 0 SSH-2.0- status 0 "

@@ -87,6 +87,12 @@ nistp521), for host keys and user keys, at either end.
   master there has it carry its forwards and then its session, under
   `-N` too, or its `-W`, the exit status the master sends its own;
   `-O check`, `exit`, `stop`, `forward` and `cancel` ask the master.
+  `-O proxy` puts the control connection in OpenSSH's proxy mode, the
+  connection protocol itself carried over it, unpadded and in the
+  clear: the client's session, forwards and `-W` run over it as over a
+  connection of their own, the master numbering each proxy client's
+  channels apart from the others' and passing on the connections the
+  server opens for its `-R` forwards.
   Served keywords: Hostname, Port, User,
   IdentityFile (`~/.ssh/id_rsa`, `id_ecdsa` and `id_ed25519` by default;
   OpenSSH's or Dropbear's key files, a key under a passphrase among
@@ -245,7 +251,8 @@ container or x-os; where a connection has to be relied on, use OpenSSH.
 - **Random bytes** are read from `/dev/urandom`.
 - **Not served:** certificates, security-key (`sk-`) key types,
   keyboard-interactive, hostbased and GSSAPI authentication,
-  compression, IPv6, and `-O proxy`, `conninfo` and `channels`.
+  compression, IPv6, `-O conninfo` and `channels`, and a proxy client's
+  agent forwarding, which OpenSSH's master does not serve either.
 
 ## Install and test
 

@@ -1018,6 +1018,12 @@
 ; but the connection protocol is passed on.  A client gone has its
 ; channels closed and its forwards cancelled.
 
+; Whether two proxy clients are one: by their sockets, which no two
+; connected clients share; eq? was seen to hold between two clients'
+; records.
+(def %same-client?
+  (fn (_ a b) (if (null? a) #f (if (null? b) #f (= (ssh-fd a) (ssh-fd b))))))
+
 (def %to-down
   (fn (_ dc buf n) (guard (e ()) (ssh-send-packet! dc buf n))))
 
@@ -1034,7 +1040,7 @@
 (def %proxy-of
   (fn (_ run dc server)
     (List find (fn (_ ch) (if (eq? (%ch ch %KIND) (lit proxy))
-                            (if (eq? (%ch ch %FD) dc) (if (null? (%ch ch %SERVER)) #f (= (%ch ch %SERVER) server)) #f)
+                            (if (%same-client? (%ch ch %FD) dc) (if (null? (%ch ch %SERVER)) #f (= (%ch ch %SERVER) server)) #f)
                             #f))
       (%rn run %CHANNELS))))
 
@@ -1075,7 +1081,7 @@
               ((str=? name "cancel-tcpip-forward")
                 (do (ssh-get-text in)
                     (def port (ssh-get-uint32 in))
-                    (%rn! run %PROXIED (List filter (fn (_ x) (not (if (eq? (obj-ref x 1) dc) (= (obj-ref x 3) port) #f))) (%rn run %PROXIED)))
+                    (%rn! run %PROXIED (List filter (fn (_ x) (not (if (%same-client? (obj-ref x 1) dc) (= (obj-ref x 3) port) #f))) (%rn run %PROXIED)))
                     (%up! c p)
                     (when want (%rn! run %UNANSWERED (List append (%rn run %UNANSWERED) (list (pair () (lit proxy))))))))
               (#t ()))))
@@ -1104,7 +1110,7 @@
   (fn (_ c run dc)
     (List for-each
       (fn (_ ch)
-        (when (if (eq? (%ch ch %KIND) (lit proxy)) (eq? (%ch ch %FD) dc) #f)
+        (when (if (eq? (%ch ch %KIND) (lit proxy)) (%same-client? (%ch ch %FD) dc) #f)
           (do (%ch! ch %FD ())
               (match ((%ch ch %CLOSED) (%drop! run ch))
                      ((null? (%ch ch %SERVER)) ())
@@ -1112,7 +1118,7 @@
       (%rn run %CHANNELS))
     (List for-each
       (fn (_ px)
-        (when (eq? (obj-ref px 1) dc)
+        (when (%same-client? (obj-ref px 1) dc)
           (do (def req (%packet-of ssh-msg-global-request))
               (ssh-put-text req "cancel-tcpip-forward")
               (ssh-put-bool req #f)
@@ -1120,7 +1126,7 @@
               (ssh-put-uint32 req (obj-ref px 3))
               (%send c req))))
       (%rn run %PROXIED))
-    (%rn! run %PROXIED (List filter (fn (_ px) (not (eq? (obj-ref px 1) dc))) (%rn run %PROXIED)))))
+    (%rn! run %PROXIED (List filter (fn (_ px) (not (%same-client? (obj-ref px 1) dc))) (%rn run %PROXIED)))))
 
 ; A channel the server opens for a proxy client's forward passed to the
 ; client as it is: #t, or #f when the open is not for one.

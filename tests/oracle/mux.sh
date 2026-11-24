@@ -18,7 +18,8 @@
 #            refusing the session, OpenSSH's passenger then connecting
 #            itself; -O proxy refused as OpenSSH's master refuses it
 #   forward  -O forward and cancel, from OpenSSH's client and x-ssh's:
-#            -L listened for and closed, -R 0's port printed, a refusal
+#            -L listened for and closed, -R 0's port printed, a refused -R
+#            leaving the one beside it, a refusal
 #            said as OpenSSH says it; a passenger's -L, under -N too
 #   proxy    -O proxy, from OpenSSH's client and x-ssh's: a session, its
 #            input, output, error and status; -L and -R through it; two
@@ -174,6 +175,15 @@ done
 check "forward -- x-ssh's -O forward -R, then -O cancel" \
 	"$(status xssh -S "$cm" -O forward -R "$p3:127.0.0.1:$port" 127.0.0.1 2>&1 | said) $(status xssh -S "$cm" -O cancel -R "$p3:127.0.0.1:$port" 127.0.0.1 2>&1 | said)" \
 	"status 0 status 0"
+# two remote forwards with no address given: the server refusing the
+# second, the first still the master's
+xssh -S "$cm" -O forward -R "$p3:127.0.0.1:$port" 127.0.0.1 > /dev/null 2>&1
+check "forward -- a remote forward refused, said as OpenSSH says it" \
+	"$(status xssh -S "$cm" -O forward -R "1:127.0.0.1:$port" 127.0.0.1 2>&1 | said)" \
+	"$(printf 'mux_client_forward: forwarding request failed: remote port forwarding failed for listen port 1\nmuxclient: master forward request failed\nstatus 255')"
+check "forward -- the one beside it still served, from the server's end, then cancelled" \
+	"$(ossh -S "$cm" 127.0.0.1 "nc -w 2 127.0.0.1 $p3 < /dev/null | head -c 8" < /dev/null 2>&1 | said) $(status xssh -S "$cm" -O cancel -R "$p3:127.0.0.1:$port" 127.0.0.1 2>&1 | said)" \
+	"SSH-2.0- status 0"
 check "forward -- an x-ssh passenger's -L beside its command" \
 	"$(xssh -S "$cm" -L "$p4:127.0.0.1:$port" 127.0.0.1 'echo ran' < /dev/null 2>&1 | said) $(banner $p4)" "ran SSH-2.0-"
 check "forward -- an x-ssh passenger under -N, its -L the master's" \

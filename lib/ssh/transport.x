@@ -123,7 +123,7 @@
     (if (< (rest run) (%head-size key)) #f
       (do (def seq (%slot c 4))
           (def known (%slot c 11))
-          (def len (if (if (null? known) #f (if (= (first known) seq) (eq? (List ref 1 known) key) #f))
+          (def len (if (if (null? known) #f (if (= (first known) seq) (same? (List ref 1 known) key) #f))
                      (List ref 2 known)
                      (do (def n (%packet-length key seq (first run)))
                          (%slot! c 11 (list seq key n))
@@ -398,7 +398,7 @@
     (def seq (%slot c 4))
     (%pending! c (%head-size key))
     (def known (%slot c 11))
-    (def len (if (if (null? known) #f (if (= (first known) seq) (eq? (List ref 1 known) key) #f))
+    (def len (if (if (null? known) #f (if (= (first known) seq) (same? (List ref 1 known) key) #f))
                (List ref 2 known)
                (%packet-length key seq (first (%slot c 2)))))
     (%slot! c 11 ())

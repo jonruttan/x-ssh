@@ -499,7 +499,7 @@
         (do (def px (first (first asked)))
             (%rn! run %UNANSWERED (rest asked))
             (unless (null? px)
-              (match ((not ok) (%rn! run %PROXIED (List filter (fn (_ x) (not (eq? x px))) (%rn run %PROXIED))))
+              (match ((not ok) (%rn! run %PROXIED (List filter (fn (_ x) (not (same? x px))) (%rn run %PROXIED))))
                      ((= (obj-ref px 3) 0) (obj-set! px 3 (guard (e 0) (ssh-get-uint32 in))))
                      (#t ())))))
       (#t (%answered-remote! run ok in)))))
@@ -517,14 +517,14 @@
     (match
       ((not ok)
         (if (null? reply) (%say (Str8 append "Warning: " failed "\n"))
-          (do (%rn! run %REMOTES (List filter (fn (_ x) (not (eq? x r))) (%rn run %REMOTES)))
-              (%rn! run %FWDS (List filter (fn (_ x) (not (eq? (List ref 1 x) r))) (%rn run %FWDS)))
+          (do (%rn! run %REMOTES (List filter (fn (_ x) (not (same? x r))) (%rn run %REMOTES)))
+              (%rn! run %FWDS (List filter (fn (_ x) (not (same? (List ref 1 x) r))) (%rn run %FWDS)))
               (ssh-mux-send! (first reply) (ssh-mux-reply-error ssh-mux-failure (List ref 1 reply) failed)))))
       (any?
         (do (def port (guard (e 0) (ssh-get-uint32 in)))
             (def now (pair (first r) (pair port (rest (rest r)))))
-            (%rn! run %REMOTES (List map (fn (_ x) (if (eq? x r) now x)) (%rn run %REMOTES)))
-            (%rn! run %FWDS (List map (fn (_ x) (if (eq? (List ref 1 x) r) (list (first x) now) x)) (%rn run %FWDS)))
+            (%rn! run %REMOTES (List map (fn (_ x) (if (same? x r) now x)) (%rn run %REMOTES)))
+            (%rn! run %FWDS (List map (fn (_ x) (if (same? (List ref 1 x) r) (list (first x) now) x)) (%rn run %FWDS)))
             (if (null? reply)
               (%say (Str8 append "Allocated port " (%num port) " for remote forward to "
                                  (match ((not (null? (List ref 6 r))) (Str8 append (List ref 6 r) ":-2"))
@@ -909,7 +909,7 @@
     (if (null? held)
       (ssh-mux-send! fd (ssh-mux-reply-error ssh-mux-failure rid "port not forwarded"))
       (do (def thing (List ref 1 held))
-          (%rn! run %FWDS (List filter (fn (_ x) (not (eq? x held))) (%rn run %FWDS)))
+          (%rn! run %FWDS (List filter (fn (_ x) (not (same? x held))) (%rn run %FWDS)))
           (if (= (first key) ssh-mux-fwd-remote)
             (do (def req (%packet-of ssh-msg-global-request))
                 (if (null? (List ref 5 thing))
@@ -921,9 +921,9 @@
                       (ssh-put-bool req #f)
                       (ssh-put-text req (List ref 5 thing))))
                 (%send c req)
-                (%rn! run %REMOTES (List filter (fn (_ x) (not (eq? x thing))) (%rn run %REMOTES))))
+                (%rn! run %REMOTES (List filter (fn (_ x) (not (same? x thing))) (%rn run %REMOTES))))
             (do (guard (e ()) (Socket close (first thing)))
-                (%rn! run %LISTENERS (List filter (fn (_ x) (not (eq? x thing))) (%rn run %LISTENERS)))))
+                (%rn! run %LISTENERS (List filter (fn (_ x) (not (same? x thing))) (%rn run %LISTENERS)))))
           (ssh-mux-send! fd (ssh-mux-reply-ok rid))))))
 
 ; n descriptors a client passes after its request: them, or () when any
@@ -1018,12 +1018,6 @@
 ; but the connection protocol is passed on.  A client gone has its
 ; channels closed and its forwards cancelled.
 
-; Whether two proxy clients are one: by their sockets, which no two
-; connected clients share; eq? was seen to hold between two clients'
-; records.
-(def %same-client?
-  (fn (_ a b) (if (null? a) #f (if (null? b) #f (= (ssh-fd a) (ssh-fd b))))))
-
 (def %to-down
   (fn (_ dc buf n) (guard (e ()) (ssh-send-packet! dc buf n))))
 
@@ -1040,7 +1034,7 @@
 (def %proxy-of
   (fn (_ run dc server)
     (List find (fn (_ ch) (if (eq? (%ch ch %KIND) (lit proxy))
-                            (if (%same-client? (%ch ch %FD) dc) (if (null? (%ch ch %SERVER)) #f (= (%ch ch %SERVER) server)) #f)
+                            (if (same? (%ch ch %FD) dc) (if (null? (%ch ch %SERVER)) #f (= (%ch ch %SERVER) server)) #f)
                             #f))
       (%rn run %CHANNELS))))
 
@@ -1081,7 +1075,7 @@
               ((str=? name "cancel-tcpip-forward")
                 (do (ssh-get-text in)
                     (def port (ssh-get-uint32 in))
-                    (%rn! run %PROXIED (List filter (fn (_ x) (not (if (%same-client? (obj-ref x 1) dc) (= (obj-ref x 3) port) #f))) (%rn run %PROXIED)))
+                    (%rn! run %PROXIED (List filter (fn (_ x) (not (if (same? (obj-ref x 1) dc) (= (obj-ref x 3) port) #f))) (%rn run %PROXIED)))
                     (%up! c p)
                     (when want (%rn! run %UNANSWERED (List append (%rn run %UNANSWERED) (list (pair () (lit proxy))))))))
               (#t ()))))
@@ -1110,7 +1104,7 @@
   (fn (_ c run dc)
     (List for-each
       (fn (_ ch)
-        (when (if (eq? (%ch ch %KIND) (lit proxy)) (%same-client? (%ch ch %FD) dc) #f)
+        (when (if (eq? (%ch ch %KIND) (lit proxy)) (same? (%ch ch %FD) dc) #f)
           (do (%ch! ch %FD ())
               (match ((%ch ch %CLOSED) (%drop! run ch))
                      ((null? (%ch ch %SERVER)) ())
@@ -1118,7 +1112,7 @@
       (%rn run %CHANNELS))
     (List for-each
       (fn (_ px)
-        (when (%same-client? (obj-ref px 1) dc)
+        (when (same? (obj-ref px 1) dc)
           (do (def req (%packet-of ssh-msg-global-request))
               (ssh-put-text req "cancel-tcpip-forward")
               (ssh-put-bool req #f)
@@ -1126,7 +1120,7 @@
               (ssh-put-uint32 req (obj-ref px 3))
               (%send c req))))
       (%rn run %PROXIED))
-    (%rn! run %PROXIED (List filter (fn (_ px) (not (%same-client? (obj-ref px 1) dc))) (%rn run %PROXIED)))))
+    (%rn! run %PROXIED (List filter (fn (_ px) (not (same? (obj-ref px 1) dc))) (%rn run %PROXIED)))))
 
 ; A channel the server opens for a proxy client's forward passed to the
 ; client as it is: #t, or #f when the open is not for one.

@@ -89,12 +89,6 @@
 
 (def %get (fn (_ s k) (rest (List find (fn (_ p) (eq? (first p) k)) s))))
 
-; An error's message: an Err's own, or a word for what the engine raised.
-(def %message
-  (fn (_ e)
-    (guard (e2 "an internal error")
-      (if (Err engine? e) (Str8 append (Err %str (Err code-of e)) ": " (Err %str (Err subject-of e))) (e msg)))))
-
 ; --- the settings ----------------------------------------------------------
 
 ; What ssh_config may say that this client does not do: refused unless
@@ -676,7 +670,7 @@
                     (do (when (if (rest i) (not quiet) #f)
                           (%log (Str8 append "Warning: Identity file " (first i) " not accessible: No such file or directory.")))
                         ()))
-                  (#t (guard (e (do (%log (Str8 append "Load key \"" (first i) "\": " (%message e))) ()))
+                  (#t (guard (e (do (%log (Str8 append "Load key \"" (first i) "\": " (Err text e))) ()))
                         (def key (ssh-pubkey-of-key-file (first i)))
                         (def id (if (ssh-key-file-sealed? (first i)) () (ssh-identity-read-file (first i) "")))
                         (list (list (first i) key id))))))
@@ -705,7 +699,7 @@
   (fn (_ s tr)
     (def path (%get s (lit agent)))
     (if (null? path) ()
-      (guard (e (do (unless (null? tr) (tr (Str8 append "get_agent_identities: " (%message e)))) ()))
+      (guard (e (do (unless (null? tr) (tr (Str8 append "get_agent_identities: " (Err text e)))) ()))
         (def fd (ssh-agent-connect path))
         (List map (fn (_ k) (list (first k) (List ref 1 k) (ssh-agent-identity fd (first k) (List ref 1 k))))
           (ssh-agent-identities fd))))))
@@ -733,8 +727,8 @@
     (def prompt (Str8 append "Enter passphrase for key '" path "': "))
     (def try
       (fn (_ typed)
-        (guard (e (if (str=? (%message e) ssh-key-wrong-passphrase) (lit wrong)
-                    (do (%log (Str8 append "Load key \"" path "\": " (%message e))) ())))
+        (guard (e (if (str=? (Err text e) ssh-key-wrong-passphrase) (lit wrong)
+                    (do (%log (Str8 append "Load key \"" path "\": " (Err text e))) ())))
           (ssh-identity-read-file path typed))))
     ((fn (self left)
        (if (if (= left 0) #t (%get s (lit batch))) ()
@@ -1047,7 +1041,7 @@
       (do (Socket close lfd)
           (Sys exit
             (if (if (null? command) (null? stdio) #f) 0
-              (guard (e (do (%log (%message e)) 255))
+              (guard (e (do (%log (Err text e)) 255))
                 ((fn (_ status) (if (null? status) (do (%log "Failed to connect to new control master") 255) status))
                  (%passenger (pair (pair (lit control-master) "false") s) command stdio)))))))))
 
@@ -1067,10 +1061,10 @@
     ; failure is (failed . WORDS), logged as OpenSSH logs it
     (def fd
       (if (not (null? proxy)) (if (null? spawned) () (rest spawned))
-        (guard (e (pair (lit failed) (%message e)))
+        (guard (e (pair (lit failed) (Err text e)))
           (def from
             (if (null? bind) ()
-              (guard (e2 (do (%log (Str8 append "getaddrinfo: " bind ": " (ssh-sys-after-op (%message e2))))
+              (guard (e2 (do (%log (Str8 append "getaddrinfo: " bind ": " (ssh-sys-after-op (Err text e2))))
                              (Err raise 'value "connect: failure" ())))
                 (%address bind))))
           (ssh-sys-connect addr port from))))
@@ -1085,9 +1079,9 @@
             255))
       ((null? fd) (do (%log "ssh: the proxy command could not be started") 255))
       (#t
-      (guard (e (do (%log (match ((str=? (%message e) "keepalive") (Str8 append "Timeout, server " host " not responding."))
-                                 ((str=? (%message e) "idle") (Str8 append "Connection to " host " closed: the channels were idle past ChannelTimeout."))
-                                 (#t (%message e))))
+      (guard (e (do (%log (match ((str=? (Err text e) "keepalive") (Str8 append "Timeout, server " host " not responding."))
+                                 ((str=? (Err text e) "idle") (Str8 append "Connection to " host " closed: the channels were idle past ChannelTimeout."))
+                                 (#t (Err text e))))
                     (guard (e2 ()) (Socket close fd))
                     255))
         (unless (null? tr)
@@ -1136,7 +1130,7 @@
                     (def modes (if tty? (Term modes %stdin) ()))
                     (def saved (if (if tty? local-tty #f) (Term raw! %stdin) ()))
                     (def outcome
-                      (guard (e (pair (lit failed) (%message e)))
+                      (guard (e (pair (lit failed) (Err text e)))
                         (pair (lit status)
                           (ssh-session-run! c run-command
                             (if (if (%get s (lit stdin-null)) #t (if (null? run-command) (null? run-stdio) #f)) () %stdin)
@@ -1182,7 +1176,7 @@
     (def local (ssh-sys-me))
     (def logfile (List ref 6 plan))
     (def log-fd (if (null? logfile) ()
-                  (guard (e (pair (lit failed) (ssh-sys-after-op (%message e))))
+                  (guard (e (pair (lit failed) (ssh-sys-after-op (Err text e))))
                     (File open logfile (list (lit wronly) (lit creat) (lit append)) 384))))
     (if (if (null? log-fd) #f (if (pair? log-fd) #t (< log-fd 0)))
       (do (%say 2 (Str8 append "Couldn't open logfile " logfile (if (pair? log-fd) (Str8 append ": " (rest log-fd)) "") "\r\n")) 255)
@@ -1192,7 +1186,7 @@
 
 (def %settled
   (fn (_ host local plan)
-    (guard (e (do (%log (%message e)) 255))
+    (guard (e (do (%log (Err text e)) 255))
       (def opts (ssh-config-options (List ref 2 plan)))
       (def user (if (null? (ssh-config-first opts "user")) local (first (ssh-config-first opts "user"))))
       (def config (List ref 3 plan))

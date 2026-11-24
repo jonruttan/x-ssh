@@ -429,7 +429,7 @@
 (def %crossload!
   (fn (_ c from-c from to a preserve)
     (def perm (if (null? (%attr a (lit perm))) 438 (& (%attr a (lit perm)) 511)))
-    (def h (guard (e (Err raise 'sftp (%message e) (list (pair (lit from) #t)))) (%open from-c from %F-READ ())))
+    (def h (guard (e (Err raise 'sftp (Err text e) (list (pair (lit from) #t)))) (%open from-c from %F-READ ())))
     (def out (guard (e (do (guard (x ()) (%close from-c h)) (error e)))
                (%open c to (| %F-WRITE (| %F-CREAT %F-TRUNC)) (list (pair (lit perm) perm)))))
     (def failure
@@ -939,9 +939,6 @@
 
 ; --- the session ---------------------------------------------------------------
 
-(def %message
-  (fn (_ e) (guard (x "an internal error") (if (Err engine? e) (Str8 append (Err %str (Err code-of e)) ": " (Err %str (Err subject-of e))) (e msg)))))
-
 ; A line of input from fd, or () at its end.
 (def %read-line
   (fn (_ fd)
@@ -972,7 +969,7 @@
                (def outcome
                  (if (if (= (Str8 length line) 0) #t (= (%char line 0) 35)) ()
                    ; a failure said as OpenSSH's error() says it, \r\n, or not at all
-                   (guard (e (do (unless (str=? (%message e) "") (%err (Str8 append (%message e) "\r\n"))) (lit failed)))
+                   (guard (e (do (unless (str=? (Err text e) "") (%err (Str8 append (Err text e) "\r\n"))) (lit failed)))
                      (%command! c line opts))))
                (match
                  ((eq? outcome (lit stop)) 0)
@@ -1032,7 +1029,7 @@
     (def c (%connection (List ref 2 kid) (List ref 1 kid) buffer requests (first kid)))
     (%set c 8 (if (null? batch) (List ref 2 opts) #t))
     (def status
-      (guard (e (do (%err (Str8 append (if (str=? (%message e) "Connection closed") "Connection closed" (%message e)) "\n")) 255))
+      (guard (e (do (%err (Str8 append (if (str=? (Err text e) "Connection closed") "Connection closed" (Err text e)) "\n")) 255))
         (%hello! c)
         (%set c 3 (%realpath c "."))
         (def go
@@ -1041,7 +1038,7 @@
                 (def a (%stat? c full))
                 (if (if (null? a) #f (%dir? a))
                   (do (%set c 3 (%realpath c full)) ())
-                  (guard (e (do (%err (Str8 append (%message e) "\r\n")) 1))
+                  (guard (e (do (%err (Str8 append (Err text e) "\r\n")) 1))
                     (%command! c (Str8 append "get \"" full "\"") opts) 0)))))
         (match
           ((not (null? go)) go)
@@ -1069,7 +1066,7 @@
 ; OpenSSH's scp ends its own lines as a terminal would, \r\n.
 (def %scp-say (fn (_ t) (%err (Str8 append "scp: " t "\r\n"))))
 (def %local-why (fn (_ e) (guard (x ()) (Assoc get (lit local) (e data)))))
-(def %why (fn (_ e) (def l (%local-why e)) (if (null? l) (%message e) l)))
+(def %why (fn (_ e) (def l (%local-why e)) (if (null? l) (Err text e) l)))
 
 ; One local path sent to remote: a file, or a directory under -r;
 ; answers how many failed.
@@ -1146,7 +1143,7 @@
 (def %scp-down-dir
   (fn (_ c remote local a preserve)
     (def made (if (not (null? (File type local))) #t
-                (guard (e (do (%scp-say (Str8 append "mkdir " local ": " (ssh-sys-after-op (%message e)))) #f))
+                (guard (e (do (%scp-say (Str8 append "mkdir " local ": " (ssh-sys-after-op (Err text e)))) #f))
                   (File mkdir local (& (%attr a (lit perm)) 511)) #t)))
     (if (not made) 1
       (do (def errs (List fold
@@ -1237,7 +1234,7 @@
   (fn (_ argv sources target upload preserve recursive)
     (def cell (Vector make 1 ()))
     (def status
-      (guard (e (do (%scp-say (%message e)) 255))
+      (guard (e (do (%scp-say (Err text e)) 255))
         (%set cell 0 (%scp-open argv))
         (def c (first (%ref cell 0)))
         (if (= 0 (if upload (%scp-put c sources target preserve recursive) (%scp-get c sources target preserve recursive))) 0 1)))
@@ -1253,7 +1250,7 @@
   (fn (_ argv sources target preserve recursive)
     (def cells (Vector make 3 ()))
     (def status
-      (guard (e (do (%scp-say (%message e)) 255))
+      (guard (e (do (%scp-say (Err text e)) 255))
         (%set cells 0 (%scp-open argv))
         (def c (first (%ref cells 0)))
         (def tgt (if (str=? target "") "." target))

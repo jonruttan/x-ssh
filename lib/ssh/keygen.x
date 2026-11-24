@@ -297,8 +297,6 @@
 ; input allowed; "" when there is none.
 (def %secret (fn (_ text) ((fn (_ a) (if (null? a) "" a)) (ssh-ask-secret text #t))))
 
-(def %message (fn (_ e) (guard (e2 "an internal error") (e msg))))
-
 ; The default key file of a type: ~/.ssh/id_ed25519, id_ecdsa, id_rsa.
 (def %home-key (fn (_ type) (Str8 append (Sys getenv "HOME") "/.ssh/id_" type)))
 
@@ -364,7 +362,7 @@
       ((null? text) ())
       ((not (null? line)) (list () line (Str8 join " " (List drop 2 ws))))
       (#t
-        (guard (e (if (str=? (%message e) ssh-key-wrong-passphrase) (lit wrong) ()))
+        (guard (e (if (str=? (Err text e) ssh-key-wrong-passphrase) (lit wrong) ()))
           (def sealed (ssh-key-file-sealed? path))
           (def id (match ((not sealed) (ssh-identity-read-file path ""))
                          ((null? ask) ())

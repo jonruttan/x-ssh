@@ -126,3 +126,34 @@ before it is read.
 ```
 ---
     (ssh: a packet failed its authentication tag ssh: a packet failed its authentication tag ssh: a packet failed its authentication tag ssh: a packet failed its authentication tag)
+
+## proxy mode
+
+### a control socket in proxy mode frames each packet with no padding, no MAC: its length, 0, the payload
+
+A one-byte payload, SSH_MSG_REQUEST_SUCCESS, as OpenSSH's mux master
+sends it; read back by the other end, a packet of two bytes, shorter
+than any the transport carries under keys.  Each end reads once, then
+takes the packet `ssh-pending?` finds whole.
+
+```x
+(do
+  (import x/sys/socket)
+  (import ssh/transport ssh-open-mux ssh-send-packet! ssh-recv-packet! ssh-pending? ssh-fill!)
+  (def %t-lfd (Socket tcp-listen-on "127.0.0.1" 0))
+  (def a (ssh-open-mux (Socket tcp-connect "127.0.0.1" (Socket local-port %t-lfd)) ()))
+  (def bfd (Socket accept %t-lfd))
+  (def one ((prim-ref (lit str) (lit make)) 1))
+  ((prim-ref (lit ptr) (lit set!)) ((prim-ref (lit str) (lit ->ptr)) one) 0 81 1)
+  (ssh-send-packet! a one 1)
+  (def raw (Socket recv-run bfd 64))
+  (def b (ssh-open-mux bfd ()))
+  ((prim-ref (lit ptr) (lit set!)) ((prim-ref (lit str) (lit ->ptr)) one) 0 82 1)
+  (ssh-send-packet! b one 1)
+  (ssh-fill! a)
+  (def p (if (ssh-pending? a) (ssh-recv-packet! a) ()))
+  (display (list ((fn (self i) (if (= i (rest raw)) () (pair ((prim-ref (lit char) (lit ->int)) ((prim-ref (lit str) (lit byte-ref)) (first raw) i)) (self (+ i 1))))) 0)
+                 (rest p) ((prim-ref (lit char) (lit ->int)) ((prim-ref (lit str) (lit byte-ref)) (first p) 0)))))
+```
+---
+    ((0 0 0 2 0 81) 1 82)

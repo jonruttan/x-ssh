@@ -15,8 +15,10 @@
 ;
 ; Here are the messages, their reading and writing, and the client's
 ; requests: an alive check, a terminate, a stop of the listener, a
-; forward opened or closed, and a session or -W stdio forward the
-; master carries, its exit status the client's.  The master's half is
+; forward opened or closed, a session or -W stdio forward the
+; master carries, its exit status the client's, and proxy mode, after
+; which the socket carries the connection protocol itself (see
+; ssh-open-mux in ssh/transport).  The master's half is
 ; the session loop's (ssh/session).
 
 (module ssh/mux)
@@ -47,6 +49,7 @@
 (def ssh-mux-session-opened 2147483654)   ; 0x80000006
 (def ssh-mux-remote-port 2147483655)      ; 0x80000007
 (def ssh-mux-tty-alloc-fail 2147483656)   ; 0x80000008
+(def ssh-mux-s-proxy 2147483663)          ; 0x8000000f
 
 ; --- messages --------------------------------------------------------------
 
@@ -194,6 +197,18 @@
       ((= (first r) ssh-mux-failure) (pair (lit failed) (ssh-get-text (rest r))))
       (#t ()))))
 
+; PROXY: #t when the master answers PROXY, the socket in proxy mode from
+; then on; otherwise as a command's.
+(def ssh-mux-proxy!
+  (fn (_ fd rid)
+    (def r (%ask fd ssh-mux-proxy rid))
+    (match
+      ((null? r) ())
+      ((= (first r) ssh-mux-s-proxy) #t)
+      ((= (first r) ssh-mux-permission-denied) (pair (lit denied) (ssh-get-text (rest r))))
+      ((= (first r) ssh-mux-failure) (pair (lit failed) (ssh-get-text (rest r))))
+      (#t ()))))
+
 ; A session asked of the master: NEW_SESSION with tty?, agent?, sub?,
 ; the escape character (() for none), term, the command and env's
 ; NAME=VALUE strings; then the three descriptors.  The reply: (opened .
@@ -335,7 +350,7 @@
 (provide ssh/mux ssh-mux-version ssh-mux-hello ssh-mux-new-session ssh-mux-alive-check ssh-mux-terminate
   ssh-mux-open-fwd ssh-mux-close-fwd ssh-mux-new-stdio-fwd ssh-mux-stop-listening ssh-mux-proxy
   ssh-mux-ok ssh-mux-permission-denied ssh-mux-failure ssh-mux-exit-message ssh-mux-alive
-  ssh-mux-session-opened ssh-mux-remote-port ssh-mux-tty-alloc-fail
+  ssh-mux-session-opened ssh-mux-remote-port ssh-mux-tty-alloc-fail ssh-mux-s-proxy ssh-mux-proxy!
   ssh-mux-fwd-local ssh-mux-fwd-remote ssh-mux-fwd-dynamic ssh-mux-streamlocal
   ssh-mux-forward-key ssh-mux-forward-text ssh-mux-forward-read ssh-mux-forward!
   ssh-mux-message ssh-mux-send! ssh-mux-receive ssh-mux-hello-message ssh-mux-reply-ok ssh-mux-reply-error

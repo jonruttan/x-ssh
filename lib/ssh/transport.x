@@ -22,7 +22,8 @@
 ; A connection is a vector: the socket, the bytes received and not yet
 ; read, the two sequence numbers, the key we send under and the key we
 ; receive under once there are any, the session id, and the peer's
-; version string and host key.
+; version string and host key.  A control socket in proxy mode is one too,
+; its packets unpadded and in the clear.
 
 (module ssh/transport)
 
@@ -74,19 +75,31 @@
 ;        11 the pending packet's length as (SEQ KEY LEN), once unveiled, or ()
 ;        12 the server's server-sig-algs (RFC 8308), or () until it says
 ;        13 the ciphers and MACs offered, as (CIPHERS . MACS)
+;        14 whether it is a control socket's in proxy mode (see ssh-open-mux)
 
 (def %slot (fn (_ c i) (obj-ref c i)))
 (def %slot! (fn (_ c i v) (obj-set! c i v)))
 
 (def ssh-open
   (fn (_ fd trace)
-    (def c (Vector make 13 ()))
+    (def c (Vector make 14 ()))
     (%slot! c 1 fd)
     (%slot! c 2 (pair (str-make 0) 0))
     (%slot! c 3 0)
     (%slot! c 4 0)
     (%slot! c 10 trace)
     (%slot! c 13 (pair ssh-cipher-names ssh-mac-names))
+    c))
+
+; A control socket in proxy mode as a connection, as PROTOCOL.mux frames
+; it: the connection protocol's packets with no keys, no padding and no
+; MAC -- a length, a padding length of 0, the payload.  No versions or
+; keys are exchanged on it: the master's connection to the server
+; carries what it carries.
+(def ssh-open-mux
+  (fn (_ fd trace)
+    (def c (ssh-open fd trace))
+    (%slot! c 14 #t)
     c))
 
 (def ssh-fd (fn (_ c) (%slot c 1)))
@@ -174,6 +187,17 @@
 
 (def %send!
   (fn (_ c s n) (Socket send-run (%slot c 1) s n)))
+
+; One read of what the socket has, added to the bytes pending: #f when
+; it has closed.  A loop that polls the socket reads it so, then takes
+; each packet ssh-pending? finds whole, and never blocks for the rest.
+(def ssh-fill!
+  (fn (_ c)
+    (def run (%slot c 2))
+    (def got (guard (e ()) (Socket recv-run (%slot c 1) 65536)))
+    (if (if (null? got) #t (= (rest got) 0)) #f
+      (do (%slot! c 2 (ssh-join (list (list (first run) 0 (rest run)) (list (first got) 0 (rest got)))))
+          #t))))
 
 ; --- the version exchange (4.2) ------------------------------------------
 
@@ -325,7 +349,7 @@
     (def seq (%slot c 3))
     (def block (if (null? key) 8 (if (eq? (%k-cipher key) 'chacha) 8 16)))
     (def counted (+ n 1 (if (if (null? key) #t (%length-hidden? key)) 4 0)))
-    (def pad ((fn (_ p) (if (< p 4) (+ p block) p)) (- block (& counted (- block 1)))))
+    (def pad (if (%slot c 14) 0 ((fn (_ p) (if (< p 4) (+ p block) p)) (- block (& counted (- block 1))))))
     (def len (+ 1 n pad))
     (def body (ssh-out))
     (ssh-put-uint32 body len)
@@ -378,7 +402,7 @@
                (List ref 2 known)
                (%packet-length key seq (first (%slot c 2)))))
     (%slot! c 11 ())
-    (when (if (> len 262144) #t (< len 5)) (Err raise 'value "ssh: a packet of an impossible length" ()))
+    (when (if (> len 262144) #t (< len (if (%slot c 14) 2 5))) (Err raise 'value "ssh: a packet of an impossible length" ()))
     (unless (if (null? key) #t (if (eq? (%k-cipher key) 'chacha) #t (= (& (if (%length-hidden? key) (+ len 4) len) 15) 0)))
       (Err raise 'value "ssh: a packet not a whole number of cipher blocks" ()))
     (def total (+ 4 len))
@@ -511,18 +535,22 @@
 
 ; The clocks read: a keepalive asked when due, the connection given up
 ; or closed when a limit has passed; the error's message names which.
+; #t when a keepalive was asked, its answer the next to a request.
 (def ssh-clocks!
   (fn (_ c limits)
     (def now (Sys now))
     (def k (first limits)) (def n (List ref 1 limits)) (def i (List ref 2 limits))
-    (when (> k 0)
-      (do (when (>= (- now (obj-ref %clock ssh-clock-recv)) (* k n))
-            (Err raise 'io "keepalive" ()))
-          (when (if (>= (- now (obj-ref %clock ssh-clock-sent)) k) #t
-                  (if (>= (- now (obj-ref %clock ssh-clock-recv)) k) (>= (- now (obj-ref %clock %ASKED)) k) #f))
-            (%keepalive! c))))
+    (when (if (> k 0) (>= (- now (obj-ref %clock ssh-clock-recv)) (* k n)) #f)
+      (Err raise 'io "keepalive" ()))
+    (def asked (if (if (> k 0)
+                     (if (>= (- now (obj-ref %clock ssh-clock-sent)) k) #t
+                       (if (>= (- now (obj-ref %clock ssh-clock-recv)) k) (>= (- now (obj-ref %clock %ASKED)) k) #f))
+                     #f)
+                 (do (%keepalive! c) #t)
+                 #f))
     (when (if (> i 0) (>= (- now (obj-ref %clock ssh-clock-data)) i) #f)
-      (Err raise 'io "idle" ()))))
+      (Err raise 'io "idle" ()))
+    asked))
 
 ; --- the key exchange (7), curve25519-sha256 (RFC 8731) --------------------
 
@@ -898,7 +926,7 @@
     (ssh-send-packet! c (first rr) (rest rr))
     (%auth-answer c)))
 
-(provide ssh/transport ssh-version-string ssh-open ssh-fd ssh-session-id ssh-host-key ssh-server-sig-algs ssh-hostkey-names ssh-pending? ssh-random ssh-engines!
+(provide ssh/transport ssh-version-string ssh-open ssh-open-mux ssh-fill! ssh-fd ssh-session-id ssh-host-key ssh-server-sig-algs ssh-hostkey-names ssh-pending? ssh-random ssh-engines!
   ssh-kex-names ssh-cipher-names ssh-mac-names ssh-algorithms!
   ssh-exchange-versions! ssh-send-packet! ssh-recv-packet! ssh-next-packet! ssh-take-packet! ssh-expect! ssh-kex! ssh-kex-server! ssh-auth-service! ssh-auth-publickey-query! ssh-auth-publickey! ssh-auth-password!
   ssh-msg-disconnect ssh-msg-global-request ssh-msg-request-success ssh-msg-request-failure ssh-msg-service-request ssh-msg-service-accept

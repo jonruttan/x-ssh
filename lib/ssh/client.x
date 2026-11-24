@@ -24,7 +24,7 @@
 (import x/sys/syslog)
 (import ssh/ask ssh-ask-tty ssh-ask-secret)
 (import ssh/bytes ssh-copy)
-(import ssh/transport ssh-open ssh-host-key ssh-engines! ssh-exchange-versions! ssh-kex!
+(import ssh/transport ssh-open ssh-open-mux ssh-host-key ssh-engines! ssh-exchange-versions! ssh-kex!
   ssh-auth-service! ssh-auth-publickey-query! ssh-auth-publickey! ssh-auth-password! ssh-hostkey-names ssh-server-sig-algs
   ssh-kex-names ssh-cipher-names ssh-mac-names ssh-algorithms!)
 (import ssh/session ssh-session-run! ssh-session-control-listen ssh-disconnect!)
@@ -40,7 +40,7 @@
 (import ssh/sys ssh-sys-me ssh-sys-proxy ssh-sys-connect ssh-sys-output ssh-sys-after-op ssh-sys-hostname)
 (import ssh/mux ssh-mux-connect ssh-mux-greet! ssh-mux-alive? ssh-mux-command ssh-mux-terminate ssh-mux-stop-listening
   ssh-mux-open-session ssh-mux-open-stdio ssh-mux-wait ssh-mux-forward! ssh-mux-forward-key
-  ssh-mux-fwd-local ssh-mux-fwd-remote ssh-mux-fwd-dynamic)
+  ssh-mux-fwd-local ssh-mux-fwd-remote ssh-mux-fwd-dynamic ssh-mux-proxy!)
 (import x/codec/sha1)
 
 (import x/core/doors str-byte-len str-byte-ref str-make str->ptr ptr-set! char->int)
@@ -928,9 +928,9 @@
                        ())))
        (ssh-mux-greet! fd)))))
 
-; -O's command asked of the master: check, exit, stop, or forward or
-; cancel of the forwards given; the others are not asked yet.  A
-; forward refused fails the command; a cancel refused is said, and the
+; -O's command asked of the master: check, exit, stop, forward or
+; cancel of the forwards given, or proxy; the others are not asked yet.
+; A forward refused fails the command; a cancel refused is said, and the
 ; command still succeeds, as OpenSSH's does.  With ControlMaster yes or
 ; ask there is no master to ask, and the connection is made, as OpenSSH
 ; makes it.
@@ -944,7 +944,7 @@
     (match
       ((null? (%get s (lit control-path))) (Err raise 'value "No ControlPath specified for \"-O\" command" ()))
       ((not (%shares? s)) (%run s command stdio))
-      ((not (List any? (fn (_ c) (str=? c cmd)) (list "check" "exit" "stop" "forward" "cancel")))
+      ((not (List any? (fn (_ c) (str=? c cmd)) (list "check" "exit" "stop" "forward" "cancel" "proxy")))
         (Err raise 'value (Str8 append "-O " cmd ": not served yet") ()))
       (#t
         (do (def fd (%mux-reach s #t))
@@ -963,10 +963,31 @@
               ((str=? cmd "cancel")
                 (do (unless (%mux-forwards fd s #t #f) (%log "muxclient: master cancel forward request failed"))
                     0))
+              ((str=? cmd "proxy") (%proxied s command stdio fd))
               (#t
                 (do (done (ssh-mux-command fd ssh-mux-stop-listening 0) "mux_client_request_stop_listening: stop listening request failed" "stop listening")
                     (unless (str=? (%get s (lit level)) "quiet") (%say 2 "Stop listening request sent.\n"))
                     0))))))))
+
+; -O proxy, as OpenSSH's mux_client_proxy: the control connection put in
+; proxy mode, then the client's session, or -W's forward, and its
+; forwards over it as over a connection of its own, the master
+; numbering its channels apart from its other clients'.  A refusal
+; ends the client, in OpenSSH's words.
+(def %proxied
+  (fn (_ s command stdio fd)
+    (def r (ssh-mux-proxy! fd 0))
+    (unless (eq? r #t)
+      (do (Socket close fd)
+          (Err raise 'value (if (null? r) "mux_client_proxy: master closed the connection"
+                              (Str8 append "mux_client_proxy: master returned error: " (rest r))) ())))
+    (def quiet (%quiet? s))
+    (def tr (if (List any? (fn (_ l) (str=? l (%get s (lit level)))) %debug-levels)
+              (fn (_ t) (%log-at (lit debug) (Str8 append "debug1: " (%ms) " ms " t)))
+              ()))
+    (def host (%get s (lit hostname)))
+    (guard (e (do (%log (Err text e)) (guard (e2 ()) (Socket close fd)) 255))
+      (%carry (ssh-open-mux fd tr) fd s command stdio host quiet tr () () () #f #t))))
 
 ; A session, or -W's forward, carried by the master: the exit status,
 ; or () when there is no master to carry it, or it refuses the
@@ -1115,53 +1136,64 @@
                     (def persist (if (null? lfd) () (%get s (lit control-persist))))
                     (def persisting (if (null? persist) #f (if (str? persist) (not (str=? persist "no")) #t)))
                     (when persisting (%persist! s lfd command stdio))
-                    (def run-command (if persisting () command))
-                    (def run-stdio (if persisting () stdio))
-                    ; ForkAfterAuthentication: the connection goes on in a
-                    ; child of its own session, this process leaving with 0
-                    (when (if (%get s (lit fork)) (not persisting) #f)
-                      (do (def pid (Sys fork))
-                          (unless (= pid 0) (Sys exit 0))
-                          (Sys setsid)))
-                    (def local-tty (Sys isatty %stdin))
-                    (def tty? (if persisting #f (%tty? s command stdio quiet)))
-                    (def term ((fn (_ t) (if (null? t) "" t)) (Sys getenv "TERM")))
-                    ; the modes as they are before raw mode, for the server's terminal
-                    (def modes (if tty? (Term modes %stdin) ()))
-                    (def saved (if (if tty? local-tty #f) (Term raw! %stdin) ()))
-                    (def outcome
-                      (guard (e (pair (lit failed) (Err text e)))
-                        (pair (lit status)
-                          (ssh-session-run! c run-command
-                            (if (if (%get s (lit stdin-null)) #t (if (null? run-command) (null? run-stdio) #f)) () %stdin)
-                            (fn (_ buf start len) (File write 1 (ssh-copy buf start len) len))
-                            (fn (_ buf start len) (File write 2 (ssh-copy buf start len) len))
-                            (List map (fn (_ f) (pair (if (null? (first f)) () (%address (first f))) (rest f))) (%local-forwards s))
-                            (%get s (lit remotes))
-                            (if (null? run-stdio) () (pair (%address (first run-stdio)) (rest run-stdio)))
-                            (%get s (lit limits))
-                            (%environment s)
-                            (if tty? (list term (fn (_) (Term window %stdin)) modes (%get s (lit escape))) ())
-                            (%get s (lit forward-agent))
-                            (rest (%get s (lit remote-open)))
-                            (pair (%get s (lit bind-mask)) (%get s (lit bind-unlink)))
-                            (if (null? lfd) ()
-                              (list lfd path (List any? (fn (_ m) (str=? m (%master s))) (list "ask" "autoask")) host
-                                    (%get s (lit gateway)) (match ((not persisting) ()) ((str? persist) 0) (#t persist))))))))
-                    (unless (null? saved) (Term restore! %stdin saved))
-                    (guard (e2 ()) (ssh-disconnect! c))
-                    (Socket close fd)
-                    (def closed (Str8 append "Connection to " host " closed.\n"))
-                    (match
-                      ((eq? (first outcome) (lit status))
-                        (do (when (if tty? (not quiet) #f) (%say 2 closed))
-                            (def code (if (null? (rest outcome)) 0 (rest outcome)))
-                            (unless (null? tr) (tr (Str8 append "Exit status " (%num code))))
-                            code))
-                      ((str=? (rest outcome) "escape") (do (%say 2 closed) 255))
-                      ((str=? (rest outcome) "keepalive") (do (%log (Str8 append "Timeout, server " host " not responding.")) 255))
-                      ((str=? (rest outcome) "idle") (do (%log (Str8 append "Connection to " host " closed: the channels were idle past ChannelTimeout.")) 255))
-                      (#t (do (%log (rest outcome)) 255))))))))))))
+                    (%carry c fd s command stdio host quiet tr lfd path persist persisting #f))))))))))
+
+; The connection, authenticated -- or a master's, through its control
+; socket in proxy mode (proxy?) -- carrying the command, or -W's
+; forward, and the client's forwards: the exit status.  lfd is the
+; control socket listened on for others, at path, or (); persist
+; ControlPersist's setting, persisting whether it is on.  Through a
+; master in proxy mode the keepalives are the master's, and its
+; connection is not this process's to end.
+(def %carry
+  (fn (_ c fd s command stdio host quiet tr lfd path persist persisting proxy?)
+    (def run-command (if persisting () command))
+    (def run-stdio (if persisting () stdio))
+    ; ForkAfterAuthentication: the connection goes on in a
+    ; child of its own session, this process leaving with 0
+    (when (if (%get s (lit fork)) (not persisting) #f)
+      (do (def pid (Sys fork))
+          (unless (= pid 0) (Sys exit 0))
+          (Sys setsid)))
+    (def local-tty (Sys isatty %stdin))
+    (def tty? (if persisting #f (%tty? s command stdio quiet)))
+    (def term ((fn (_ t) (if (null? t) "" t)) (Sys getenv "TERM")))
+    ; the modes as they are before raw mode, for the server's terminal
+    (def modes (if tty? (Term modes %stdin) ()))
+    (def saved (if (if tty? local-tty #f) (Term raw! %stdin) ()))
+    (def outcome
+      (guard (e (pair (lit failed) (Err text e)))
+        (pair (lit status)
+          (ssh-session-run! c run-command
+            (if (if (%get s (lit stdin-null)) #t (if (null? run-command) (null? run-stdio) #f)) () %stdin)
+            (fn (_ buf start len) (File write 1 (ssh-copy buf start len) len))
+            (fn (_ buf start len) (File write 2 (ssh-copy buf start len) len))
+            (List map (fn (_ f) (pair (if (null? (first f)) () (%address (first f))) (rest f))) (%local-forwards s))
+            (%get s (lit remotes))
+            (if (null? run-stdio) () (pair (%address (first run-stdio)) (rest run-stdio)))
+            ((fn (_ l) (if proxy? (pair 0 (rest l)) l)) (%get s (lit limits)))
+            (%environment s)
+            (if tty? (list term (fn (_) (Term window %stdin)) modes (%get s (lit escape))) ())
+            (%get s (lit forward-agent))
+            (rest (%get s (lit remote-open)))
+            (pair (%get s (lit bind-mask)) (%get s (lit bind-unlink)))
+            (if (null? lfd) ()
+              (list lfd path (List any? (fn (_ m) (str=? m (%master s))) (list "ask" "autoask")) host
+                    (%get s (lit gateway)) (match ((not persisting) ()) ((str? persist) 0) (#t persist))))))))
+    (unless (null? saved) (Term restore! %stdin saved))
+    (unless proxy? (guard (e2 ()) (ssh-disconnect! c)))
+    (Socket close fd)
+    (def closed (Str8 append "Connection to " host " closed.\n"))
+    (match
+      ((eq? (first outcome) (lit status))
+        (do (when (if tty? (not quiet) #f) (%say 2 closed))
+            (def code (if (null? (rest outcome)) 0 (rest outcome)))
+            (unless (null? tr) (tr (Str8 append "Exit status " (%num code))))
+            code))
+      ((str=? (rest outcome) "escape") (do (%say 2 closed) 255))
+      ((str=? (rest outcome) "keepalive") (do (%log (Str8 append "Timeout, server " host " not responding.")) 255))
+      ((str=? (rest outcome) "idle") (do (%log (Str8 append "Connection to " host " closed: the channels were idle past ChannelTimeout.")) 255))
+      (#t (do (%log (rest outcome)) 255)))))
 
 ; The client's plan done: (HOST COMMAND OPTIONS CONFIG STDIO PRINT LOG
 ; SYSLOG CONTROL), CONTROL -O's command or ().  The log sent where -E and

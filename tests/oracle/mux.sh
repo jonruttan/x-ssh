@@ -10,8 +10,9 @@
 #   master   x-ssh's ControlMaster: its socket made srw-------; OpenSSH's
 #            -O check; OpenSSH's passengers, their output, error, input
 #            and exit status; OpenSSH's -W through it; x-ssh's passengers
-#            and -W; -O stop removing the socket and, with no session,
-#            ending the master; -O exit ending it
+#            and -W; -O conninfo and channels, from OpenSSH's client and
+#            x-ssh's alike; -O stop removing the socket and, with no
+#            session, ending the master; -O exit ending it
 #   outlive  the master's own session ended, a passenger's goes on
 #   taken    a second master at a path taken, said as OpenSSH says it
 #   ask      ControlMaster ask: SSH_ASKPASS asked to confirm, a no
@@ -28,10 +29,12 @@
 #            then in the background serving passengers, and gone once
 #            idle; under -N the shell given back at once, -O stop ending it
 #   openssh  OpenSSH's ControlMaster: x-ssh's -O check, passenger, -W,
-#            -O proxy and its -R, -O forward and cancel, and -O exit
+#            -O proxy and its -R, -O forward and cancel, -O conninfo and
+#            channels as OpenSSH's client says them, and -O exit
 #   auto     ControlMaster auto: the first a master, the second its
 #            passenger
-#   none     -O with no master, or no ControlPath: OpenSSH's words
+#   none     -O with no master, no ControlPath, or a command not one of
+#            OpenSSH's: OpenSSH's words
 set -u
 sshd=${1:-/usr/sbin/sshd}
 port=${2:-22750}
@@ -82,6 +85,15 @@ mode() { ls -l "$1" 2>/dev/null | cut -c1-10; }
 # a master killed leaves its socket: x-ssh has no signal handler to remove it
 done_with() { kill_tree $cpid; cpid=; rm -f "$cm"; }
 status() { "$@"; echo "status $?"; }
+# -O conninfo and channels with what changes from ask to ask said
+# alike: the machine and process, the ports, how long, the counts, the
+# channels' numbers and states
+info() {
+	sed -e "s/^Connection information for .* pid [0-9]*$/Connection information for H pid N/" \
+		-e "s/-> OpenSSH_.*/-> OpenSSH_V/" -e "s/^  tcp 127.0.0.1:[0-9]* /  tcp 127.0.0.1:P /" \
+		-e "s/duration [0-9:dwhm]*$/duration T/" -e "s/[0-9]* pkts [0-9]* blks [0-9.]*[BKMGTPE]B/N pkts N blks NB/g" \
+		-e "s/^  #[0-9]* /  #N /" -e "s/ (\([^ ]*\) .*)$/ (\1 ...)/"
+}
 # the first bytes through a forward listening on port, or none
 banner() { nc -w 2 127.0.0.1 "$1" < /dev/null 2>/dev/null | head -c 8; }
 
@@ -100,6 +112,21 @@ check "master -- x-ssh's -O check" "$(xssh -S "$cm" -O check 127.0.0.1 2>&1 | sa
 check "master -- an x-ssh passenger's output and status" \
 	"$(status xssh -S "$cm" 127.0.0.1 'echo out; exit 5' < /dev/null 2>&1 | said)" "$(printf 'out\nstatus 5')"
 check "master -- x-ssh's -W through it" "$(xssh -S "$cm" -W "127.0.0.1:$port" 127.0.0.1 < /dev/null 2>/dev/null | head -c 16)" "SSH-2.0-OpenSSH_"
+theirs=$(status ossh -S "$cm" -O conninfo 127.0.0.1 2>&1 | said | info)
+check "master -- OpenSSH's -O conninfo" "$theirs" "$(printf '%s\n' "Connection information for H pid N" \
+	"  versions x-ssh_0.1.0 -> OpenSSH_V" "  tcp 127.0.0.1:P -> 127.0.0.1:$port" "  duration T" \
+	"  kexalgorithm curve25519-sha256" "  hostkeyalgorithm ssh-ed25519" "  cipher chacha20-poly1305@openssh.com" \
+	"  mac <implicit>" "  compression none" "  rekey limit none interval none" \
+	"  traffic N pkts N blks NB in, N pkts N blks NB out" "status 0")"
+check "master -- x-ssh's -O conninfo, as OpenSSH's" "$(status xssh -S "$cm" -O conninfo 127.0.0.1 2>&1 | said | info)" "$theirs"
+ossh -S "$cm" 127.0.0.1 'sleep 4' < /dev/null > /dev/null 2>&1 &
+held=$!
+sleep 2
+theirs=$(status ossh -S "$cm" -O channels 127.0.0.1 2>&1 | said | info)
+check "master -- OpenSSH's -O channels, a passenger's session open" "$theirs" \
+	"$(printf '%s\n' "The following connections are open:" "  #N client-session ([session] ...)" "status 0")"
+check "master -- x-ssh's -O channels, as OpenSSH's" "$(status xssh -S "$cm" -O channels 127.0.0.1 2>&1 | said | info)" "$theirs"
+wait $held
 check "master -- OpenSSH's -O stop" "$(ossh -S "$cm" -O stop 127.0.0.1 2>&1 | said) $(gone "$cm")" "Stop listening request sent. gone"
 sleep 1
 check "master -- with no session, ended by -O stop" "$(kill -0 $cpid 2>/dev/null && echo running || echo ended)" "ended"
@@ -255,6 +282,10 @@ check "openssh -- x-ssh's -O proxy -R, the server's end through it" \
 check "openssh -- x-ssh's -O forward -L, through it, then -O cancel" \
 	"$(status xssh -S "$om" -O forward -L "$p1:127.0.0.1:$port" 127.0.0.1 2>&1 | said) $(banner $p1) $(status xssh -S "$om" -O cancel -L "$p1:127.0.0.1:$port" 127.0.0.1 2>&1 | said) $(banner $p1)" \
 	"status 0 SSH-2.0- status 0 "
+for c in conninfo channels; do
+	check "openssh -- x-ssh's -O $c, as OpenSSH's client says it" \
+		"$(status xssh -S "$om" -O $c 127.0.0.1 2>&1 | said | info)" "$(status ossh -S "$om" -O $c 127.0.0.1 2>&1 | said | info)"
+done
 check "openssh -- x-ssh's -O exit" "$(xssh -S "$om" -O exit 127.0.0.1 2>&1 | said) $(gone "$om")" "Exit request sent. gone"
 wait $opid 2>/dev/null
 opid=
@@ -272,7 +303,7 @@ cpid=
 check "auto -- the first its master" "$(cat "$fx/first") $(gone "$am")" "first gone"
 
 # none: no master, no ControlPath
-for args in "-S $fx/none -O check" "-O check" "-S $fx/none -O exit"; do
+for args in "-S $fx/none -O check" "-O check" "-S $fx/none -O exit" "-S $fx/none -O bogus"; do
 	ours=$(status xssh $args 127.0.0.1 2>&1 | said)
 	theirs=$(status ossh $args 127.0.0.1 2>&1 | said)
 	check "none -- ssh $args said as OpenSSH says it" "$ours" "$theirs"

@@ -16,10 +16,11 @@
 ; Here are the messages, their reading and writing, and the client's
 ; requests: an alive check, a terminate, a stop of the listener, a
 ; forward opened or closed, a session or -W stdio forward the
-; master carries, its exit status the client's, and proxy mode, after
+; master carries, its exit status the client's, proxy mode, after
 ; which the socket carries the connection protocol itself (see
-; ssh-open-mux in ssh/transport).  The master's half is
-; the session loop's (ssh/session).
+; ssh-open-mux in ssh/transport), and OpenSSH's "info" extension, the
+; master's words on the connection or its channels.  The master's half
+; is the session loop's (ssh/session).
 
 (module ssh/mux)
 
@@ -50,6 +51,8 @@
 (def ssh-mux-remote-port 2147483655)      ; 0x80000007
 (def ssh-mux-tty-alloc-fail 2147483656)   ; 0x80000008
 (def ssh-mux-s-proxy 2147483663)          ; 0x8000000f
+(def ssh-mux-ext-info 536870913)          ; 0x20000001
+(def ssh-mux-s-ext-info 2415919105)       ; 0x90000001
 
 ; --- messages --------------------------------------------------------------
 
@@ -100,11 +103,30 @@
 
 (def ssh-join-texts (fn (_ ts) (Str8 join "" ts)))
 
-; HELLO, version 4, no extensions.
+; HELLO, version 4: the client's with no extensions, as OpenSSH's
+; client sends it; the master's with "info", its value "0", as
+; OpenSSH's master sends it.
 (def ssh-mux-hello-message
   (fn (_)
     (def m (ssh-mux-message ssh-mux-hello))
     (ssh-put-uint32 m ssh-mux-version)
+    m))
+
+(def ssh-mux-master-hello
+  (fn (_)
+    (def m (ssh-mux-hello-message))
+    (ssh-put-text m "info")
+    (ssh-put-text m "0")
+    m))
+
+; EXT_INFO's reply: (STATUS . TEXT), STATUS 1 for words given and 0 for
+; a name not served.
+(def ssh-mux-reply-info
+  (fn (_ rid status text)
+    (def m (ssh-mux-message ssh-mux-s-ext-info))
+    (ssh-put-uint32 m rid)
+    (ssh-put-uint32 m status)
+    (ssh-put-text m text)
     m))
 
 ; A reply naming rid: OK, or a refusal of type t with its reason.
@@ -154,7 +176,8 @@
     (guard (e (pair (lit failed) (e msg)))
       (Socket unix-connect path))))
 
-; HELLO each way: #t, or the words of a refusal.
+; HELLO each way: (hello . NAMES), NAMES the extensions the master's
+; names, or the words of a refusal.
 (def ssh-mux-greet!
   (fn (_ fd)
     (if (not (ssh-mux-send! fd (ssh-mux-hello-message))) "master hello exchange failed"
@@ -162,8 +185,14 @@
           (match
             ((null? m) "master hello exchange failed")
             ((not (= (first m) ssh-mux-hello)) "master hello exchange failed")
-            (#t (do (def v (ssh-get-uint32 (rest m)))
-                    (if (= v ssh-mux-version) #t
+            (#t (do (def in (rest m))
+                    (def v (ssh-get-uint32 in))
+                    (if (= v ssh-mux-version)
+                      (pair (lit hello)
+                            ((fn (self acc)
+                               (if (= (ssh-in-left in) 0) (List reverse acc)
+                                 (do (def name (ssh-get-text in)) (ssh-get-text in) (self (pair name acc)))))
+                             ()))
                       (Str8 append "Unsupported multiplexing protocol version " (%num v)
                                    " (expected " (%num ssh-mux-version) ")")))))))))
 
@@ -208,6 +237,23 @@
       ((= (first r) ssh-mux-permission-denied) (pair (lit denied) (ssh-get-text (rest r))))
       ((= (first r) ssh-mux-failure) (pair (lit failed) (ssh-get-text (rest r))))
       (#t ()))))
+
+; EXT_INFO for name, "connection" or "channels": the master's words, or
+; (error . REASON) when it answers another way, or () when it has gone.
+; Its status is not looked at, as OpenSSH's client does not look.
+(def ssh-mux-info
+  (fn (_ fd rid name)
+    (def m (ssh-mux-message ssh-mux-ext-info))
+    (ssh-put-uint32 m rid)
+    (ssh-put-text m name)
+    (if (not (ssh-mux-send! fd m)) ()
+      (do (def r (ssh-mux-receive fd))
+          (match
+            ((null? r) ())
+            ((not (= (first r) ssh-mux-s-ext-info))
+              (do (ssh-get-uint32 (rest r))
+                  (pair (lit error) (if (= (ssh-in-left (rest r)) 0) "" (ssh-get-text (rest r))))))
+            (#t (do (ssh-get-uint32 (rest r)) (ssh-get-uint32 (rest r)) (ssh-get-text (rest r)))))))))
 
 ; A session asked of the master: NEW_SESSION with tty?, agent?, sub?,
 ; the escape character (() for none), term, the command and env's
@@ -355,4 +401,5 @@
   ssh-mux-forward-key ssh-mux-forward-text ssh-mux-forward-read ssh-mux-forward!
   ssh-mux-message ssh-mux-send! ssh-mux-receive ssh-mux-hello-message ssh-mux-reply-ok ssh-mux-reply-error
   ssh-mux-reply-two ssh-mux-session-request ssh-mux-connect ssh-mux-greet! ssh-mux-alive? ssh-mux-command
-  ssh-mux-open-session ssh-mux-open-stdio ssh-mux-wait ssh-mux-take-fd)
+  ssh-mux-open-session ssh-mux-open-stdio ssh-mux-wait ssh-mux-take-fd
+  ssh-mux-ext-info ssh-mux-s-ext-info ssh-mux-master-hello ssh-mux-reply-info ssh-mux-info)

@@ -42,6 +42,24 @@
     (ptr-call %c-gethostname p 255)
     ((fn (self i) (if (= (ptr-ref p i 1) 0) (Str8 sub 0 i s) (self (+ i 1)))) 0)))
 
+; The local end of a TCP connection, as getsockname says it: (QUAD .
+; PORT), or () for a descriptor that is not an IPv4 socket -- a
+; ProxyCommand's socket pair among them.  AF_INET is 2 on both systems,
+; Darwin's sockaddr_in its length byte first, Linux's its family two
+; bytes, the low first.
+(def %c-getsockname (ffi-dlsym %libc "getsockname"))
+
+(def ssh-sys-local
+  (fn (_ fd)
+    (def a (%zeroed 16))
+    (def n (%zeroed 4))
+    (ptr-set! (str->ptr n) 0 16 4)
+    (def ap (str->ptr a))
+    (def b (fn (_ i) (& (ptr-ref ap i 1) 255)))
+    (if (if (< (Sys %sign-fold (ptr-call %c-getsockname fd ap (str->ptr n))) 0) #t (not (= (b (if os-darwin? 1 0)) 2))) ()
+      (pair (Str8 append (%num (b 4)) "." (%num (b 5)) "." (%num (b 6)) "." (%num (b 7)))
+            (+ (* 256 (b 2)) (b 3))))))
+
 ; --- descriptors over a Unix socket (SCM_RIGHTS) ----------------------------
 ;
 ; A descriptor passed as OpenSSH's mm_send_fd passes one: a message of a
@@ -209,4 +227,4 @@
   (fn (_ m) (def cut (Str8 index-of ": " m)) (if (null? cut) m (Str8 sub (+ cut 2) (- (Str8 length m) cut 2) m))))
 
 (provide ssh/sys ssh-sys-me ssh-sys-spawn ssh-sys-proxy ssh-sys-connect ssh-sys-output ssh-sys-umask ssh-sys-after-op
-  ssh-sys-hostname ssh-sys-send-fd ssh-sys-recv-fd)
+  ssh-sys-hostname ssh-sys-local ssh-sys-send-fd ssh-sys-recv-fd)

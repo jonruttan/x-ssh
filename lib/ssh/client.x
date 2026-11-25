@@ -160,26 +160,27 @@
 ; A LocalForward or RemoteForward line as (ADDRESS PORT HOST PORT GIVEN
 ; LPATH CPATH): [bind_address:]port:host:hostport, the command line's -L
 ; shape, or the file's `[bind_address:]port host:hostport`.  No address
-; is localhost, or every interface under GatewayPorts; `*` or an empty
+; is localhost, or for a LocalForward every interface under GatewayPorts,
+; which a RemoteForward ignores, as OpenSSH's does; `*` or an empty
 ; one is every interface, (); GIVEN is the address as written, () for
 ; none, for -G.  Either end may be a Unix socket instead, a field
 ; holding a `/` as OpenSSH tells one: `socket:host:hostport`,
 ; `[bind_address:]port:socket` or `socket:socket`; LPATH is the
 ; listening one, ADDRESS and PORT () beside it, and CPATH the one
 ; connected to, HOST and PORT () beside it, each () when not a socket.
-; A RemoteForward given only `[bind_address:]port` (socks? true) is a
+; A RemoteForward given only `[bind_address:]port` is a
 ; remote dynamic one, (ADDRESS PORT () 0 GIVEN () ()): its connections
 ; say where they go by SOCKS.
 (def %forward
-  (fn (_ l gateway what socks?)
+  (fn (_ l gateway what remote?)
     (def spec (Str8 join ":" (first (rest l))))
     (def parts (Str8 split ":" spec))
     (def n (List length parts))
     (def part (fn (_ i) (List ref i parts)))
     (def path? (fn (_ t) (not (null? (Str8 index-of "/" t)))))
     (def port ssh-config-int-or-nil)
-    (def dynamic (if (if socks? (= (List length (first (rest l))) 1) #f) (ssh-client-dynamic spec) ()))
-    (def bind (fn (_ given) (match ((not given) (if gateway () "localhost")) ((if (str=? given "*") #t (str=? given "")) ()) (#t given))))
+    (def dynamic (if (if remote? (= (List length (first (rest l))) 1) #f) (ssh-client-dynamic spec) ()))
+    (def bind (fn (_ given) (match ((not given) (if (if gateway (not remote?) #f) () "localhost")) ((if (str=? given "*") #t (str=? given "")) ()) (#t given))))
     ; the listener as (GIVEN PORT LPATH) and the destination as (HOST
     ; PORT CPATH), GIVEN #f for no address; () for a shape not read
     (def shape

@@ -264,8 +264,12 @@ It needs [x-lang](https://github.com/jonruttan/x-lang) at the release
     make install          # into <share>/bundles/ssh
     make test             # the spec suite
     make check            # the suite against tests/contract/known-failures.txt
+    make card             # docs/card.md: its format and its rows
 
 Set `X=/path/to/x` to use a particular x.
+
+[docs/card.md](docs/card.md) is the card: each program's forms in
+tables, and rows that `make card` runs, none of which needs a server.
 
 ## Layout
 

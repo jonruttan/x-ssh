@@ -9,8 +9,8 @@ x -l ssh -- sshd -D -p 2222               # a server, in the foreground
 x -l ssh -- scp FILE HOST:PATH            # a file to a host
 x -l ssh -- sftp HOST                     # files, at a prompt
 x -l ssh -- PROGRAM --help                # its options
-x -l ssh -- ssh -V 2>&1 -> x-ssh v0.1.0
-x -l ssh -- nosuch 2>&1 | sed 1q -> x-ssh v0.1.0
+x -l ssh -- ssh -V 2>&1 | tail -1 -> x-ssh v0.1.0
+x -l ssh -- nosuch 2>&1 | grep -c 'the server' -> 1
 ```
 
 | Program                | Is                                               |

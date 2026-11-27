@@ -920,6 +920,52 @@
     (ssh-send-packet! c (first rr) (rest rr))
     (%auth-answer c)))
 
+; RFC 4256's keyboard-interactive, as OpenSSH's userauth_kbdint asks it:
+; the request, its language empty and its submethods devices, then each
+; INFO_REQUEST answered by respond, given its name, its instruction and
+; its prompts as (PROMPT . ECHO?), and answering a response a prompt;
+; until the server says success or failure.  (ANSWER . ASKED?): ANSWER
+; as %auth-answer has it, ASKED? whether an INFO_REQUEST came.  Its
+; number is PK_OK's, which is why its exchange is its own.
+(def ssh-msg-userauth-info-request 60) (def ssh-msg-userauth-info-response 61)
+
+(def ssh-auth-kbdint!
+  (fn (_ c user devices respond)
+    (def req (ssh-out))
+    (ssh-put-byte req ssh-msg-userauth-request)
+    (ssh-put-text req user)
+    (ssh-put-text req "ssh-connection")
+    (ssh-put-text req "keyboard-interactive")
+    (ssh-put-text req "")
+    (ssh-put-text req devices)
+    (def rr (ssh-out-run req))
+    (ssh-send-packet! c (first rr) (rest rr))
+    ((fn (self asked)
+       (def p (ssh-next-packet! c))
+       (def t (%byte (first p) 0))
+       (def in (ssh-in (first p) 1 (- (rest p) 1)))
+       (match
+         ((= t ssh-msg-userauth-success) (pair #t asked))
+         ((= t ssh-msg-userauth-failure) (pair (ssh-get-names in) asked))
+         ((= t ssh-msg-userauth-banner)
+           (do (ssh-trace c (Str8 append "banner: " (ssh-get-text in))) (self asked)))
+         ((= t ssh-msg-userauth-info-request)
+           (do (def name (ssh-get-text in))
+               (def inst (ssh-get-text in))
+               (ssh-get-text in)
+               (def n (ssh-get-uint32 in))
+               (def prompts ((fn (self i) (if (= i n) () (do (def q (ssh-get-text in)) (pair (pair q (ssh-get-bool in)) (self (+ i 1)))))) 0))
+               (def answers (respond name inst prompts))
+               (def out (ssh-out))
+               (ssh-put-byte out ssh-msg-userauth-info-response)
+               (ssh-put-uint32 out n)
+               (List for-each (fn (_ a) (ssh-put-text out a)) answers)
+               (def r (ssh-out-run out))
+               (ssh-send-packet! c (first r) (rest r))
+               (self #t)))
+         (#t (Err raise 'value "ssh: an unexpected answer to authentication" ()))))
+     #f)))
+
 ; The publickey request's body for a key and algorithm, up to the
 ; signature: (BUF . LEN).
 (def %pk-request
@@ -967,7 +1013,7 @@
 (provide ssh/transport ssh-version-string ssh-open ssh-open-mux ssh-fill! ssh-fd ssh-session-id ssh-host-key ssh-server-sig-algs
   ssh-peer-version ssh-started ssh-agreed ssh-traffic ssh-hostkey-names ssh-pending? ssh-random ssh-engines!
   ssh-kex-names ssh-cipher-names ssh-mac-names ssh-algorithms!
-  ssh-exchange-versions! ssh-send-packet! ssh-recv-packet! ssh-next-packet! ssh-take-packet! ssh-expect! ssh-kex! ssh-kex-server! ssh-auth-service! ssh-auth-publickey-query! ssh-auth-publickey! ssh-auth-password!
+  ssh-exchange-versions! ssh-send-packet! ssh-recv-packet! ssh-next-packet! ssh-take-packet! ssh-expect! ssh-kex! ssh-kex-server! ssh-auth-service! ssh-auth-publickey-query! ssh-auth-publickey! ssh-auth-password! ssh-auth-kbdint!
   ssh-msg-disconnect ssh-msg-global-request ssh-msg-request-success ssh-msg-request-failure ssh-msg-service-request ssh-msg-service-accept
   ssh-msg-userauth-request ssh-msg-userauth-failure ssh-msg-userauth-success ssh-trace
   ssh-clock-sent ssh-clock-recv ssh-clock-data ssh-clock-mark! ssh-clocks-start! ssh-wait-ms ssh-clocks!)

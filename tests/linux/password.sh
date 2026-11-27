@@ -31,6 +31,10 @@
 #              no none is asked
 #   share      an x-ssh ControlMaster: descriptors passed to it on musl,
 #              from OpenSSH's passenger and x-ssh's, and -W through it
+#   kbdint     x-ssh's client by keyboard-interactive to OpenSSH's server
+#              built with PAM, pam_unix behind it: in, asked what
+#              OpenSSH's client is asked; a wrong password asked again,
+#              then refused as OpenSSH's client is refused
 #
 # The clients are the oracles.
 set -u
@@ -222,6 +226,43 @@ if [ "$theirs" = "$(printf 'theirs\nstatus 6')" ] && [ "$ours" = "$(printf 'ours
 	echo "ok: share -- an x-ssh master's descriptors passed on musl: OpenSSH's passenger, x-ssh's, -W, and -O exit"
 else
 	fail "share: '$theirs' '$ours' '$banner'"; cat "$fx/master.err" >&2
+fi
+
+# kbdint: OpenSSH's server built with PAM, keyboard-interactive its only
+# way in, pam_unix asking for root's password
+ssh-keygen -q -t ed25519 -N '' -f "$fx/ohostkey"
+mkdir -p /var/empty
+printf 'Port 2226\nListenAddress 127.0.0.1\nHostKey %s\nPidFile none\nUsePAM yes\nKbdInteractiveAuthentication yes\nPasswordAuthentication no\nPubkeyAuthentication no\nPermitRootLogin yes\n' \
+	"$fx/ohostkey" > "$fx/osshd_config"
+/usr/sbin/sshd.pam -D -e -f "$fx/osshd_config" > "$fx/osshd.log" 2>&1 &
+i=0; while ! grep -q 'Server listening on 127.0.0.1 port 2226' "$fx/osshd.log" && [ $i -lt 60 ]; do i=$((i + 1)); sleep 1; done
+printf '#!/bin/sh\necho "$1" >> "%s/kasked"\necho %s\n' "$fx" pw > "$fx/kaskpass"
+printf '#!/bin/sh\necho "$1" >> "%s/kasked"\necho %s\n' "$fx" px > "$fx/kwrongpass"
+chmod +x "$fx/kaskpass" "$fx/kwrongpass"
+kopts="-F none -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -p 2226 -l root"
+kx() { HOME="$fx/home" "$X" -l ssh -- ssh $kopts "$@"; }
+ko() { ssh $kopts "$@"; }
+rm -f "$fx/kasked"
+ours=$(SSH_ASKPASS="$fx/kaskpass" SSH_ASKPASS_REQUIRE=force DISPLAY=: kx 127.0.0.1 'echo by kbdint; exit 3' < /dev/null 2> "$fx/client.err"; echo "status $?")
+asked_ours=$(cat "$fx/kasked" 2>/dev/null); rm -f "$fx/kasked"
+theirs=$(SSH_ASKPASS="$fx/kaskpass" SSH_ASKPASS_REQUIRE=force DISPLAY=: ko 127.0.0.1 'echo by kbdint; exit 3' < /dev/null 2>> "$fx/client.err"; echo "status $?")
+asked_theirs=$(cat "$fx/kasked" 2>/dev/null); rm -f "$fx/kasked"
+if [ "$ours" = "$(printf 'by kbdint\nstatus 3')" ] && [ "$ours" = "$theirs" ] && [ -n "$asked_ours" ] && [ "$asked_ours" = "$asked_theirs" ] \
+	&& grep -q 'Accepted keyboard-interactive/pam for root from 127.0.0.1' "$fx/osshd.log"; then
+	echo "ok: kbdint -- x-ssh's client in by keyboard-interactive through OpenSSH's PAM server, asked '$asked_ours' as OpenSSH's client is"
+else
+	fail "kbdint: ours '$ours' asked '$asked_ours', theirs '$theirs' asked '$asked_theirs'"; cat "$fx/osshd.log" >&2
+fi
+# OpenSSH ends its words CR LF
+ours=$( { SSH_ASKPASS="$fx/kwrongpass" SSH_ASKPASS_REQUIRE=force DISPLAY=: kx -o NumberOfPasswordPrompts=2 127.0.0.1 true < /dev/null; echo "status $?"; } 2>&1 | tr -d "\r")
+asked_ours=$(cat "$fx/kasked" 2>/dev/null); rm -f "$fx/kasked"
+theirs=$( { SSH_ASKPASS="$fx/kwrongpass" SSH_ASKPASS_REQUIRE=force DISPLAY=: ko -o NumberOfPasswordPrompts=2 127.0.0.1 true < /dev/null; echo "status $?"; } 2>&1 | tr -d "\r")
+asked_theirs=$(cat "$fx/kasked" 2>/dev/null); rm -f "$fx/kasked"
+if [ "$ours" = "$theirs" ] && [ "$asked_ours" = "$asked_theirs" ] && [ "$(printf '%s\n' "$asked_ours" | wc -l)" -eq 2 ]; then
+	echo "ok: kbdint -- a wrong password asked again, then refused, as OpenSSH's client is: $(printf '%s' "$ours" | head -1)"
+else
+	printf '%s\n' "ours: $ours" "asked: $asked_ours" "theirs: $theirs" "asked: $asked_theirs" > "$fx/client.err"
+	fail "kbdint: a wrong password"
 fi
 
 exit $failed

@@ -22,10 +22,10 @@
 (import x/sys/posix)
 (import x/repl/term)
 (import x/sys/syslog)
-(import ssh/ask ssh-ask-tty ssh-ask-secret)
+(import ssh/ask ssh-ask-tty ssh-ask-secret ssh-ask)
 (import ssh/bytes ssh-copy)
 (import ssh/transport ssh-open ssh-open-mux ssh-host-key ssh-engines! ssh-exchange-versions! ssh-kex!
-  ssh-auth-service! ssh-auth-publickey-query! ssh-auth-publickey! ssh-auth-password! ssh-hostkey-names ssh-server-sig-algs
+  ssh-auth-service! ssh-auth-publickey-query! ssh-auth-publickey! ssh-auth-password! ssh-auth-kbdint! ssh-hostkey-names ssh-server-sig-algs
   ssh-kex-names ssh-cipher-names ssh-mac-names ssh-algorithms!)
 (import ssh/session ssh-session-run! ssh-session-control-listen ssh-disconnect!)
 (import ssh/keys ssh-key-file-sealed? ssh-key-wrong-passphrase ssh-identity-read-file ssh-pubkey-of-key-file)
@@ -420,6 +420,10 @@
           (pair (lit alias) (ssh-config-one lines "hostkeyalias" ()))
           (pair (lit batch) (ssh-config-yes? lines "batchmode" #f))
           (pair (lit password) (ssh-config-yes? lines "passwordauthentication" #t))
+          ; ChallengeResponseAuthentication is its old name, the first said of either taken
+          (pair (lit kbdint) (ssh-config-yes? (List map (fn (_ l) (if (str=? (first l) "challengeresponseauthentication") (pair "kbdinteractiveauthentication" (rest l)) l)) lines)
+                                              "kbdinteractiveauthentication" #t))
+          (pair (lit kbdint-devices) (ssh-config-one lines "kbdinteractivedevices" ""))
           (pair (lit agent) (%agent-socket (ssh-config-one lines "identityagent" "SSH_AUTH_SOCK") path))
           (pair (lit identities-only) (ssh-config-yes? lines "identitiesonly" #f))
           ; ForwardAgent yes forwards IdentityAgent's socket; a path or $NAME its own
@@ -474,6 +478,7 @@
                 (Str8 append "globalknownhostsfile " (Str8 join " " (%get s (lit global))))
                 (Str8 append "stricthostkeychecking " (%get s (lit strict)))
                 (Str8 append "batchmode " (yn (%get s (lit batch))))
+                (Str8 append "kbdinteractiveauthentication " (yn (%get s (lit kbdint))))
                 (Str8 append "passwordauthentication " (yn (%get s (lit password))))
                 (Str8 append "pubkeyauthentication " (yn (%get s (lit pubkey))))
                 (Str8 append "numberofpasswordprompts " (%num (%get s (lit prompts))))
@@ -483,6 +488,7 @@
                 (Str8 append "ciphers " (Str8 join "," (%get s (lit ciphers))))
                 (Str8 append "macs " (Str8 join "," (%get s (lit macs))))
                 (Str8 append "gatewayports " (yn (%get s (lit gateway)))))
+          (if (str=? (%get s (lit kbdint-devices)) "") () (list (Str8 append "kbdinteractivedevices " (%get s (lit kbdint-devices)))))
           ; dynamic, local, then remote, as OpenSSH orders them
           (List map (fn (_ d) (Str8 append "dynamicforward " (listen (first d) (List ref 1 d)))) (%get s (lit dynamics)))
           ; OpenSSH's -G takes a local forward to a socket, which has no
@@ -757,10 +763,40 @@
                 (def opened (%open-identity s (first id) tr))
                 (if (null? opened) answer (ssh-auth-publickey! c user opened alg))))))))
 
+; Text the server chose, written as fmprintf writes it: its control
+; characters but newline and tab said as ?.
+(def %shown
+  (fn (_ t)
+    (def n (str-byte-len t))
+    ((fn (self i acc)
+       (if (= i n) (Str8 join "" (List reverse acc))
+         (self (+ i 1)
+               (pair ((fn (_ b) (if (if (if (< b 32) (not (if (= b 10) #t (= b 9))) #f) #t (= b 127)) "?" (Str8 sub i 1 t)))
+                      (char->int (str-byte-ref t i)))
+                     acc))))
+     0 ())))
+
+; An INFO_REQUEST answered as OpenSSH's input_userauth_info_req answers
+; it: the name and the instruction, when given, each on a line of its
+; own on standard error, then each prompt asked as "(USER@HOST) PROMPT",
+; HOST HostKeyAlias or the host, echoed when the server says so; an
+; answer not given is empty.
+(def %kbdint-respond
+  (fn (_ s user)
+    (def host (if (null? (%get s (lit alias))) (%get s (lit hostname)) (%get s (lit alias))))
+    (fn (_ name inst prompts)
+      (List for-each (fn (_ t) (when (> (Str8 length t) 0) (%say 2 (Str8 append (%shown t) "\n")))) (list name inst))
+      (List map (fn (_ q) ((fn (_ a) (if (null? a) "" a))
+                           (ssh-ask (Str8 append "(" user "@" host ") " (%shown (first q))) #f (not (rest q)))))
+        prompts))))
+
 ; Authentication as OpenSSH's client tries it: each key while the server
-; offers publickey, then, while it offers password, a password asked for
-; up to NumberOfPasswordPrompts times.  #t, or the server's remaining
-; methods.
+; offers publickey; then, while it offers keyboard-interactive,
+; KbdInteractiveAuthentication yes and BatchMode no, up to
+; NumberOfPasswordPrompts tries, a try after the first only once the
+; server has sent an INFO_REQUEST; then, while it offers password, a
+; password asked for up to NumberOfPasswordPrompts times.  #t, or the
+; server's remaining methods.
 (def %authenticate
   (fn (_ c s ids tr)
     (def user (%get s (lit user)))
@@ -769,9 +805,17 @@
       ((fn (self ks answer)
          (if (if (null? ks) #t (not (%offers? answer "publickey"))) answer
            (self (rest ks) (%offer-identity c s user (first ks) answer tr))))
-       ids (list "publickey" "password")))
+       ids (list "publickey" "keyboard-interactive" "password")))
+    (def by-kbdint
+      (if (if (%get s (lit kbdint)) (%get s (lit batch)) #t) by-key
+        ((fn (self left answer asked first-try)
+           (if (if (= left 0) #t (if (not (%offers? answer "keyboard-interactive")) #t (if first-try #f (not asked)))) answer
+             (do (when (if first-try (not (null? tr)) #f) (tr "Next authentication method: keyboard-interactive"))
+                 (def r (ssh-auth-kbdint! c user (%get s (lit kbdint-devices)) (%kbdint-respond s user)))
+                 (self (- left 1) (first r) (if asked #t (rest r)) #f))))
+         (%get s (lit prompts)) by-key #f #t)))
     (def prompt (Str8 append user "@" (%get s (lit hostname)) "'s password: "))
-    (if (not (%get s (lit password))) by-key
+    (if (not (%get s (lit password))) by-kbdint
       ((fn (self left answer first-try)
          (if (if (= left 0) #t (not (%offers? answer "password"))) answer
            (do (unless first-try (%log "Permission denied, please try again."))
@@ -779,7 +823,7 @@
                (if (null? typed) answer
                  (do (unless (null? tr) (tr "Next authentication method: password"))
                      (self (- left 1) (ssh-auth-password! c user typed) #f))))))
-       (%get s (lit prompts)) by-key #t))))
+       (%get s (lit prompts)) by-kbdint #t))))
 
 ; The variables SendEnv's patterns name and SetEnv's, as (NAME . VALUE).
 (def %environment

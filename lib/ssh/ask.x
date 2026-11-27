@@ -94,8 +94,12 @@
 ; With stdin, standard input that is not a terminal sends the question
 ; to the askpass program, and with no terminal the answer is read from
 ; standard input.
-(def ssh-ask-secret
-  (fn (_ text stdin)
+(def ssh-ask-secret (fn (_ text stdin) (ssh-ask text stdin #t)))
+
+; An answer asked as read_passphrase asks: a secret unechoed, any other
+; answer echoed at the terminal as typed, as under RP_ECHO.
+(def ssh-ask
+  (fn (_ text stdin secret)
     (def req (Sys getenv "SSH_ASKPASS_REQUIRE"))
     (def is (fn (_ v) (if (null? req) #f (str=? (Str8 downcase req) v))))
     (def allow (match ((is "force") #t) ((is "never") #f) (#t (if (%set? "DISPLAY") #t (%set? "WAYLAND_DISPLAY")))))
@@ -105,8 +109,8 @@
                     (#t (not (ssh-ask-tty?)))))
     (match
       ((if use allow #f) (ssh-askpass text))
-      ((ssh-ask-tty?) (ssh-ask-tty text #t))
+      ((ssh-ask-tty?) (ssh-ask-tty text secret))
       (stdin (do (File write 2 text (str-byte-len text)) (%line %stdin)))
       (#t ()))))
 
-(provide ssh/ask ssh-ask-tty ssh-ask-tty? ssh-askpass ssh-ask-secret)
+(provide ssh/ask ssh-ask-tty ssh-ask-tty? ssh-askpass ssh-ask-secret ssh-ask)

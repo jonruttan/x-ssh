@@ -19,3 +19,7 @@ WORKDIR /x-lang
 RUN make engine-source && make && make boot && make install
 ENV X=/usr/local/bin/x
 WORKDIR /x-ssh
+# OpenSSH's server built with PAM, pam_unix behind it: the one OpenSSH
+# serves keyboard-interactive from, for x-ssh's client.  A layer of its
+# own, after the build, so the build's layers are kept.
+RUN apk add --no-cache openssh-server-pam

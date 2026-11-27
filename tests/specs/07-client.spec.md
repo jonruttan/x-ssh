@@ -238,6 +238,23 @@ tests/oracle/client.sh and tests/oracle/server.sh.
 ---
     (("any" () 126 #f () "user") ("inet" "10.0.0.1" () #t "/bin/kh %H \"%I\"" "local0"))
 
+### KbdInteractiveAuthentication yes by default, ChallengeResponseAuthentication its old name, the first said of either taken; -G prints KbdInteractiveDevices only when set
+
+```ssh
+(import ssh/client ssh-client-settings)
+(import ssh/config ssh-config-options)
+(def %pr (eval (lit %print) (module ssh/client)))
+(def %kb (fn (_ opts)
+  (def s (ssh-client-settings (ssh-config-options opts) "h" "u"))
+  (list (rest (List find (fn (_ p) (eq? (first p) (lit kbdint))) s))
+        (List filter (fn (_ l) (not (null? (Str8 index-of "kbdinteractive" l)))) (Str8 split "\n" (%pr s))))))
+(write (list (%kb ())
+             (%kb (list "ChallengeResponseAuthentication no" "KbdInteractiveAuthentication yes"))
+             (%kb (list "KbdInteractiveAuthentication yes" "ChallengeResponseAuthentication no" "KbdInteractiveDevices pam,bsdauth"))))
+```
+---
+    ((#t ("kbdinteractiveauthentication yes")) (#f ("kbdinteractiveauthentication no")) (#t ("kbdinteractiveauthentication yes" "kbdinteractivedevices pam,bsdauth")))
+
 ### an escape character as -e and EscapeChar read it, and as -G prints it; a bad one refused
 
 ```ssh

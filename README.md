@@ -32,7 +32,8 @@ Every end speaks curve25519-sha256 and OpenSSH's ciphers, in its order:
 chacha20-poly1305@openssh.com, aes128-ctr, aes192-ctr, aes256-ctr,
 aes128-gcm@openssh.com and aes256-gcm@openssh.com, the CTR ciphers with
 hmac-sha2-256 or hmac-sha2-512, their -etm@openssh.com forms first.
-Authentication is by publickey and password, with one session a
+Authentication is by publickey and password, and from the client also
+keyboard-interactive (RFC 4256), with one session a
 connection: a command, or a shell on a terminal.  Keys and signatures:
 ssh-ed25519, RSA (rsa-sha2-256 and -512) and ECDSA (nistp256, nistp384,
 nistp521), for host keys and user keys, at either end.
@@ -103,7 +104,9 @@ nistp521), for host keys and user keys, at either end.
   (yes for IdentityAgent's socket, or a socket of its own),
   StrictHostKeyChecking,
   UserKnownHostsFile,
-  GlobalKnownHostsFile, HostKeyAlias, BatchMode, PasswordAuthentication,
+  GlobalKnownHostsFile, HostKeyAlias, BatchMode,
+  KbdInteractiveAuthentication (ChallengeResponseAuthentication its old
+  name), KbdInteractiveDevices, PasswordAuthentication,
   PubkeyAuthentication, NumberOfPasswordPrompts, LocalForward,
   RemoteForward, DynamicForward, PermitRemoteOpen, GatewayPorts, ClearAllForwardings,
   StreamLocalBindMask, StreamLocalBindUnlink, ControlMaster, ControlPath,
@@ -122,6 +125,10 @@ nistp521), for host keys and user keys, at either end.
   SSH_ASKPASS_REQUIRE says.  A key under a passphrase is offered by its
   public half, and its passphrase asked the same way only once the server
   would take it; an empty answer, or BatchMode, passes the key over.
+  Keyboard-interactive comes between keys and a password, as OpenSSH
+  orders them: up to NumberOfPasswordPrompts tries, each of the
+  server's prompts asked as `(user@host) prompt` the same way, echoed
+  when the server says so, its name and instruction written first.
 - `sshd`: the server, for the user it runs as, or, run as root, for any
   user in `/etc/passwd`: that user's authorized_keys, and the
   connection, once in, the user's -- initgroups, setgid, setuid, and
@@ -221,9 +228,10 @@ All but `sshd.sh` and `mux.sh` take a built Dropbear's directory.
 
 `tests/linux/run.sh` is the Linux leg: password logins, which want a
 shadow file and a known password, a root server's other users, and a
-ControlMaster's descriptors passed on musl, run as root in a container
-built from `tests/linux/Containerfile` at the declared release, with
-Dropbear's and OpenSSH's clients as the oracles.
+ControlMaster's descriptors passed on musl, and the client's
+keyboard-interactive to OpenSSH's server built with PAM, run as root in
+a container built from `tests/linux/Containerfile` at the declared
+release, with Dropbear's and OpenSSH's clients as the oracles.
 
 ## Security
 
@@ -252,7 +260,8 @@ container or x-os; where a connection has to be relied on, use OpenSSH.
   StrictHostKeyChecking says, and a changed key is always refused.
 - **Random bytes** are read from `/dev/urandom`.
 - **Not served:** certificates, security-key (`sk-`) key types,
-  keyboard-interactive, hostbased and GSSAPI authentication,
+  hostbased and GSSAPI authentication, keyboard-interactive at the
+  server (OpenSSH's serves it only through PAM or BSD auth),
   compression, IPv6, and a proxy client's agent forwarding, which
   OpenSSH's master does not serve either.
 

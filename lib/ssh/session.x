@@ -47,7 +47,7 @@
 (import ssh/transport ssh-fd ssh-pending? ssh-send-packet! ssh-take-packet! ssh-msg-disconnect ssh-open-mux ssh-fill!
   ssh-msg-global-request ssh-msg-request-success ssh-msg-request-failure
   ssh-clock-sent ssh-clock-recv ssh-clock-data ssh-clock-mark! ssh-clocks-start! ssh-wait-ms ssh-clocks!
-  ssh-version-string ssh-peer-version ssh-started ssh-agreed ssh-traffic)
+  ssh-version-string ssh-peer-version ssh-started ssh-agreed ssh-traffic ssh-compression ssh-zlib)
 
 (import x/core/doors str-byte-ref char->int str-byte-len obj-ref obj-set! str-make str->ptr ptr-set! int/ int%)
 (def %byte (fn (_ s i) (char->int (str-byte-ref s i))))
@@ -870,12 +870,38 @@
     (def o (if (null? out) "<implicit>" out))
     (if (str=? i o) i (Str8 append i " in, " o " out"))))
 
+
+; a over b to three places, as %.3f says it; 0.000 when b is none
+(def %ratio
+  (fn (_ a b)
+    (if (= b 0) "0.000"
+      (do (def k (int/ (+ (* a 2000) b) (* 2 b)))
+          (def f (int% k 1000))
+          (Str8 append (%num (int/ k 1000)) "." (if (< f 100) (if (< f 10) "00" "0") "") (%num f))))))
+
+; The line conninfo ends with once compression has started: each way's
+; bytes compressed over the bytes they are of, a way not compressed
+; left blank, as OpenSSH's comp_status_message says it.
+(def %compressed-info
+  (fn (_ z)
+    (def v (List ref 2 z))
+    (if (null? v) ""
+      (do (def on (fn (_ name) (str=? name ssh-zlib)))
+          (def in? (on (first z)))
+          (def out? (on (List ref 1 z)))
+          (def sc (fn (_ ok n) (if ok (%scaled n) "")))
+          (Str8 append "    compressed " (sc in? (obj-ref v 1)) "/" (sc in? (obj-ref v 2))
+                       " (*" (if in? (%ratio (obj-ref v 1) (obj-ref v 2)) "0.000") ") in, "
+                       (sc out? (obj-ref v 4)) "/" (sc out? (obj-ref v 3))
+                       " (*" (if out? (%ratio (obj-ref v 4) (obj-ref v 3)) "0.000") ") out\r\n")))))
+
 (def %connection-info
   (fn (_ c)
     (def fd (ssh-fd c))
     (def here (ssh-sys-local fd))
     (def there (if (null? here) () (guard (e ()) (Socket peer fd))))
     (def a (ssh-agreed c))
+    (def z (ssh-compression c))
     (def t (ssh-traffic c))
     (def way (fn (_ i) (Str8 append (%num (obj-ref t i)) " pkts " (%num (obj-ref t (+ i 1))) " blks "
                                     (%scaled (obj-ref t (+ i 2))) "B")))
@@ -889,9 +915,10 @@
       "  hostkeyalgorithm " (List ref 1 a) "\r\n"
       "  cipher " (%both-ways (List ref 2 a) (List ref 3 a)) "\r\n"
       "  mac " (%both-ways (List ref 4 a) (List ref 5 a)) "\r\n"
-      "  compression none\r\n"
+      "  compression " (%both-ways (first z) (List ref 1 z)) "\r\n"
       "  rekey limit none interval none\r\n"
-      "  traffic " (way 4) " in, " (way 1) " out\r\n")))
+      "  traffic " (way 4) " in, " (way 1) " out\r\n"
+      (%compressed-info z))))
 
 (def %kind-text
   (fn (_ k)

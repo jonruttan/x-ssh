@@ -383,6 +383,42 @@ tests/oracle/client.sh and tests/oracle/server.sh.
 ---
     (("00:00:00" "01:02:05" "1d01h01m" "02w0d01h") ("0B" "512B" "1023B" "1.0K" "3.5K" "100K" "1024K" "10.0M"))
 
+### -O conninfo's compression line: each way's bytes compressed over the bytes they are of, a way not compressed left blank
+
+```ssh
+(def %ci (eval (lit %compressed-info) (module ssh/session)))
+(def v (Vector make 4 0))
+(obj-set! v 1 300) (obj-set! v 2 1200) (obj-set! v 3 4096) (obj-set! v 4 1365)
+(write (list (%ci (list "none" "none" ()))
+             (%ci (list "zlib@openssh.com" "zlib@openssh.com" v))
+             (%ci (list "none" "zlib@openssh.com" v))))
+```
+---
+    ("" "    compressed 300B/1.2K (*0.250) in, 1.3K/4.0K (*0.333) out\r\n" "    compressed / (*0.000) in, 1.3K/4.0K (*0.333) out\r\n")
+
+### zlib@openssh.com: payloads deflated at one end read back at the other, the zlib header on the first alone
+
+```ssh
+(import ssh/transport ssh-open ssh-compression)
+(import ssh/bytes ssh-same-bytes?)
+(def T (module ssh/transport))
+(def a (ssh-open -1 ()))
+(def b (ssh-open -1 ()))
+((eval (lit %agreed-compression!) T) a (list "zlib@openssh.com" "zlib@openssh.com") #f)
+((eval (lit %agreed-compression!) T) b (list "zlib@openssh.com" "zlib@openssh.com") #t)
+((eval (lit %compression-start!) T) a)
+((eval (lit %compression-start!) T) b)
+(def trip (fn (_ text n)
+  (def z ((eval (lit %deflated) T) a text n))
+  (def back ((eval (lit %inflated) T) b z))
+  (list (str=? (Str8 sub 0 1 (first z)) "x") (= (rest back) n) (ssh-same-bytes? (first back) 0 text 0 n))))
+(write (list (trip "^exec ls -l; ls -l; ls -l" 25) (trip "^exec ls -l; ls -l; ls -l" 25) (trip "^" 1)
+             (obj-ref (List ref 2 (ssh-compression a)) 3) (obj-ref (List ref 2 (ssh-compression b)) 2)
+             (List ref 1 (ssh-compression a)) (first (ssh-compression b))))
+```
+---
+    ((#t #t #t) (#f #t #t) (#f #t #t) 51 51 "zlib@openssh.com" "zlib@openssh.com")
+
 ### a NEW_SESSION request read: terminal, agent and subsystem flags, the escape character (none as 0xffffffff), TERM, the command and the environment
 
 ```ssh

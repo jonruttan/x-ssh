@@ -16,6 +16,9 @@
 ; aes128-gcm@openssh.com and aes256-gcm@openssh.com (RFC 5647, the length
 ; the additional data); and aes128-, aes192- and aes256-ctr (RFC 4344)
 ; with hmac-sha2-256 or -512 (RFC 6668), or their -etm@openssh.com forms.
+; Compression is zlib@openssh.com: once a user is in, each way one zlib
+; stream (RFC 1950) across its packets, each payload compressed and
+; flushed before it is padded.
 ;
 ; Both ends are here: the client's key exchange and authentication, and
 ; the server's key exchange, the rest of the server being ssh/server.x.
@@ -41,6 +44,8 @@
 (import x/codec/sha512)
 (import x/codec/x25519)
 (import x/codec/ed25519)
+(import x/codec/deflate)
+(import x/codec/inflate)
 (import ssh/bytes ssh-out ssh-put-byte ssh-put-bool ssh-put-uint32 ssh-put-bytes ssh-put-string ssh-put-text ssh-put-mpint ssh-put-names ssh-out-run
   ssh-in ssh-in-left ssh-in-buf ssh-get-byte ssh-get-bool ssh-get-uint32 ssh-get-string ssh-get-bytes ssh-get-text ssh-get-names
   ssh-copy ssh-join ssh-same-bytes?)
@@ -85,7 +90,7 @@
 
 (def ssh-open
   (fn (_ fd trace)
-    (def c (Vector make 17 ()))
+    (def c (Vector make 18 ()))
     (%slot! c 1 fd)
     (%slot! c 2 (pair (str-make 0) 0))
     (%slot! c 3 0)
@@ -94,6 +99,7 @@
     (%slot! c 13 (pair ssh-cipher-names ssh-mac-names))
     (%slot! c 16 (Sys now))
     (%slot! c 17 (Vector make 6 0))
+    (%slot! c 18 (%compression-new))
     c))
 
 ; A control socket in proxy mode as a connection, as PROTOCOL.mux frames
@@ -140,6 +146,106 @@
     (%slot! c 15 agreed)
     (def t (%slot c 17))
     (List for-each (fn (_ i) (obj-set! t i 0)) (list 1 2 4 5))))
+
+; --- compression -------------------------------------------------------------
+
+; zlib@openssh.com (OpenSSH's PROTOCOL): agreed in the key exchange, it
+; starts once a user is in -- the server's USERAUTH_SUCCESS the last packet
+; it sends uncompressed, the first the client reads after it the first it
+; inflates.  Each way is then one zlib stream: the header on its first
+; packet, every payload fed to it and flushed, never finished, so never an
+; Adler-32.  A connection's slot 18 holds the names this end offers, the
+; names agreed out and in, the two streams once started, whether the
+; header is still to be written and how many header bytes are still to be
+; read, the bytes before and after each way, and whether this end is the
+; server.
+(def %Z-OFFER 1) (def %Z-OUT 2) (def %Z-IN 3) (def %Z-DEFLATE 4) (def %Z-INFLATE 5)
+(def %Z-HEAD-OUT 6) (def %Z-HEAD-IN 7) (def %Z-COUNTS 8) (def %Z-SERVER 9)
+(def ssh-zlib "zlib@openssh.com")
+
+(def %compression-new
+  (fn (_)
+    (def z (Vector make 9 ()))
+    (obj-set! z %Z-OFFER (list "none"))
+    (obj-set! z %Z-OUT "none")
+    (obj-set! z %Z-IN "none")
+    (obj-set! z %Z-COUNTS (Vector make 4 0))
+    (obj-set! z %Z-SERVER #f)
+    z))
+
+; The compression this end offers: OpenSSH's Compression yes is
+; ("zlib@openssh.com" "none") from a client, ("none" "zlib@openssh.com")
+; from a server; no is ("none").
+(def ssh-compression!
+  (fn (_ c names) (obj-set! (%slot c 18) %Z-OFFER names)))
+
+; The compression agreed, from this end, and what it has done: (IN OUT
+; COUNTS), the names, and COUNTS () until it starts, then a vector of the
+; bytes in compressed, in inflated, out before and out compressed.
+(def ssh-compression
+  (fn (_ c)
+    (def z (%slot c 18))
+    (list (obj-ref z %Z-IN) (obj-ref z %Z-OUT)
+          (if (if (null? (obj-ref z %Z-DEFLATE)) (null? (obj-ref z %Z-INFLATE)) #f) () (obj-ref z %Z-COUNTS)))))
+
+; Both ways started where they were agreed: a user is in.
+(def %compression-start!
+  (fn (_ c)
+    (def z (%slot c 18))
+    (when (str=? (obj-ref z %Z-OUT) ssh-zlib)
+      (do (obj-set! z %Z-DEFLATE (Deflate stream)) (obj-set! z %Z-HEAD-OUT #t)))
+    (when (str=? (obj-ref z %Z-IN) ssh-zlib)
+      (do (obj-set! z %Z-INFLATE (Inflate stream)) (obj-set! z %Z-HEAD-IN 2)))
+    (ssh-trace c (Str8 append "compression " (obj-ref z %Z-IN) " in, " (obj-ref z %Z-OUT) " out"))))
+
+(def %bump-count! (fn (_ v i n) (obj-set! v i (+ (obj-ref v i) n))))
+
+; The compressions agreed, (C2S S2C), kept from this end, out and in.
+(def %agreed-compression!
+  (fn (_ c zs server?)
+    (def z (%slot c 18))
+    (obj-set! z %Z-SERVER server?)
+    (obj-set! z %Z-OUT (List ref (if server? 1 0) zs))
+    (obj-set! z %Z-IN (List ref (if server? 0 1) zs))))
+
+; A payload compressed: (BUF . LEN), the payload itself when there is no
+; stream out.
+(def %deflated
+  (fn (_ c payload n)
+    (def z (%slot c 18))
+    (def w (obj-ref z %Z-DEFLATE))
+    (if (null? w) (pair payload n)
+      (do (def a (Deflate feed w payload 0 n #f))
+          (def b (Deflate flush w))
+          (def out (ssh-out))
+          ; the zlib header: deflate, a 32K window, the default level
+          (when (obj-ref z %Z-HEAD-OUT)
+            (do (ssh-put-byte out 120) (ssh-put-byte out 156) (obj-set! z %Z-HEAD-OUT #f)))
+          (ssh-put-bytes out (first a) 0 (List ref 1 a))
+          (ssh-put-bytes out (first b) 0 (List ref 1 b))
+          (def r (ssh-out-run out))
+          (%bump-count! (obj-ref z %Z-COUNTS) 3 n)
+          (%bump-count! (obj-ref z %Z-COUNTS) 4 (rest r))
+          r))))
+
+; A payload received inflated: (BUF . LEN), as it came when there is no
+; stream in.  The stream's header is read off its first packet; a
+; payload that inflates past a packet's most is refused, as OpenSSH
+; refuses it.
+(def %inflated
+  (fn (_ c p)
+    (def z (%slot c 18))
+    (def s (obj-ref z %Z-INFLATE))
+    (if (null? s) p
+      (do (def head (if (< (rest p) (obj-ref z %Z-HEAD-IN)) (rest p) (obj-ref z %Z-HEAD-IN)))
+          (when (if (< 0 head) (if (= (obj-ref z %Z-HEAD-IN) 2) (not (= (& (%byte (first p) 0) 15) 8)) #f) #f)
+            (Err raise 'value "ssh: the peer's compressed stream is not zlib's" ()))
+          (obj-set! z %Z-HEAD-IN (- (obj-ref z %Z-HEAD-IN) head))
+          (def o (Inflate feed s (first p) head (- (rest p) head)))
+          (when (> (List ref 1 o) 262144) (Err raise 'value "ssh: a packet inflates past its most" ()))
+          (%bump-count! (obj-ref z %Z-COUNTS) 1 (rest p))
+          (%bump-count! (obj-ref z %Z-COUNTS) 2 (List ref 1 o))
+          (pair (first o) (List ref 1 o))))))
 
 ; Whether received bytes are waiting to be read as a packet: a caller
 ; that waits on the socket must not, while they are.
@@ -373,12 +479,17 @@
 ; How many bytes must be in before the length can be unveiled.
 (def %head-size (fn (_ key) (if (%length-hidden? key) 16 4)))
 
-; A payload sent as one packet: padded to the cipher's block, eight
-; under none and chacha, sixteen under AES, with at least four bytes of
-; padding, the length field counted toward the alignment only where it
-; is enciphered with the rest; then in the clear or under the keys.
+; A payload sent as one packet: compressed once that has started, then
+; padded to the cipher's block, eight under none and chacha, sixteen
+; under AES, with at least four bytes of padding, the length field
+; counted toward the alignment only where it is enciphered with the
+; rest; then in the clear or under the keys.
 (def ssh-send-packet!
-  (fn (_ c payload n)
+  (fn (_ c plain m)
+    (def type (%byte plain 0))
+    (def zp (%deflated c plain m))
+    (def payload (first zp))
+    (def n (rest zp))
     (def key (%slot c 5))
     (def seq (%slot c 3))
     (def block (if (null? key) 8 (if (eq? (%k-cipher key) 'chacha) 8 16)))
@@ -421,7 +532,8 @@
     (def whole (ssh-join wire))
     (%send! c (first whole) (rest whole))
     (%count! c 1 total block)
-    (%slot! c 3 (+ seq 1))))
+    (%slot! c 3 (+ seq 1))
+    (when (if (= type ssh-msg-userauth-success) (obj-ref (%slot c 18) %Z-SERVER) #f) (%compression-start! c))))
 
 ; A packet received: its payload as (BUF . LEN).  Under the keys, the
 ; length is unveiled first, then the tag or MAC checked before a byte of
@@ -470,7 +582,10 @@
     (%slot! c 4 (+ seq 1))
     (%count! c 4 total (if (null? key) 8 (if (eq? (%k-cipher key) 'chacha) 8 16)))
     (def pad (%byte body 0))
-    (pair (ssh-copy body 1 (- len 1 pad)) (- len 1 pad))))
+    (def p (%inflated c (pair (ssh-copy body 1 (- len 1 pad)) (- len 1 pad))))
+    (when (if (= (%byte (first p) 0) ssh-msg-userauth-success) (not (obj-ref (%slot c 18) %Z-SERVER)) #f)
+      (unless (%slot c 14) (%compression-start! c)))
+    p))
 
 ; The next packet that is the transport's business handled here, any
 ; other handed back: IGNORE, DEBUG and EXT_INFO dropped, a DISCONNECT
@@ -601,7 +716,7 @@
         "aes128-gcm@openssh.com" "aes256-gcm@openssh.com"))
 (def ssh-mac-names
   (list "hmac-sha2-256-etm@openssh.com" "hmac-sha2-512-etm@openssh.com" "hmac-sha2-256" "hmac-sha2-512"))
-(def %comp-names (list "none"))
+
 
 ; The value a name has in an alist keyed by names, or ().
 (def %named (fn (_ name al) ((fn (_ e) (if (null? e) () (rest e))) (List find (fn (_ e) (str=? (first e) name)) al))))
@@ -637,7 +752,7 @@
     (ssh-put-names out hostkeys)
     (ssh-put-names out (first (%slot c 13))) (ssh-put-names out (first (%slot c 13)))
     (ssh-put-names out (rest (%slot c 13))) (ssh-put-names out (rest (%slot c 13)))
-    (ssh-put-names out %comp-names) (ssh-put-names out %comp-names)
+    (ssh-put-names out (obj-ref (%slot c 18) %Z-OFFER)) (ssh-put-names out (obj-ref (%slot c 18) %Z-OFFER))
     (ssh-put-text out "") (ssh-put-text out "")
     (ssh-put-bool out #f)
     (ssh-put-uint32 out 0)
@@ -651,11 +766,12 @@
 
 ; The peer's KEXINIT read: each list must share a name with ours, the MAC
 ; lists only for a cipher without its own tag.  The client's list leads,
-; whichever side reads it.  Answers (WRONG-GUESS CHOSEN EXT): whether a
+; whichever side reads it.  Answers (WRONG-GUESS CHOSEN EXT ZIP): whether a
 ; guessed packet that must be discarded follows; the kex, host key, the
 ; two ciphers and the two MACs agreed (a MAC () under an AEAD cipher),
-; client-to-server first; then whether the client asked for extension
-; negotiation (RFC 8308).
+; client-to-server first; whether the client asked for extension
+; negotiation (RFC 8308); the two compressions agreed, client-to-server
+; first.
 (def %read-kexinit
   (fn (_ c p server? hostkeys)
     (def in (ssh-in (first p) 17 (- (rest p) 17)))
@@ -675,6 +791,10 @@
     (def ms (mac-for (List ref 3 chosen) m2))
     (when (if (if (null? mc) (not (%aead? (List ref 2 chosen))) #f) #t (if (null? ms) (not (%aead? (List ref 3 chosen))) #f))
       (Err raise 'value "ssh: the peer offers none of our MACs" ()))
+    (def offer (obj-ref (%slot c 18) %Z-OFFER))
+    (def zs (list (pick offer z1) (pick offer z2)))
+    (when (List any? null? zs)
+      (Err raise 'value "ssh: the peer offers none of our compression" ()))
     (def mac-text (fn (_ m) (if (null? m) "" (Str8 append " " m))))
     (ssh-trace c (Str8 append "kex " (first chosen) " hostkey " (List ref 1 chosen)
                           " cipher " (List ref 2 chosen) (mac-text mc) " / " (List ref 3 chosen) (mac-text ms)))
@@ -687,7 +807,7 @@
       (if follows
         (if (str=? (first kex) (first chosen)) (not (str=? (first hk) (List ref 1 chosen))) #t)
         #f))
-    (list wrong-guess (List append chosen (list mc ms)) (List any? (fn (_ n) (str=? n "ext-info-c")) kex))))
+    (list wrong-guess (List append chosen (list mc ms)) (List any? (fn (_ n) (str=? n "ext-info-c")) kex) zs)))
 
 ; SHA-256 of what an OUT holds, as 32 bytes.
 (def %sha256-out
@@ -748,7 +868,9 @@
     (def ic (%kexinit c hostkeys (list "ext-info-c")))
     (ssh-send-packet! c (first ic) (rest ic))
     (def is (ssh-expect! c ssh-msg-kexinit "KEXINIT"))
-    (def chosen (List ref 1 (%read-kexinit c is #f hostkeys)))
+    (def kx (%read-kexinit c is #f hostkeys))
+    (def chosen (List ref 1 kx))
+    (%agreed-compression! c (List ref 3 kx) #f)
     (def k (ssh-random 32))
     (def qc (X25519 base k))
     (def init (ssh-out))
@@ -814,6 +936,7 @@
     (ssh-send-packet! c (first is) (rest is))
     (def ic (ssh-expect! c ssh-msg-kexinit "KEXINIT"))
     (def agreed (%read-kexinit c ic #t offered))
+    (%agreed-compression! c (List ref 3 agreed) #t)
     (def alg (List ref 1 (List ref 1 agreed)))
     (def id (List find (fn (_ i) (List any? (fn (_ a) (str=? a alg)) (ssh-pubkey-algorithms (ssh-identity-pubkey i)))) ids))
     (def blob (ssh-pubkey-blob (ssh-identity-pubkey id)))
@@ -1012,7 +1135,7 @@
 
 (provide ssh/transport ssh-version-string ssh-open ssh-open-mux ssh-fill! ssh-fd ssh-session-id ssh-host-key ssh-server-sig-algs
   ssh-peer-version ssh-started ssh-agreed ssh-traffic ssh-hostkey-names ssh-pending? ssh-random ssh-engines!
-  ssh-kex-names ssh-cipher-names ssh-mac-names ssh-algorithms!
+  ssh-kex-names ssh-cipher-names ssh-mac-names ssh-algorithms! ssh-zlib ssh-compression! ssh-compression
   ssh-exchange-versions! ssh-send-packet! ssh-recv-packet! ssh-next-packet! ssh-take-packet! ssh-expect! ssh-kex! ssh-kex-server! ssh-auth-service! ssh-auth-publickey-query! ssh-auth-publickey! ssh-auth-password! ssh-auth-kbdint!
   ssh-msg-disconnect ssh-msg-global-request ssh-msg-request-success ssh-msg-request-failure ssh-msg-service-request ssh-msg-service-accept
   ssh-msg-userauth-request ssh-msg-userauth-failure ssh-msg-userauth-success ssh-trace

@@ -31,7 +31,8 @@ it is tested against.
 Every end speaks curve25519-sha256 and OpenSSH's ciphers, in its order:
 chacha20-poly1305@openssh.com, aes128-ctr, aes192-ctr, aes256-ctr,
 aes128-gcm@openssh.com and aes256-gcm@openssh.com, the CTR ciphers with
-hmac-sha2-256 or hmac-sha2-512, their -etm@openssh.com forms first.
+hmac-sha2-256 or hmac-sha2-512, their -etm@openssh.com forms first;
+and zlib@openssh.com compression, once a user is in, at either end.
 Authentication is by publickey and password, and from the client also
 keyboard-interactive (RFC 4256), with one session a
 connection: a command, or a shell on a terminal.  Keys and signatures:
@@ -55,7 +56,7 @@ nistp521), for host keys and user keys, at either end.
   `-N` SessionType none, `-s` SessionType
   subsystem (the command its name), `-n` StdinNull, `-A` and `-a`
   ForwardAgent,
-  `-q` and `-v` LogLevel, `-c` Ciphers, `-m` MACs, `-4` and `-6`
+  `-q` and `-v` LogLevel, `-c` Ciphers, `-m` MACs, `-C` Compression, `-4` and `-6`
   AddressFamily, `-b` BindAddress, `-e`
   EscapeChar, `-f` ForkAfterAuthentication (and StdinNull: once
   authenticated the connection goes on in the background); `-E` appends
@@ -114,7 +115,7 @@ nistp521), for host keys and user keys, at either end.
   ServerAliveInterval,
   ServerAliveCountMax, ChannelTimeout (`global=`), SendEnv, SetEnv,
   RemoteCommand, ProxyCommand, ProxyJump, SessionType, StdinNull,
-  LogLevel, Ciphers, MACs, IgnoreUnknown, AddressFamily (any or inet:
+  LogLevel, Ciphers, MACs, Compression, IgnoreUnknown, AddressFamily (any or inet:
   IPv6 is not served), BindAddress, EscapeChar, ForkAfterAuthentication,
   SyslogFacility, KnownHostsCommand (run without a shell before the key
   exchange and once the server's key is in, its output read as
@@ -139,7 +140,7 @@ nistp521), for host keys and user keys, at either end.
   or ECDSA, one of each type, OpenSSH's or Dropbear's file; one under a
   passphrase is refused, as OpenSSH's sshd refuses it), PidFile,
   AuthorizedKeysFile, PubkeyAcceptedAlgorithms, HostKeyAlgorithms,
-  Ciphers, MACs,
+  Ciphers, MACs, Compression (yes, delayed or no),
   PasswordAuthentication (checked against
   `/etc/shadow` with crypt(3)'s
   DES, `$1$`, `$5$` or `$6$`), PubkeyAuthentication,
@@ -262,7 +263,7 @@ container or x-os; where a connection has to be relied on, use OpenSSH.
 - **Not served:** certificates, security-key (`sk-`) key types,
   hostbased and GSSAPI authentication, keyboard-interactive at the
   server (OpenSSH's serves it only through PAM or BSD auth),
-  compression, IPv6, and a proxy client's agent forwarding, which
+  IPv6, and a proxy client's agent forwarding, which
   OpenSSH's master does not serve either.
 
 ## Install and test

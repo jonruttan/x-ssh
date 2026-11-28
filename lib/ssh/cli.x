@@ -58,7 +58,7 @@
             (Opts flag "-A" "Forward the agent, as ForwardAgent yes")
             (Opts flag "-a" "Do not forward the agent, as ForwardAgent no")
             (Opts arg "-b" "bind_address" "Connect from this local address, as BindAddress")
-            (Opts flag "-C" "Ask for compression (none is served)")
+            (Opts flag "-C" "Compress, as Compression yes")
             (Opts arg "-c" "cipher_spec" "The ciphers, as Ciphers: a comma-separated list")
             (Opts arg "-D" "[bind_address:]port" "Dynamic forwarding: a SOCKS proxy on the port, as DynamicForward")
             (Opts arg "-E" "log_file" "Append the log to log_file instead of standard error")

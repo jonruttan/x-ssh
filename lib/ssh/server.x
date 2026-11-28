@@ -34,7 +34,7 @@
 (import ssh/bytes ssh-out ssh-put-byte ssh-put-bool ssh-put-uint32 ssh-put-text ssh-put-string ssh-put-bytes ssh-put-names ssh-out-run
   ssh-in ssh-in-buf ssh-get-byte ssh-get-bool ssh-get-uint32 ssh-get-string ssh-get-bytes ssh-get-text ssh-copy)
 (import ssh/transport ssh-open ssh-fd ssh-session-id ssh-pending? ssh-engines! ssh-exchange-versions! ssh-kex-server! ssh-random
-  ssh-cipher-names ssh-mac-names ssh-algorithms!
+  ssh-cipher-names ssh-mac-names ssh-algorithms! ssh-zlib ssh-compression!
   ssh-send-packet! ssh-take-packet! ssh-expect! ssh-msg-service-request ssh-msg-service-accept
   ssh-msg-userauth-request ssh-msg-userauth-failure ssh-msg-userauth-success ssh-msg-disconnect
   ssh-msg-global-request ssh-msg-request-success ssh-msg-request-failure
@@ -216,6 +216,8 @@
           (pair (lit pubkey) (ssh-config-yes? lines "pubkeyauthentication" #t))
           (pair (lit ciphers) (ssh-config-algorithms lines "ciphers" ssh-cipher-names))
           (pair (lit macs) (ssh-config-algorithms lines "macs" ssh-mac-names))
+          ; delayed is yes's old name: either compresses once a user is in
+          (pair (lit compression) (not (str=? (ssh-config-choice lines "compression" (list "yes" "delayed" "no") "yes") "no")))
           (pair (lit hostkey-algs) (ssh-config-algorithms lines "hostkeyalgorithms"
                                      (list "ssh-ed25519" "ecdsa-sha2-nistp256" "ecdsa-sha2-nistp384" "ecdsa-sha2-nistp521" "rsa-sha2-512" "rsa-sha2-256")))
           (pair (lit pubkey-algs) (ssh-config-algorithms lines "pubkeyacceptedalgorithms"
@@ -253,6 +255,7 @@
                 (Str8 append "pubkeyacceptedalgorithms " (Str8 join "," (%get s (lit pubkey-algs))))
                 (Str8 append "ciphers " (Str8 join "," (%get s (lit ciphers))))
                 (Str8 append "macs " (Str8 join "," (%get s (lit macs))))
+                (Str8 append "compression " (yn (%get s (lit compression))))
                 (Str8 append "hostkeyalgorithms " (Str8 join "," (%get s (lit hostkey-algs))))
                 (Str8 append "permitemptypasswords " (yn (%get s (lit empty))))
                 (Str8 append "permitrootlogin " (%get s (lit root)))
@@ -1122,6 +1125,7 @@
       (guard (e ())
         (ssh-exchange-versions! c)
         (ssh-algorithms! c (%get s (lit ciphers)) (%get s (lit macs)))
+        (ssh-compression! c (if (%get s (lit compression)) (list "none" ssh-zlib) (list "none")))
         (ssh-kex-server! c keys (%get s (lit hostkey-algs)))
         (%authenticate c s from)))
     (if (null? user)

@@ -23,6 +23,9 @@
 #            yes the file removed and the socket made
 #   refused  the server refusing a remote socket in a file's place:
 #            OpenSSH's client's warning
+#   compression  -C: 120000-odd bytes of text and random bytes through
+#            cat both ways under zlib@openssh.com, the trace saying so;
+#            Compression no leaving it off
 #
 # A socket stand-in, nc -lU, serves one connection: each is started
 # after its listener is found, so the probe does not take it.
@@ -185,6 +188,23 @@ if [ "$ours" = "$theirs" ] && [ -n "$ours" ]; then
 else
 	echo "$ours" > "$fx/client.err"
 	fail "refused: x-ssh said the above, OpenSSH '$theirs'"
+fi
+
+# compression: -C against OpenSSH's server, text and random bytes each way
+awk 'BEGIN { for (i = 0; i < 20000; i++) printf "line %d of the compressed text\n", i }' > "$fx/z.in"
+head -c 100000 /dev/urandom >> "$fx/z.in"
+want=$(cksum < "$fx/z.in")
+got=$(xssh -v -C 127.0.0.1 cat < "$fx/z.in" 2> "$fx/client.err" | cksum)
+if [ "$got" = "$want" ] && grep -q "compression zlib@openssh.com in, zlib@openssh.com out" "$fx/client.err"; then
+	echo "ok: compression -- -C carries $(wc -c < "$fx/z.in" | tr -d ' ') bytes both ways under zlib@openssh.com"
+else
+	fail "compression: cksum '$got', wanted '$want'"
+fi
+got=$(xssh -o Compression=no -v 127.0.0.1 echo plain < /dev/null 2> "$fx/client.err")
+if [ "$got" = "plain" ] && ! grep -q "compression zlib" "$fx/client.err"; then
+	echo "ok: compression -- Compression no leaves it off"
+else
+	fail "compression: Compression no read '$got'"
 fi
 
 exit $failed

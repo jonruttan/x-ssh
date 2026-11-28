@@ -24,6 +24,8 @@
 #   input     200000 random bytes through `cksum` on the server's side
 #   ciphers   each cipher and MAC served carries 200000 bytes through `cat`
 #             and back: OpenSSH's client, x-ssh's, and Dropbear's AES-CTR
+#   compression  -C: text and random bytes through `cat` and back under
+#             zlib@openssh.com, OpenSSH's client and x-ssh's
 #   sftp      OpenSSH's sftp and scp (SFTP) through Subsystem internal-sftp;
 #             sftp-server -R as a Subsystem command refuses a put; an
 #             unconfigured subsystem is refused, as the log says
@@ -235,6 +237,20 @@ if [ -z "$bad" ]; then
 	echo "ok: ciphers -- every cipher and MAC carries 200000 bytes both ways, for OpenSSH's client, x-ssh's and Dropbear's"
 else
 	fail "ciphers:$bad"
+fi
+
+# compression: -C, text and random bytes through `cat` and back, by
+# OpenSSH's client, which says it agreed zlib@openssh.com each way, and x-ssh's
+awk 'BEGIN { for (i = 0; i < 20000; i++) printf "line %d of the compressed text\n", i }' > "$fx/z.in"
+cat "$fx/input" >> "$fx/z.in"
+zwant=$(cksum < "$fx/z.in")
+o=$(ssh -F none -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p "$port" -v -C -i "$fx/osshkey" "$user@127.0.0.1" cat < "$fx/z.in" 2> "$fx/client.err" | cksum)
+agreed=$(grep -c "compression: zlib@openssh.com" "$fx/client.err")
+x=$(xssh -C 127.0.0.1 cat < "$fx/z.in" 2>> "$fx/client.err" | cksum)
+if [ "$o" = "$zwant" ] && [ "$x" = "$zwant" ] && [ "$agreed" = 2 ]; then
+	echo "ok: compression -- -C carries $(wc -c < "$fx/z.in" | tr -d ' ') bytes both ways under zlib@openssh.com, for OpenSSH's client and x-ssh's"
+else
+	fail "compression: OpenSSH '$o', x-ssh '$x', wanted '$zwant'; zlib agreed $agreed ways"
 fi
 
 # sftp: Subsystem sftp internal-sftp served to OpenSSH's sftp (a file put

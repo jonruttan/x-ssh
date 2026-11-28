@@ -26,7 +26,7 @@
 (import ssh/bytes ssh-copy)
 (import ssh/transport ssh-open ssh-open-mux ssh-host-key ssh-engines! ssh-exchange-versions! ssh-kex!
   ssh-auth-service! ssh-auth-publickey-query! ssh-auth-publickey! ssh-auth-password! ssh-auth-kbdint! ssh-hostkey-names ssh-server-sig-algs
-  ssh-kex-names ssh-cipher-names ssh-mac-names ssh-algorithms!)
+  ssh-kex-names ssh-cipher-names ssh-mac-names ssh-algorithms! ssh-zlib ssh-compression! ssh-compression)
 (import ssh/session ssh-session-run! ssh-session-control-listen ssh-disconnect!)
 (import ssh/keys ssh-key-file-sealed? ssh-key-wrong-passphrase ssh-identity-read-file ssh-pubkey-of-key-file)
 (import ssh/known ssh-known-name ssh-known-check ssh-known-types ssh-known-add!)
@@ -139,7 +139,7 @@
         (List append keys (list "rsa-sha2-256" "rsa-sha2-512")))
       ((str=? q "sig") sigs)
       ((str=? q "protocol-version") (list "2"))
-      ((str=? q "compression") (list "none"))
+      ((str=? q "compression") (list "none" ssh-zlib))
       ((str=? q "help") (list "cipher" "cipher-auth" "compression" "kex" "key" "key-cert" "key-plain" "key-sig" "mac" "protocol-version" "sig"))
       (#t (lit unsupported)))))
 
@@ -419,6 +419,7 @@
           (pair (lit strict) (ssh-config-choice lines "stricthostkeychecking" (list "yes" "no" "off" "ask" "accept-new") "ask"))
           (pair (lit alias) (ssh-config-one lines "hostkeyalias" ()))
           (pair (lit batch) (ssh-config-yes? lines "batchmode" #f))
+          (pair (lit compression) (ssh-config-yes? lines "compression" #f))
           (pair (lit password) (ssh-config-yes? lines "passwordauthentication" #t))
           ; ChallengeResponseAuthentication is its old name, the first said of either taken
           (pair (lit kbdint) (ssh-config-yes? (List map (fn (_ l) (if (str=? (first l) "challengeresponseauthentication") (pair "kbdinteractiveauthentication" (rest l)) l)) lines)
@@ -478,6 +479,7 @@
                 (Str8 append "globalknownhostsfile " (Str8 join " " (%get s (lit global))))
                 (Str8 append "stricthostkeychecking " (%get s (lit strict)))
                 (Str8 append "batchmode " (yn (%get s (lit batch))))
+                (Str8 append "compression " (yn (%get s (lit compression))))
                 (Str8 append "kbdinteractiveauthentication " (yn (%get s (lit kbdint))))
                 (Str8 append "passwordauthentication " (yn (%get s (lit password))))
                 (Str8 append "pubkeyauthentication " (yn (%get s (lit pubkey))))
@@ -1176,6 +1178,7 @@
           (guard (e (Err raise 'value "Connection closed by UNKNOWN port 65535\r" ()))
             (ssh-exchange-versions! c)))
         (ssh-algorithms! c (%get s (lit ciphers)) (%get s (lit macs)))
+        (ssh-compression! c (if (%get s (lit compression)) (list ssh-zlib "none") (list "none")))
         (ssh-kex! c (%hostkey-order s))
         (if (not (%host-key-ok c s addr quiet tr))
           (do (Socket close fd) 255)
